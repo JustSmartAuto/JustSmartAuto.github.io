@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>技术专题：ViDi EL Classify 与 EL Segment 的应用边界 | JustSmartAuto</title>
+<meta name="description" content="结合某马达产线项目 17 个工位的实际应用，总结 Cognex ViDi EL Classify 与 EL Segment 的适用场景与误判风险。">
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <h1>JustSmartAuto Inc.</h1>
+    <p class="tagline">技术博客 · 机器视觉与 AI 外观检测</p>
+  </div>
+</header>
+
+<main class="wrap">
+  <a class="back" href="../index.html#posts">&larr; 返回文章列表</a>
+
+  <article class="card">
+    <h1 style="font-size:1.5rem;">技术专题：ViDi EL Classify 与 EL Segment 的应用边界</h1>
+    <p class="meta">发布日期：2026-05-24 ｜ 分类：技术专题</p>
+
+    <p>
+      在某马达产线系列方案（共 17 个检测工位）中，Cognex ViDi 深度学习的两个工具被大量使用：
+      <strong>EL Classify</strong>（蓝色分类工具）与 <strong>EL Segment</strong>（红色分割工具）。
+      本文结合项目实践，总结两者的分工边界、组合策略与常见误判风险。
+    </p>
+
+    <h2>一、工具定位</h2>
+    <h3>EL Classify：图像级「是什么」的判断</h3>
+    <ul>
+      <li>对整个图像或关注区域输出一个类别标签（OK / NG / 正反 / 型号……）。</li>
+      <li>训练成本低，适合类别差异明显、不需要定位缺陷位置的场景。</li>
+      <li>典型应用（本项目）：马达上料防混料、胶盖铁盖正反与混料识别、点油「有无」判断、介子有无安装。</li>
+    </ul>
+    <h3>EL Segment：像素级「在哪里、有多少」的分析</h3>
+    <ul>
+      <li>对缺陷或目标区域做像素级分割，可输出面积、位置、尺寸等量化的检测结果。</li>
+      <li>适合缺陷形态不规则、需要定量判定（如油量达标线）的场景。</li>
+      <li>典型应用（本项目）：各处点油的油量测量、热压热铆点划痕/变形/毛线缺陷、铁齿轮压痕裂痕尺寸测量、圆形端面展开后的点油检测。</li>
+    </ul>
+
+    <h2>二、组合策略：交叉验证降低误判</h2>
+    <p>本项目反复出现的一个模式是「<strong>Classify 判有无 + Segment 判多少</strong>」双工具协同：</p>
+    <ul>
+      <li><strong>涡轮杆点油：</strong>EL Segment 测油量，EL Classify 判有无，两者结果交叉验证；</li>
+      <li><strong>胶齿轮侧面金属柱：</strong>Classify 判有无，Segment 判油量是否达标；</li>
+      <li><strong>介子工位：</strong>有无安装（Classify）与漏加油脂（Segment）一次拍照双重判定。</li>
+    </ul>
+    <p>
+      这样做的好处是：Classify 提供了稳定的「全局兜底」，Segment 提供了量化阈值，
+      当油量处在达标线附近时，两个工具结果不一致可以直接触发人工复核，而不是简单放行或误杀。
+    </p>
+
+    <h2>三、常见误判风险与工程对策</h2>
+    <table>
+      <tr><th>风险</th><th>出处</th><th>对策</th></tr>
+      <tr><td>点油量过少时被误判为 OK</td><td>多处点油工位均注明「过少有误判风险」</td><td>与点油工艺联动保证下限；双工具交叉验证；NG 样品充分入库训练</td></tr>
+      <tr><td>金属原色背景导致误判率升高</td><td>介子工位</td><td>强制黑色背景打光；必要时加光源控制器稳定亮度</td></tr>
+      <tr><td>换型后工作距离变化导致成像漂移</td><td>全部工位</td><td>换型规范：相机/镜头/光源到产品的工作距离保持不变；按产品号调用检测程序</td></tr>
+      <tr><td>拍照震动引入运动模糊</td><td>全部工位</td><td>机构拍照位需稳定、不可大震动；线扫工位要求旋转同轴度 &gt; 0.2</td></tr>
+    </table>
+
+    <h2>四、选型速查</h2>
+    <ul>
+      <li>只关心「对不对 / 有没有 / 是哪款」→ <strong>EL Classify</strong>；</li>
+      <li>关心「缺多少 / 在哪里 / 多大尺寸」→ <strong>EL Segment</strong>；</li>
+      <li>两者都需要 → 先 Classify 兜底，再 Segment 定量；</li>
+      <li>定位与角度一律交给 <strong>PatMax 图案匹配</strong>，不要让深度学习干几何的活。</li>
+    </ul>
+  </article>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <p>&copy; 2026 广州市捷思智能科技有限公司 JustSmartAuto Inc. · 康耐视官方授权代理商 · 专业AI外观解决方案提供商</p>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>某马达产线视觉项目（一）：马达、胶盖与热压热铆工位 | JustSmartAuto</title>
+<meta name="description" content="某马达产线 6 项视觉检测需求方案评估：马达上料防错、牙箱孔点油、铆压口尺寸、蜗杆齿轮点油、热压热铆点缺陷、胶盖铁盖混料识别。">
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <h1>JustSmartAuto Inc.</h1>
+    <p class="tagline">技术博客 · 机器视觉与 AI 外观检测</p>
+  </div>
+</header>
+
+<main class="wrap">
+  <a class="back" href="../index.html#posts">&larr; 返回文章列表</a>
+
+  <article class="card">
+    <h1 style="font-size:1.5rem;">某马达产线视觉项目（一）：马达、胶盖与热压热铆工位</h1>
+    <p class="meta">发布日期：2026-05-23 ｜ 作者：JustSmartAuto 技术团队｜ 分类：解决方案</p>
+
+    <p>
+      本文是某马达产线视觉检测系列的第一篇，针对马达、胶盖、蜗杆齿轮与热压热铆共 6 项检测需求，
+      给出完整的光学成像选型（相机 / 镜头 / 光源）、算法方案（PatMax + ViDi 深度学习）与节拍评估。
+      方案遵循两条通用约束：<strong>拍照时机构需稳定、不可大震动</strong>；<strong>换型时相机、镜头、光源到产品的工作距离保持不变</strong>。
+    </p>
+
+    <h2>1. 马达上料检测（透明吸塑盒）</h2>
+    <ul>
+      <li><strong>需求：</strong>透明吸塑盒内马达上料的方向识别、定位与防错（九点定位）。</li>
+      <li><strong>视野：</strong>164 × 120 mm。</li>
+      <li><strong>硬件配置：</strong>1200 万像素相机 IS8912MX + JUS-COB2528B 镜头 + JUS-RS12060-W 环形光源，工作距离 WD = 304 ± 20 mm。</li>
+      <li><strong>算法方案：</strong>PatMax 图案匹配定位 + ViDi EL Classify 混料检测。</li>
+      <li><strong>精度 / 节拍：</strong>0.4 mm/pixel，0.5 s。</li>
+    </ul>
+    <blockquote>结论：可稳定检测，检测结果可直接用于引导抓取。</blockquote>
+
+    <h2>2. 牙箱孔点油检测</h2>
+    <ul>
+      <li><strong>需求：</strong>牙箱孔位点油检测，兼容蓝色与白色两种润滑油。</li>
+      <li><strong>视野：</strong>73 × 61 mm。</li>
+      <li><strong>硬件配置：</strong>500 万像素 IS8905MX + JUS-COB1628B 镜头 + JUS-RS5390-W 环形光源，WD = 175 ± 25 mm。</li>
+      <li><strong>算法方案：</strong>PatMax 定位 + ViDi EL Segment 分割测油量。</li>
+      <li><strong>精度 / 节拍：</strong>0.43 mm/pixel，0.5 s。</li>
+    </ul>
+    <blockquote>结论：油量达标可检出；油量过少存在误判风险，建议点油工艺保证下限。</blockquote>
+
+    <h2>3. 马达铆压口正 / 侧面尺寸检测</h2>
+    <ul>
+      <li><strong>需求：</strong>铆压口正、侧面尺寸测量，精度 ±0.1 mm，兼容 10 款产品。</li>
+      <li><strong>视野：</strong>47.6 × 39.8 mm。</li>
+      <li><strong>硬件配置：</strong>IS8905MX 智能变焦相机 + JUS-WTL190-0141X18 变焦镜头 + JUS-RS12090-W 环形光源，WD = 190 ± 5 mm，安装倾角 75°；需配套工控机 IPC-H610 / i7-7700 / 16G。</li>
+      <li><strong>算法方案：</strong>图案匹配定位 + ViDi EL Segment / EL Classify。</li>
+      <li><strong>精度 / 节拍：</strong>0.18 mm/pixel；普通物料 0.5 s，遮挡物料需两次拍照 0.85 s。</li>
+    </ul>
+    <blockquote>结论：按产品调用不同检测程序即可兼容 10 款产品。</blockquote>
+
+    <h2>4. 蜗杆齿轮底面点油检测</h2>
+    <ul>
+      <li><strong>视野：</strong>92 × 77 mm。</li>
+      <li><strong>硬件配置：</strong>500 万像素 IS8905MX + JUS-COB1628B 镜头 + JUS-RS10090-W 环形光源，WD = 270 ± 15 mm。</li>
+      <li><strong>算法方案：</strong>图案匹配定位 + ViDi EL Classify / EL Segment 分区域检测。</li>
+      <li><strong>精度 / 节拍：</strong>0.4 mm/pixel，0.7 s。</li>
+    </ul>
+    <blockquote>结论同需求 2：油量达标可检出，过少有误判风险。</blockquote>
+
+    <h2>5. 热压热铆点缺陷检测</h2>
+    <ul>
+      <li><strong>需求：</strong>铆点划痕、变形、毛线等不良检测，被测物为黑色哑光铝材（低对比度难点）。</li>
+      <li><strong>视野：</strong>129 × 108 mm。</li>
+      <li><strong>硬件配置：</strong>IS8905MX + JUS-COB1228B 镜头 + 双光源（JUS-COS100-W 同轴光 + JUS-RS12050-W 环形光）+ 光源控制器。</li>
+      <li><strong>算法方案：</strong>图案匹配定位 + ViDi EL Segment 缺陷分割。</li>
+      <li><strong>精度 / 节拍：</strong>0.55 mm/pixel，0.85 s。</li>
+    </ul>
+    <blockquote>结论：同轴光 + 环形光的双光源组合可有效凸显黑色哑光表面的缺陷特征，可准确判断。</blockquote>
+
+    <h2>6. 胶盖 / 铁盖正反、方向与混料检测</h2>
+    <ul>
+      <li><strong>视野：</strong>134 × 112 mm。</li>
+      <li><strong>算法方案：</strong>ViDi EL Classify 区分正反与混料 + 图案匹配识别方向（可输出角度值）。</li>
+      <li><strong>精度 / 节拍：</strong>0.54 mm/pixel，0.55 s。</li>
+    </ul>
+    <blockquote>结论：正反、方向、混料三类需求均可行。</blockquote>
+
+    <h2>方案总览</h2>
+    <table>
+      <tr><th>工位</th><th>相机</th><th>镜头</th><th>光源</th><th>算法</th><th>精度</th><th>节拍</th></tr>
+      <tr><td>马达上料</td><td>IS8912MX</td><td>JUS-COB2528B</td><td>JUS-RS12060-W</td><td>PatMax + EL Classify</td><td>0.4 mm/px</td><td>0.5 s</td></tr>
+      <tr><td>牙箱孔点油</td><td>IS8905MX</td><td>JUS-COB1628B</td><td>JUS-RS5390-W</td><td>PatMax + EL Segment</td><td>0.43 mm/px</td><td>0.5 s</td></tr>
+      <tr><td>铆压口尺寸</td><td>IS8905MX 变焦</td><td>JUS-WTL190-0141X18</td><td>JUS-RS12090-W</td><td>PatMax + EL Segment/Classify</td><td>0.18 mm/px</td><td>0.5~0.85 s</td></tr>
+      <tr><td>蜗杆齿轮点油</td><td>IS8905MX</td><td>JUS-COB1628B</td><td>JUS-RS10090-W</td><td>PatMax + EL Classify/Segment</td><td>0.4 mm/px</td><td>0.7 s</td></tr>
+      <tr><td>热压热铆点</td><td>IS8905MX</td><td>JUS-COB1228B</td><td>JUS-COS100-W + JUS-RS12050-W</td><td>PatMax + EL Segment</td><td>0.55 mm/px</td><td>0.85 s</td></tr>
+      <tr><td>胶盖铁盖</td><td>IS8905MX</td><td>按视野选型</td><td>按视野选型</td><td>EL Classify + PatMax</td><td>0.54 mm/px</td><td>0.55 s</td></tr>
+    </table>
+
+    <p>
+      本篇工位的节拍均在 0.5 s 级别，全部基于 Cognex In-Sight 平台一体化部署，无需额外工控机（除铆压口工位因程序切换与图像处理量较大外）。
+      下一篇将介绍铁齿轮与胶齿轮产线的 4 项检测方案。
+    </p>
+  </article>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <p>&copy; 2026 广州市捷思智能科技有限公司 JustSmartAuto Inc. · 康耐视官方授权代理商 · 专业AI外观解决方案提供商</p>
+  </div>
+</footer>
+
+</body>
+</html>
