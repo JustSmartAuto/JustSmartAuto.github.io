@@ -1,0 +1,9 @@
+# 原始方案资料不进仓库，避免公开
+_extracted/
+*.pdf
+
+# agent
+kimi*.md
+
+# 密钥
+.github/token
