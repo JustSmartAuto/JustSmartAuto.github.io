@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SvgOverlayPy — SVG 叠加图生成器</title>
+  <link rel="icon" href="assets/overlay_icon.png">
+  <link rel="stylesheet" href="assets/02-windows-95.css">
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 24px 16px;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: var(--font);
+      font-size: 13px;
+    }
+    .desk { max-width: 1040px; margin: 0 auto; }
+
+    .win {
+      background: var(--chrome);
+      border: 2px solid;
+      border-color: var(--chrome-lighter) var(--chrome-darker) var(--chrome-darker) var(--chrome-lighter);
+      box-shadow: 3px 3px 0 rgba(0, 0, 0, 0.45);
+      padding: 2px;
+    }
+    .caption {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--title);
+      color: var(--title-text);
+      font-weight: 700;
+      padding: 4px 8px;
+    }
+    .caption img { width: 16px; height: 16px; border-radius: 2px; }
+    .caption .ver { margin-left: auto; font-weight: 400; font-size: 11px; }
+
+    .body { padding: 16px; }
+
+    h1 { font-size: 20px; margin: 0 0 4px; }
+    .lead { margin: 0 0 16px; line-height: 1.7; }
+    .lead b { color: var(--title); }
+
+    .shot {
+      display: block;
+      width: 100%;
+      border: 2px solid;
+      border-color: var(--chrome-dark) var(--chrome-lighter) var(--chrome-lighter) var(--chrome-dark);
+      background: #000;
+    }
+    .shot-note { font-size: 11px; color: #404040; margin: 6px 2px 0; }
+
+    fieldset {
+      border: 1px solid var(--chrome-dark);
+      box-shadow: inset 1px 1px 0 var(--chrome-lighter);
+      margin: 18px 0 0;
+      padding: 12px 14px 14px;
+    }
+    legend { padding: 0 6px; font-weight: 700; }
+
+    .features {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+      gap: 10px;
+      margin-top: 4px;
+    }
+    .card {
+      background: var(--chrome-light);
+      border: 2px solid;
+      border-color: var(--chrome-lighter) var(--chrome-dark) var(--chrome-dark) var(--chrome-lighter);
+      padding: 10px 12px;
+      line-height: 1.65;
+    }
+    .card h3 { margin: 0 0 4px; font-size: 13px; color: var(--title); }
+    .card p { margin: 0; font-size: 12px; }
+
+    pre {
+      margin: 4px 0 0;
+      padding: 10px 12px;
+      background: var(--chrome-lighter);
+      border: 2px solid;
+      border-color: var(--chrome-dark) var(--chrome-lighter) var(--chrome-lighter) var(--chrome-dark);
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 12.5px;
+      line-height: 1.7;
+      overflow: auto;
+    }
+    code { font-family: Consolas, "Courier New", monospace; background: var(--chrome-lighter); padding: 0 4px; }
+
+    .flow { line-height: 2; margin: 4px 0 0; }
+    .flow .arrow { color: var(--chrome-dark); font-weight: 700; padding: 0 6px; }
+    .flow .step {
+      display: inline-block;
+      background: var(--chrome-light);
+      border: 1px solid var(--chrome-dark);
+      padding: 2px 10px;
+    }
+
+    .statusbar {
+      display: flex;
+      gap: 2px;
+      padding: 2px;
+      margin-top: 14px;
+    }
+    .statusbar span {
+      font-size: 11px;
+      padding: 3px 8px;
+      background: var(--chrome);
+      border: 2px solid;
+      border-color: var(--chrome-dark) var(--chrome-lighter) var(--chrome-lighter) var(--chrome-dark);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .statusbar .grow { flex: 1; }
+  </style>
+</head>
+<body>
+<div class="desk">
+  <div class="win">
+    <div class="caption">
+      <img src="assets/overlay_icon.png" alt="logo">
+      <span>SvgOverlayPy 叠加图生成器 — SvgOverlayPy.exe</span>
+      <span class="ver">v26.11.4.1</span>
+    </div>
+    <div class="body">
+      <h1>SvgOverlayPy — SVG 叠加图生成器</h1>
+      <p class="lead">
+        把检测相机输出的<b>「底图 + 同名标注 SVG」</b>合成为一张高分辨率叠加图：
+        按原图 <b>3 倍 DPI</b> 栅格化，保存为 <b>{文件名}_叠加图.jpg</b>（JPEG 品质 95），
+        方便肉眼核对焊缝检测 NG 标注。Windows 95 风格界面，基于 pywebview / WebView2 渲染。
+      </p>
+
+      <img class="shot" src="assets/screenshot1.png" alt="SvgOverlayPy 界面效果图">
+      <p class="shot-note">效果图：左列为「图片 + 同名 SVG」数据文件，右侧为 3 倍输出尺寸的叠加预览。</p>
+
+      <fieldset>
+        <legend>数据规则</legend>
+        <p class="flow">
+          <span class="step">图片（格式不限）</span><span class="arrow">+</span><span class="step">同名 .svg</span><span class="arrow">→</span><span class="step">{文件名}_叠加图.jpg（3× · 品质 95）</span>
+        </p>
+        <p class="lead" style="margin-bottom:0">
+          直接把文件夹<b>拖入窗口</b>即可扫描配对（主名不区分大小写）；没有 SVG 配对的图片不计入，
+          已生成的叠加图自动跳过，输出与原图同目录、同名覆盖。
+        </p>
+      </fieldset>
+
+      <fieldset>
+        <legend>特性</legend>
+        <div class="features">
+          <div class="card">
+            <h3>3 倍 DPI 栅格化</h3>
+            <p>SVG 以 3 倍尺寸在 WebView2 canvas 中绘制，文字与标注线远比原图清晰；438×832 的底图输出 1314×2496。</p>
+          </div>
+          <div class="card">
+            <h3>拖入文件夹即用</h3>
+            <p>Win32 WM_DROPFILES 原生拖放，图片格式不限（Pillow 支持即可），必须存在同名 SVG 才算一对有效数据。</p>
+          </div>
+          <div class="card">
+            <h3>实时叠加预览</h3>
+            <p>点击列表行即可查看「原图 + SVG」叠加效果，可单独开关叠加层；生成后状态实时回填到列表。</p>
+          </div>
+          <div class="card">
+            <h3>批量生成可取消</h3>
+            <p>逐个合成、进度条与日志实时反馈；先写 .part 再原子重命名，失败单条跳过不影响整体。</p>
+          </div>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>快速开始</legend>
+        <pre>uv sync                                # 安装依赖（Python 3.13+）
+uv run svg-overlay                     # 启动应用
+uv run svg-overlay --folder D:/pics    # 启动时直接载入文件夹
+uv run python build_exe.py             # 打包 dist/SvgOverlayPy_{时间戳}.exe</pre>
+      </fieldset>
+    </div>
+    <div class="statusbar">
+      <span class="grow">图片 + 同名 SVG → 3 倍分辨率叠加图</span>
+      <span>pywebview / WebView2</span>
+      <span>Pillow</span>
+      <span>Windows 95 UI</span>
+    </div>
+  </div>
+</div>
+</body>
+</html>

@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SvgOverlayPy 叠加图生成器</title>
+  <link rel="icon" href="overlay_icon.png">
+  <link rel="stylesheet" href="02-windows-95.css">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div class="app">
+  <section class="win">
+    <div class="caption">
+      <img class="caption-icon" src="overlay_icon.png" alt="">
+      <span class="caption-title">SvgOverlayPy 叠加图生成器</span>
+      <span class="caption-version" id="caption-version">v26.11.4.1</span>
+    </div>
+
+    <nav class="menubar">
+      <button type="button" class="menu-title" data-menu="file">文件</button>
+      <button type="button" class="menu-title" data-menu="help">帮助</button>
+      <div class="menu-popup" data-popup="file" hidden>
+        <button type="button" data-cmd="choose">打开文件夹…</button>
+        <button type="button" data-cmd="refresh">重新扫描</button>
+        <button type="button" data-cmd="open">打开输出目录</button>
+        <div class="menu-sep"></div>
+        <button type="button" data-cmd="quit">退出</button>
+      </div>
+      <div class="menu-popup" data-popup="help" hidden>
+        <button type="button" data-cmd="guide">使用说明…</button>
+        <button type="button" data-cmd="about">关于 SvgOverlayPy…</button>
+      </div>
+    </nav>
+
+    <div class="toolbar">
+      <button type="button" class="btn" id="btn-choose">打开文件夹…</button>
+      <button type="button" class="btn" id="btn-generate" disabled>开始生成</button>
+      <button type="button" class="btn" id="btn-cancel" disabled>取消</button>
+      <button type="button" class="btn" id="btn-open">打开输出目录</button>
+      <div class="folder-bar sunken">
+        <span class="folder-icon" aria-hidden="true"></span>
+        <span class="folder-path" id="folder-path">未选择文件夹 —— 可直接把文件夹拖入本窗口</span>
+      </div>
+    </div>
+
+    <div class="main">
+      <fieldset class="group list-panel">
+        <legend>数据文件（图片 + 同名 SVG）</legend>
+        <div class="list sunken" id="list">
+          <div class="empty" id="list-empty">
+            尚未载入文件夹
+            <small>把图片所在文件夹拖入窗口，或点击「打开文件夹…」</small>
+          </div>
+          <table class="grid" id="grid" hidden>
+            <thead>
+              <tr><th>文件名</th><th class="col-fmt">格式</th><th class="col-size">尺寸</th><th class="col-out">输出</th></tr>
+            </thead>
+            <tbody id="rows"></tbody>
+          </table>
+        </div>
+        <div class="list-footer">
+          <label class="check"><input type="checkbox" id="show-overlay" checked><span>叠加层</span></label>
+          <span class="hint" id="list-hint">有效数据 0 对</span>
+        </div>
+      </fieldset>
+
+      <fieldset class="group preview-panel">
+        <legend>叠加预览</legend>
+        <div class="preview-stage sunken" id="preview-stage">
+          <div class="empty" id="preview-empty">
+            选择左侧文件查看叠加效果
+            <small>预览为原图 + 同名 SVG，导出尺寸为 3 倍</small>
+          </div>
+          <div class="frame" id="frame" hidden>
+            <img id="img-base" alt="">
+            <img id="img-svg" alt="">
+          </div>
+        </div>
+        <div class="preview-info">
+          <div class="info-row"><span class="label">原图</span><span class="value" id="info-size">—</span></div>
+          <div class="info-row"><span class="label">输出</span><span class="value" id="info-out">—</span></div>
+          <div class="info-row"><span class="label">文件</span><span class="value ellipsis" id="info-name">—</span></div>
+        </div>
+      </fieldset>
+    </div>
+
+    <fieldset class="group log-panel">
+      <legend>日志</legend>
+      <div class="log sunken" id="log"></div>
+    </fieldset>
+
+    <div class="progress-row">
+      <div class="progress sunken"><div class="progress-fill" id="progress-fill"></div></div>
+      <span class="progress-text" id="progress-text">0 / 0</span>
+    </div>
+
+    <div class="statusbar">
+      <span class="status-grow" id="status-left">就绪</span>
+      <span class="status-mid" id="status-mid">0 对</span>
+      <span class="status-right" id="status-right">3× DPI · JPEG 95%</span>
+    </div>
+  </section>
+</div>
+
+<div class="modal" id="modal" hidden>
+  <div class="dialog">
+    <div class="caption">
+      <span class="caption-title" id="dialog-title">提示</span>
+    </div>
+    <div class="dialog-body" id="dialog-body"></div>
+    <div class="dialog-footer">
+      <button type="button" class="btn" id="dialog-close">确定</button>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
