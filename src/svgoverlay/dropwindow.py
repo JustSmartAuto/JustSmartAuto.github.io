@@ -53,7 +53,7 @@ def open_drop_window(on_folder: Callable[[str], None]) -> None:
                 if folder.is_dir():
                     status.configure(text=f"已选择：{folder}")
                     try:
-                        on_folder(str(folder))
+                        on_folder([str(folder)])
                     except Exception:  # noqa: BLE001
                         logger.exception("处理拖入文件夹失败")
                     root.after(300, root.destroy)

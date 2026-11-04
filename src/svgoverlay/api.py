@@ -250,6 +250,8 @@ class OverlayApi:
         return {"ok": True}
 
     def handle_drop(self, paths: list[str]) -> None:
+        if isinstance(paths, str):  # 回调可能传单个字符串，避免被逐字符遍历
+            paths = [paths]
         target: Path | None = None
         for raw in paths:
             candidate = Path(raw)
