@@ -107,7 +107,9 @@ def _stage_files(base: Path, compare: Path, diff_output: Path) -> _Staged:
 
     s_base = base if _is_ascii(str(base)) else _copy_in(base, "base")
     s_compare = compare if _is_ascii(str(compare)) else _copy_in(compare, "compare")
-    s_out = diff_output if _is_ascii(str(diff_output)) else stage_dir / "out.png"
+    # 输出必须落在暂存目录内：子进程以 cwd=暂存目录 + 相对文件名调用，
+    # 否则会写到暂存目录里而非 diff_output，拷回时被误删（0 字节文件）。
+    s_out = stage_dir / _temp_name(diff_output, "diff")
 
     return _Staged(dir=stage_dir, base=s_base, compare=s_compare, out=s_out)
 
