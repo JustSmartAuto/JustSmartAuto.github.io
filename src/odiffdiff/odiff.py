@@ -93,20 +93,57 @@ def _make_stage_dir() -> Path:
     return Path(tempfile.mkdtemp(prefix="odiff_stage_"))
 
 
+def _bmp_needs_png(path: Path) -> bool:
+    """判断 BMP 是否需要先转 PNG。
+
+    odiff 的 BMP 解码只支持 24/32 位、BI_RGB / BI_BITFIELDS；
+    工业相机常见的 8 位灰度 BMP、RLE 压缩 BMP 会报 "Could not load base image"。
+    """
+    if path.suffix.lower() != ".bmp":
+        return False
+    try:
+        with path.open("rb") as f:
+            head = f.read(34)
+    except OSError:
+        return False
+    if len(head) < 34 or head[:2] != b"BM":
+        return False
+    bit_count = int.from_bytes(head[28:30], "little")
+    compression = int.from_bytes(head[30:34], "little")
+    return bit_count not in (24, 32) or compression not in (0, 3)
+
+
+def _bmp_to_png(src: Path, dst: Path) -> None:
+    """用 Pillow 把 odiff 不支持的 BMP 变体转成 PNG（统一转为 RGB）。"""
+    from PIL import Image
+
+    with Image.open(src) as im:
+        im.convert("RGB").save(dst, "PNG")
+
+
 def _stage_files(base: Path, compare: Path, diff_output: Path) -> _Staged:
-    """把含非 ASCII 的输入/输出路径复制到纯 ASCII 文件名的临时目录。"""
+    """把输入复制/转换到纯 ASCII 文件名的临时目录。
+
+    触发条件：路径含非 ASCII 字符，或 BMP 位深/压缩方式不被 odiff 支持。
+    """
     stage_dir = _make_stage_dir()
 
     def _temp_name(src: Path, tag: str) -> str:
         return f"{tag}{src.suffix.lower() or '.png'}"
 
-    def _copy_in(src: Path, tag: str) -> Path:
+    def _prepare(src: Path, tag: str) -> Path:
+        if _bmp_needs_png(src):
+            dst = stage_dir / f"{tag}.png"
+            _bmp_to_png(src, dst)
+            return dst
+        if _is_ascii(str(src)):
+            return src
         dst = stage_dir / _temp_name(src, tag)
         shutil.copy2(src, dst)
         return dst
 
-    s_base = base if _is_ascii(str(base)) else _copy_in(base, "base")
-    s_compare = compare if _is_ascii(str(compare)) else _copy_in(compare, "compare")
+    s_base = _prepare(base, "base")
+    s_compare = _prepare(compare, "compare")
     # 输出必须落在暂存目录内：子进程以 cwd=暂存目录 + 相对文件名调用，
     # 否则会写到暂存目录里而非 diff_output，拷回时被误删（0 字节文件）。
     s_out = stage_dir / _temp_name(diff_output, "diff")
@@ -185,19 +222,22 @@ def run_diff(
     exe = locate_odiff(odiff_path)
     opts = options or DiffOptions()
 
-    # —— 中文路径兼容（Windows）——
+    # —— 中文路径兼容 + BMP 格式兼容（Windows）——
     # odiff.exe 在 ANSI 代码页（GBK 等）系统上接收的命令行参数会被错误解码，
     # 含中文的输入/输出路径因此失效。检测到非 ASCII 路径时，
     # 自动暂存为纯 ASCII 文件名并以相对路径调用，结束后拷回结果。
+    # 另外 odiff 只认 24/32 位 BMP，8 位灰度等变体需先转 PNG。
     stage: _Staged | None = None
     if sys.platform == "win32" and (
         not _is_ascii(str(base))
         or not _is_ascii(str(compare))
         or not _is_ascii(str(diff_output))
+        or _bmp_needs_png(Path(base))
+        or _bmp_needs_png(Path(compare))
     ):
         try:
             stage = _stage_files(Path(base), Path(compare), Path(diff_output))
-        except OSError:
+        except (OSError, ValueError):
             stage = None  # 暂存失败则按原路径直接调用
 
     if stage is not None:
