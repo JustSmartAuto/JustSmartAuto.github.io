@@ -15,7 +15,11 @@ parsable-stdout 格式：
 
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
+import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -44,6 +48,68 @@ def locate_odiff(explicit: str | Path | None = None) -> Path:
         "找不到 odiff.exe — 请把 odiff-windows-x64.exe 放到 assets/ 目录，"
         "或通过 odiff_path 参数显式指定"
     )
+
+
+def _is_ascii(s: str) -> bool:
+    """字符串能否无损编码为 ASCII（中文路径检测）。"""
+    try:
+        s.encode("ascii")
+        return True
+    except UnicodeEncodeError:
+        return False
+
+
+@dataclass
+class _Staged:
+    """暂存后的文件（位于临时目录中的纯 ASCII 文件名）。"""
+    dir: Path
+    base: Path
+    compare: Path
+    out: Path
+
+
+def _make_stage_dir() -> Path:
+    """创建暂存目录，优先选纯 ASCII 的临时位置。
+
+    ANSI 代码页（如 GBK）下的程序内部用 ANSI API 解析路径，
+    纯 ASCII 的 cwd 可保证兼容；否则退回默认临时目录（配合相对路径仍可用）。
+    """
+    candidates: list[Path] = [Path(tempfile.gettempdir())]
+    if sys.platform == "win32":
+        candidates += [
+            Path(os.environ.get("LOCALAPPDATA", "")) / "Temp",
+            Path.home() / "AppData" / "Local" / "Temp",
+            Path(os.environ.get("SystemDrive", "C:")) / "Windows" / "Temp",
+        ]
+    for c in candidates:
+        if not str(c) or not _is_ascii(str(c)):
+            continue
+        try:
+            c.mkdir(parents=True, exist_ok=True)
+            return Path(tempfile.mkdtemp(prefix="odiff_stage_", dir=c))
+        except OSError:
+            continue
+    # 兜底：默认临时目录（路径可能含中文用户名，但配合相对路径调用仍可行）
+    return Path(tempfile.mkdtemp(prefix="odiff_stage_"))
+
+
+def _stage_files(base: Path, compare: Path, diff_output: Path) -> _Staged:
+    """把含非 ASCII 的输入/输出路径复制到纯 ASCII 文件名的临时目录。"""
+    stage_dir = _make_stage_dir()
+
+    def _temp_name(src: Path, tag: str) -> str:
+        return f"{tag}{src.suffix.lower() or '.png'}"
+
+    def _copy_in(src: Path, tag: str) -> Path:
+        dst = stage_dir / _temp_name(src, tag)
+        shutil.copy2(src, dst)
+        return dst
+
+    s_base = base if _is_ascii(str(base)) else _copy_in(base, "base")
+    s_compare = compare if _is_ascii(str(compare)) else _copy_in(compare, "compare")
+    s_out = diff_output if _is_ascii(str(diff_output)) else stage_dir / "out.png"
+
+    return _Staged(dir=stage_dir, base=s_base, compare=s_compare, out=s_out)
 
 
 @dataclass
@@ -117,27 +183,67 @@ def run_diff(
     exe = locate_odiff(odiff_path)
     opts = options or DiffOptions()
 
-    cmd = [
-        str(exe),
-        str(base),
-        str(compare),
-        str(diff_output),
-        *opts.build_args(),
-        "--parsable-stdout",
-    ]
+    # —— 中文路径兼容（Windows）——
+    # odiff.exe 在 ANSI 代码页（GBK 等）系统上接收的命令行参数会被错误解码，
+    # 含中文的输入/输出路径因此失效。检测到非 ASCII 路径时，
+    # 自动暂存为纯 ASCII 文件名并以相对路径调用，结束后拷回结果。
+    stage: _Staged | None = None
+    if sys.platform == "win32" and (
+        not _is_ascii(str(base))
+        or not _is_ascii(str(compare))
+        or not _is_ascii(str(diff_output))
+    ):
+        try:
+            stage = _stage_files(Path(base), Path(compare), Path(diff_output))
+        except OSError:
+            stage = None  # 暂存失败则按原路径直接调用
+
+    if stage is not None:
+        # 用相对路径 + cwd 调用，argv 里完全不出现中文
+        cmd = [
+            str(exe),
+            stage.base.name,
+            stage.compare.name,
+            stage.out.name,
+            *opts.build_args(),
+            "--parsable-stdout",
+        ]
+        cwd = stage.dir
+    else:
+        cmd = [
+            str(exe),
+            str(base),
+            str(compare),
+            str(diff_output),
+            *opts.build_args(),
+            "--parsable-stdout",
+        ]
+        cwd = None
 
     try:
         proc = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",  # 子进程输出可能被系统代码页污染，容错解码
             timeout=timeout,
+            cwd=cwd,
             creationflags=0,  # Windows 下避免弹窗
         )
     except FileNotFoundError as exc:
         return DiffResult(False, "file-error", stderr=str(exc))
     except subprocess.TimeoutExpired:
         return DiffResult(False, "file-error", stderr=f"超时 ({timeout}s)")
+    finally:
+        # 把暂存目录里生成的 diff 结果图拷回真实输出路径
+        if stage is not None:
+            try:
+                if stage.out.is_file():
+                    shutil.copyfile(stage.out, diff_output)
+            except OSError:
+                pass
+            shutil.rmtree(stage.dir, ignore_errors=True)
 
     exit_code = proc.returncode
     stdout = proc.stdout.strip()
