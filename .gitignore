@@ -1,0 +1,33 @@
+# —— Python ——
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+.eggs/
+.venv/
+venv/
+env/
+uv.lock
+
+# —— PyInstaller / 打包 ——
+build/
+dist/
+*.spec
+
+# —— IDE ——
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# —— 系统 ——
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# —— odiff 上游源码（不提交，本地保留参考） ——
+odiff-main/
+assets/odiff*.zip
+
