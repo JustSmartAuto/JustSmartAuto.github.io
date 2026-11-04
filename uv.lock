@@ -380,6 +380,7 @@ source = { editable = "." }
 dependencies = [
     { name = "pillow" },
     { name = "pywebview" },
+    { name = "tkinterdnd2" },
 ]
 
 [package.dev-dependencies]
@@ -391,10 +392,20 @@ dev = [
 requires-dist = [
     { name = "pillow", specifier = ">=10" },
     { name = "pywebview", specifier = ">=5.4" },
+    { name = "tkinterdnd2", specifier = ">=0.7.0" },
 ]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pyinstaller", specifier = ">=6" }]
+
+[[package]]
+name = "tkinterdnd2"
+version = "0.7.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e1/16/a1b4d644cd0dd4b7949228e13e587dc8720362544a5b594a56ef90cedb89/tkinterdnd2-0.7.0.tar.gz", hash = "sha256:bc5039c28092a702ee70fe15bd9b948cb579571e3b46ba4a092c9929966ca9f3", size = 738026, upload-time = "2026-10-25T12:31:43.332Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/eb/13/73054a55222b55604846d78c2e5e0c84bbe9f35bc7d6d9697a289c905b3a/tkinterdnd2-0.7.0-py3-none-any.whl", hash = "sha256:f93d4f5ad439648ba1673f15db3e271cdd08f075c87f43553ffcdde4e634a717", size = 819285, upload-time = "2026-10-25T12:31:41.55Z" },
+]
 
 [[package]]
 name = "typing-extensions"

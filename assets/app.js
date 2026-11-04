@@ -324,6 +324,7 @@
 
   function bindUI() {
     $('btn-choose').addEventListener('click', chooseFolder);
+    $('btn-drop').addEventListener('click', showDropHint);
     $('btn-generate').addEventListener('click', generate);
     $('btn-cancel').addEventListener('click', cancel);
     $('btn-open').addEventListener('click', openOutput);
@@ -379,6 +380,11 @@
       return;
     }
     applyScan(result);
+  }
+
+  function showDropHint() {
+    setStatus('请在弹出的「拖入文件夹」窗口中拖入文件夹');
+    bridge().open_drop_window();
   }
 
   async function openOutput() {

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import subprocess
 import sys
 from datetime import datetime
@@ -12,6 +13,31 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 ASSETS = ROOT / "assets"
+VENV_PYTHON = (ROOT / ".venv" / "Scripts" / "python.exe").resolve()
+
+
+def reexec_in_venv() -> None:
+    """不在项目 venv 里时（如双击用了系统 Python），改用 .venv 解释器重跑自身。
+
+    系统 Python 即使装了 PyInstaller，通常也没有 pywebview / pythonnet，
+    打出来的 exe 会缺 webview 模块，所以统一强制走项目 venv。
+    """
+    if Path(sys.executable).resolve() == VENV_PYTHON:
+        return
+    if not VENV_PYTHON.exists():
+        sys.exit("未找到 .venv，请先运行 `uv sync` 安装依赖")
+    print(f"当前解释器不含项目依赖，切换到 venv 重跑：{VENV_PYTHON}")
+    raise SystemExit(
+        subprocess.run([str(VENV_PYTHON), str(Path(__file__).resolve()), *sys.argv[1:]]).returncode
+    )
+
+
+def check_deps() -> None:
+    """打包前确认关键依赖可导入，缺了就明确报错而不是产出坏 exe。"""
+    missing = [name for name in ("webview", "PIL", "PyInstaller")
+               if importlib.util.find_spec(name) is None]
+    if missing:
+        sys.exit(f"缺少依赖：{', '.join(missing)}，请先运行 `uv sync`")
 
 
 def make_icon() -> Path | None:
@@ -32,6 +58,8 @@ def make_icon() -> Path | None:
 
 
 def main() -> None:
+    reexec_in_venv()
+    check_deps()
     stamp = datetime.now().strftime("%Y%m%d%H%M%S")
     name = f"SvgOverlayPy_{stamp}"
     cmd = [
@@ -45,6 +73,8 @@ def main() -> None:
         "--collect-all", "webview",
         "--collect-all", "pythonnet",
         "--collect-all", "clr_loader",
+        # tkinterdnd2 自带 tkdnd 的 tcl 脚本与原生 dll，也必须整体收集
+        "--collect-all", "tkinterdnd2",
         "--hidden-import", "webview.platforms.winforms",
         "--hidden-import", "webview.platforms.edgechromium",
         str(ROOT / "src" / "svgoverlay" / "app.py"),

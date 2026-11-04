@@ -91,7 +91,8 @@ class OverlayApi:
         self._renderer = Renderer(self._window)  # type: ignore[arg-type]
         return {
             "version": VERSION,
-            "folder": self._initial_folder,
+            # 拖放导航恢复主界面后会重新 init，返回当前文件夹让 UI 自动恢复列表
+            "folder": str(self._folder) if self._folder else self._initial_folder,
             "ready": True,
         }
 
@@ -239,7 +240,14 @@ class OverlayApi:
             self._window.destroy()
         return {"ok": True}
 
-    # —— 拖入文件夹（Win32 WM_DROPFILES 回调） ————————————
+    # —— 拖入文件夹（WebView2 导航 / tkinterdnd2 窗口回调） ——————
+
+    def open_drop_window(self) -> dict:
+        """打开原生拖放小窗口（tkinterdnd2），拖入文件夹后载入。"""
+        from svgoverlay.dropwindow import open_drop_window
+
+        open_drop_window(self.handle_drop)
+        return {"ok": True}
 
     def handle_drop(self, paths: list[str]) -> None:
         target: Path | None = None
