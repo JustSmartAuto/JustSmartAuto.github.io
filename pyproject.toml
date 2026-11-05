@@ -1,12 +1,14 @@
 [project]
 name = "LocalFileDropShellPy"
 version = "26.11.5.1"
-description = "面向工控机/调试机的本地文件与文件夹传送，客户端与服务端一体；支持 TightVNC 文件传输通道复用，单工时自动启用喷泉码"
+description = "面向工控机/调试机的一体化远程运维工具：文件与文件夹传送（TightVNC RFB 通道优先 / aiohttp 回退 / 单工喷泉码）、HTTP Shell（远程命令执行，pwsh/powershell/cmd 自动检测，GBK 自适应）、rsync 增量同步（Adler-32 + MD5 双阶段块级 delta）、RFB 文件传输（断点续传 offset）、VNC 远程桌面（自动探测已有 TightVNC/RealVNC/UltraVNC 直接复用，无则内嵌启动 + noVNC 前端 + WebSocket 代理）、CLI 交互式 shell（同进程多角色：GUI / server / client）"
 requires-python = ">=3.10"
 dependencies = [
     "pillow>=10",
     "pywebview>=5",
     "aiohttp>=3.9",
+    "websockets>=12",
+    "click>=8.1",
     "tkinterdnd2>=0.7.0",
 ]
 
@@ -16,7 +18,8 @@ dev = [
 ]
 
 [project.scripts]
-local-drop-shell = "localdropshell.app:main"
+local-drop-shell = "localdropshell.cli:main"
+ldrop = "localdropshell.cli:main"
 
 [build-system]
 requires = ["setuptools>=68"]

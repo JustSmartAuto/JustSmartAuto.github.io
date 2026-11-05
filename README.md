@@ -1,36 +1,250 @@
-# LocalFileDropShellPy — 工控机文件/文件夹传送
+# LocalFileDropShell — 工控机文件/Shell/VNC 一体化远程运维
 
-面向**工控机与调试机**的本地文件传送工具，客户端与服务端一体。直接把文件或文件夹拖入窗口、
-选择远程目标目录，一键传输。
+面向**工控机与调试机**的一体化远程运维工具。同一进程同时提供：
 
-- **TightVNC 通道复用优先**：工控机一般预装 TightVNC Server（监听 5900），探测到后直接发 RFB 文件传输扩展消息（`FC000106~FC00010B`），无需目标端启动本软件服务端
-- **自托管 HTTP 回退**：目标端无 TightVNC 时自动启动 aiohttp 服务，两端均运行本软件
-- **单工自动喷泉码**：通道判定为单工时切换 DCF2 容器 + decimen v3 Wire 帧格式
-- 界面采用 Windows 95 风格（设计 token 来自 `02-windows-95.css`，图标 `assets/drop3.ico`）
-- 渲染基于 pywebview（Windows 上为 WebView2）；拖放通过 Win32 `WM_DROPFILES` 原生实现
+| 能力 | 说明 |
+|---|---|
+| **文件传送** | TightVNC RFB 通道优先（无需目标端启动本软件）/ aiohttp HTTP 回退 / 单工自动喷泉码 |
+| **HTTP Shell** | `/exec` 远程命令执行，pwsh → powershell → cmd 自动检测，GBK/UTF-8 自适应，超时 Kill |
+| **rsync 增量同步** | Adler-32 + MD5 双阶段块级 delta，push / pull 双向，自动回退全量 |
+| **RFB 文件传输** | TightVNC FTP 扩展消息，支持 offset 断点续传、MD5 块校验、目录列表 |
+| **VNC 远程桌面** | 自动探测已有 TightVNC / RealVNC / UltraVNC 直接复用；无则可内嵌启动 + noVNC 前端 + WebSocket 代理 |
+| **CLI 交互式 shell** | 同进程三角色（`gui` / `server` / `client`），客户端内置 upload / download / rsync / rfb-* 等命令 |
 
-## 效果图（TightVNC File Transfer 通道复用原型）
+界面采用 **Windows 95 风格**（设计 token 来自 `assets/02-windows-95.css`，图标 `assets/drop3.ico`），渲染基于 pywebview（Windows 上为 WebView2）。参考原型：[TightVNC File Transfer](assets/screenshot1.png)。
 
-![界面效果图](assets/screenshot1.png)
+---
 
-左列 Local Computer、右列 Remote Computer、中间传输按钮；本软件在探测到目标端已安装 TightVNC Server 时复用同一传输通道，无需目标端启动额外进程。
-
-## 传输路径
+## 架构与传输路径
 
 ```
-拖入文件/文件夹 + 选择远程目标目录
-  → 探测 TightVNC (TCP 5900)
-    → 存在：RFB 扩展消息 FC000106~FC00010B（无需目标端服务）
-    → 不存在：自托管 aiohttp HTTP 服务 /upload /list /delete
-  → 通道判定单工：包 DCF2 容器 → decimen v3 Wire 帧 → 发送
-  → 完成（TightVNC 模式 MD5 块校验 / HTTP 模式 SHA-256 容器校验）
+                    发送端（开发机）                      接收端（工控机）
+┌────────────────────────────┐                    ┌────────────────────────────┐
+│ LocalFileDropShell GUI     │                    │ TightVNC Server (已安装)    │
+│ pywebview Win95            │  ── TCP 5900 ────►  │                              │
+│                             │                    │ ◄── FC000102~FC000119 FTP ──│──► 直接复用通道，
+│                             │                    │                              │     目标端无需启动
+└────────────────────────────┘                    └────────────────────────────┘
+
+┌────────────────────────────┐                    ┌────────────────────────────┐
+│ LocalFileDropShell CLI     │                    │ LocalFileDropShell Server │
+│  -role client              │  ── HTTP 10022 ──► │  -role server              │
+│                             │                    │  ├── /exec                 │
+│  - GUI 模式 (默认)         │                    │  ├── /upload / /download   │
+│  - CLI client 交互式       │                    │  ├── /rsync/blockset       │
+│  - CLI -c "单次命令"       │                    │  ├── /rsync/delta          │
+│                             │                    │  ├── /rsync/apply          │
+│  命令:                      │                    │  ├── /rfb/file/*           │
+│    upload / download        │                    │  ├── /vnc/  (noVNC 前端) │
+│    rsync / rsync-pull       │                    │  ├── /websockify          │
+│    rfb-upload / rfb-download│                    │  │   (WebSocket → VNC)     │
+│    rfb-list / !local-cmd   │                    │  └── /health              │
+└────────────────────────────┘                    └────────────────────────────┘
+                                                  │
+                                                  │ 无已有 VNC 且打包时
+                                                  │ 带 --with-vnc-bundle
+                                                  │      ▼
+                                            ┌────────────────────┐
+                                            │ 内嵌 TightVNC      │
+                                            │ tvnserver.exe      │
+                                            │ (注册表 + 监控)    │
+                                            └────────────────────┘
 ```
 
-## 传输协议参考
+传输层分支（文件/文件夹传送）：
+1. 探测目标端 `TCP 5900` / `15900` 是否有 RFB 响应（握手 `RFB003.008\n`）
+2. 成功 → 发 `FC000102` 验证 TightVNC FTP 扩展；后续文件传输全部走 RFB 通道
+3. 失败 → 走自托管 HTTP（`/upload` / `/download` / `/list`）
+4. 通道判定为单工 → 包 DCF2 容器（49B 自描述头 + SHA-256）+ decimen v3 Wire 帧（22B 自描述头）
+
+---
+
+## HTTP / API 路由
+
+aiohttp 服务端默认监听 `0.0.0.0:10022`（环境变量 `HTTP_SHELL_PORT` 可覆盖）。
+
+### `GET /health` 健康检查
+
+```json
+{"status":"running","shell":"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe","time":"2026-11-05 14:00:00","vnc_detected":15900}
+```
+
+### `POST /exec` HTTP Shell
+
+```json
+// 请求
+{"command":"Get-ChildItem","timeout":30,"work_dir":"C:\\Users"}
+
+// 响应
+{"status":"success","stdout":"...","stderr":"","exit_code":0,"timeout":false,"command":"Get-ChildItem"}
+```
+
+Shell 自动检测优先级：`pwsh.exe` → `powershell.exe` → `cmd.exe`。Windows cmd 输出自动 UTF-8 校验 + GBK 回退转码（`isValidUTF8` / `windowsGbkToUTF8`）。超时默认 30 秒（环境变量 `HTTP_SHELL_TIMEOUT`），超时后 `Process.Kill()` 并返回 `exit_code=-1`、`timeout=true`。
+
+### `POST /upload` / `POST /download` 文件上传下载
+
+multipart/form-data：`file=@local.bin` + `path=/remote/dir/`（可选）。返回 `saved_as`、`size`。
+
+### Rsync 增量同步接口
+
+#### `POST /rsync/blockset` 获取块集合
+
+```json
+// 请求
+{"path":"/remote/file.dat","seed":12345}
+
+// 响应
+{"status":"success","file_size":1048576,"block_size":1024,"block_count":1024,
+ "remainder":0,"checksum_len":16,"seed":12345,
+ "blocks":[
+   {"index":0,"offset":0,"length":1024,"fast_sum":3221225472,"strong_sum":"base64-MD5..."},
+   ...
+ ]}
+```
+
+块大小公式：`max(700, ceil(sqrt(fileSize))) 向上取整到 8 的倍数`。
+
+| 文件大小 | 块大小 | 块数量 |
+|---|---|---|
+| 100 KB | 700 B | 147 |
+| 1 MB | 1,024 B | 1,024 |
+| 10 MB | 2,048 B | 5,120 |
+| 100 MB | 3,600 B | 28,445 |
+| 1 GB | 8,192 B | 131,072 |
+
+#### `POST /rsync/delta` 计算增量
+
+```json
+// push 模式（客户端发 src_path + dst_path，服务端用已有 dst 算相对于 src 的 delta）
+{"src_path":"/local/file.dat","dst_path":"/remote/file.dat","seed":12345}
+
+// pull 模式（客户端发 local_bs 本地 blockset，服务端用远程文件算相对于本地的 delta）
+{"src_path":"/remote/file.dat","dst_path":"/local/file.dat","seed":12345,"direction":"pull","local_bs":{...}}
+```
+
+#### `POST /rsync/apply` 应用增量重建文件
+
+```json
+{"dst_path":"/remote/file.dat","src_path":"/remote/file.dat","chunks":[
+  {"op":1,"length":256,"data":"base64..."},   // 1 = literal 字面数据
+  {"op":2,"length":5},                        // 2 = block 引用远程第 5 块
+  {"op":0}                                    // 0 = EOF
+]}
+```
+
+Rsync 自动回退全量传输的条件：远程文件不存在 / blockset 获取失败 / delta 计算失败 / apply 失败 / MD5 验证不匹配 / 增量效率 < 20% 且文件 > 1MB。
+
+### RFB FTP 文件传输接口（TightVNC FTP 扩展 HTTP 包装）
+
+#### `POST /rfb/file/list` 列出目录
+
+```json
+{"path":"C:/Users"}
+// → {"files":[{"name":"Desktop","size":0,"mod_time":1730000000,"is_dir":true},...]}
+```
+
+#### `POST /rfb/file/upload` 上传（支持断点续传）
+
+multipart/form-data：`file=@local.bin` + `path=/remote/dir/file.bin` + `offset=0`（可选，已传输字节数）。
+
+#### `POST /rfb/file/download` 下载（支持断点续传）
+
+```json
+{"path":"/remote/file.dat","offset":0}
+```
+
+返回二进制流；Content-Length = `size - offset`。
+
+#### `POST /rfb/file/md5` MD5 校验
+
+```json
+{"path":"/remote/file.dat","offset":0,"length":65536}
+// → {"md5":"d41d8cd98f00b204e9800998ecf8427e","offset":0,"length":65536}
+```
+
+### VNC 远程桌面接口
+
+#### `GET /vnc/` noVNC 静态文件服务
+
+浏览器访问 `/vnc/vnc.html` 打开远程桌面页面。
+
+#### `GET /websockify` VNC WebSocket 代理端点
+
+noVNC 前端通过此 WebSocket 桥接到本机已探测到的 VNC Server（默认 `127.0.0.1:5900` 或 `15900`）。
+
+---
+
+## CLI 三角色
+
+统一入口：`uv run local-drop-shell`（别名 `uv run ldrop`）。
+
+| 角色 | 默认 | 说明 | 入口参数 |
+|---|---|---|---|
+| `gui` | ✅ | pywebview Win95 界面 | `--role gui --host ... --folder ...` |
+| `server` | | 纯 aiohttp 服务端（无 GUI） | `--role server --host 0.0.0.0 --port 10022` |
+| `client` | | 连接远程端（交互式 shell 或单次命令） | `--role client --url http://IP:PORT [-c "命令"]` |
+
+### 交互式 shell 内置命令
+
+| 命令 | 说明 |
+|---|---|
+| `exit` / `quit` / `q` | 退出客户端 |
+| `cd <目录>` | 设置后续命令的工作目录 |
+| `pwd` | 显示当前工作目录 |
+| `clear` / `cls` | 清屏 |
+| `!<命令>` | 执行**本地**命令（不发送到服务端） |
+| `upload <本地路径> [远程路径]` | HTTP multipart 上传 |
+| `download <远程路径> [本地路径]` | HTTP multipart 下载 |
+| `rsync <本地路径> [远程路径]` | rsync 增量同步（push） |
+| `rsync-pull <远程路径> [本地路径]` | rsync 增量拉取（pull） |
+| `rfb-upload <本地路径> [远程路径]` | RFB FTP 断点续传上传 |
+| `rfb-download <远程路径> [本地路径]` | RFB FTP 断点续传下载 |
+| `rfb-list [目录]` | RFB FTP 列出远程目录 |
+| `help` / `?` | 显示帮助 |
+
+---
+
+## VNC 探测策略
+
+```
+启动服务端
+  │
+  ├─ 扫描端口 5900-5909 与 15900-15909（netstat -aon | findstr）
+  │    │
+  │    └─ 找到监听 PID → tasklist /FI "PID eq N" → CSV → 匹配进程名
+  │       tvnserver / vncserver / winvnc / uvnc / tightvnc / realvnc
+  │       │
+  │       ├─ 命中 → 兼容模式：WebSocket 代理直接连接该端口
+  │       │        跳过注册表写入和 tvnserver 启动
+  │       │        ✅ 零权限要求
+  │       │
+  │       └─ 未命中 → 内嵌模式
+  │          自动递增 RFB 端口避免冲突（默认 15900）
+  │          释放 .cache/tvnc/ 二进制
+  │          写注册表 SOFTWARE\\TightVNC\\Server
+  │          启动 tvnserver -install / -start
+  │          启动监控协程：tvnserver 退出则本进程退出
+  │          ⚠️ 需要管理员权限
+  │
+  └─ 启动 noVNC HTTP 服务 + WebSocket 代理 /websockify
+```
+
+**端口汇总**：
+
+| 服务 | 默认端口 | 说明 |
+|---|---|---|
+| 主 HTTP 服务（Shell / upload / rsync / RFB） | `10022` | 可通过 `--port` 或环境变量 `HTTP_SHELL_PORT` 覆盖 |
+| VNC RFB（内嵌模式） | `15900` | 自动递增避免冲突 |
+| noVNC HTTP | 与主服务复用 | `/vnc/` 路径 |
+| WebSocket 代理 | 与主服务复用 | `/websockify` 路径 |
+
+---
+
+## 协议参考
 
 ### 1. TightVNC RFB 文件传输扩展（复用通道）
 
-来源：TightVNC 2.8.90 `ft-common/FTMessage.h`、`ft-client-lib/FileTransferInterface.h`。
+来源：`tightvnc-2.8.90-gpl/ft-common/FTMessage.h`、`ft-client-lib/FileTransferInterface.h`、`file-lib/`。
 
 所有扩展消息以 `0xFC000000` 掩码识别（RFB 扩展消息前缀 `0xFC` + 3 字节消息 ID）。消息体：
 
@@ -39,19 +253,19 @@ UINT32 messageId        // 4 字节小端
 UINT8[] messageBody     // 依 messageId 不同
 ```
 
-`StringUTF8` 结构：`UINT32 size` + `UINT8 buffer[size]`；路径格式 Unix 风格：`/C:/folder1/folder2`，文件夹末尾无斜杠。
+`StringUTF8`：`UINT32 size` + `UINT8 buffer[size]`；路径 Unix 风格 `/C:/folder`，文件夹末尾无斜杠。
 
-核心消息对（本软件复用场景）：
+核心消息对：
 
 | 消息 ID | 名称 | 方向 | 用途 |
 |---|---|---|---|
-| `FC000102` | FILE_LIST_REQUEST | C→S | 枚举远程目录（带 compressionLevel） |
-| `FC000103` | FILE_LIST_REPLY | S→C | 压缩块：filesCount + 每条 fileSize/modTime/fileFlags/relFilename |
+| `FC000102` | FILE_LIST_REQUEST | C→S | 枚举远程目录 |
+| `FC000103` | FILE_LIST_REPLY | S→C | 压缩块（zlib 可选）：filesCount + 每条 fileSize/modTime/fileFlags/relFilename |
 | `FC000104` | MD5_REQUEST | C→S | 请求远程文件指定偏移块的 MD5 |
 | `FC000105` | MD5_REPLY | S→C | 16 字节 MD5 摘要 |
 | `FC000106` | UPLOAD_START_REQUEST | C→S | 开始上传 |
 | `FC000107` | UPLOAD_START_REPLY | S→C | 确认 |
-| `FC000108` | UPLOAD_DATA_REQUEST | C→S | 携带压缩块（CompressedBlock） |
+| `FC000108` | UPLOAD_DATA_REQUEST | C→S | 携带 CompressedBlock |
 | `FC000109` | UPLOAD_DATA_REPLY | S→C | 确认 |
 | `FC00010A` | UPLOAD_END_REQUEST | C→S | 结束上传 |
 | `FC00010B` | UPLOAD_END_REPLY | S→C | 确认 |
@@ -59,33 +273,62 @@ UINT8[] messageBody     // 依 messageId 不同
 | `FC000113` | REMOVE_REQUEST | C→S | 远程删除文件 |
 | `FC000119` | LAST_REQUEST_FAILED_REPLY | S→C | 兜底失败回复 |
 
-`CompressedBlock` 结构（可选 zlib）：
+`CompressedBlock` 结构：
 
 ```
-UINT8 compressionLevel       // 0 = 不压缩，[1..9] = 压缩
+UINT8 compressionLevel       // 0 = 不压缩，[1..9] = zlib 压缩
 UINT32 compressedSize
 UINT32 uncompressedSize
 UINT8 compressedData[compressedSize]
 ```
 
-**通道复用策略**：启动时向目标端 `5900` 端口发 RFB 协议握手，协商安全类型后发送 `FC000102`；成功收到 `FC000103` 即判定为 TightVNC Server，后续所有文件传输直接走此通道，目标端**无需启动本软件服务端**。若连接被拒绝或返回非 RFB 响应，回退到自托管 HTTP。
+### 2. Rsync 增量同步协议
 
-### 2. 自托管 HTTP 协议（回退通道）
+来源：`http_shell_cli_vnc/http_shell_cli_vnc.go` 中的 rsync 实现（Adler-32 + MD5 双阶段）。
 
-目标端无 TightVNC 时，发送端启动 aiohttp 服务（默认 8765）：
+**双阶段校验和**：
 
-| 方法 | 路径 | 用途 |
+| 阶段 | 校验和 | 长度 | 用途 |
+|---|---|---|---|
+| 第一阶段 | Adler-32 滚动校验和 | 4 字节 | 快速滑动窗口，O(1) 更新 |
+| 第二阶段 | MD5 强校验和（混入 seed） | 16 字节 | 防碰撞强验证 |
+
+**Delta Op**：
+
+| Op | 含义 | 附加字段 |
 |---|---|---|
-| POST | `/upload` | 接收文件（multipart/form-data 或 raw bytes，带 sha256 头） |
-| POST | `/mkdir` | 远程创建目录 |
-| POST | `/delete` | 远程删除文件/文件夹 |
-| GET  | `/list` | 枚举远程目录 |
+| 0 | EOF | 无 |
+| 1 | Literal（字面数据） | length + data |
+| 2 | Block（引用远程块） | length（块索引） |
 
-### 3. 单工喷泉码
+**自动回退**：远程文件不存在 / blockset / delta / apply 任一失败 / MD5 不匹配 / 增量效率 < 20% 且 > 1MB。
 
-来源：AirFountainZulu / decimen v3（`qr/core/Wire.kt`、`qr/core/Container.kt`）。
+### 3. RFB FTP 扩展（TightVNC 风格）
 
-**Wire 帧格式**（每帧自描述，无需握手，小端）：
+来源：`http_shell_cli_vnc/http_shell_cli_vnc.go` 中的 RFB FTP 消息。HTTP 层 `/rfb/file/*` 接口封装此协议。
+
+消息子类型：
+
+| 子类型 | 值 | 用途 |
+|---|---|---|
+| CCSRST | 0x11 | 压缩支持检查 |
+| CFLRST | 0x12 | 文件列表请求/响应 |
+| CMDRST | 0x13 | 创建目录 |
+| CFRRST | 0x14 | 删除文件 |
+| CFMRST | 0x15 | 移动/重命名 |
+| CFURST | 0x16 | 开始上传 |
+| CUDRST | 0x17 | 上传数据块 |
+| CUERST | 0x18 | 上传结束 |
+| CFDRST | 0x19 | 开始下载 |
+| CDDRST | 0x1A | 下载数据块 |
+| CDSRST | 0x1B | 目录大小 |
+| CM5RST | 0x1C | MD5 校验 |
+
+### 4. 喷泉码（单工传输）
+
+来源：`AirFountainZulu` / decimen v3（`qr/core/Wire.kt`、`qr/core/Container.kt`）。
+
+**Wire 帧格式**（每帧自描述，无需握手，小端，22 字节头部）：
 
 ```
 偏移  长度  字段
@@ -102,67 +345,109 @@ UINT8 compressedData[compressedSize]
 22    blockLen  block   喷泉码编码块
 ```
 
-**DCF2 文件容器**（喷泉码载荷不是裸文件，而是自描述容器，49 字节头部）：
+**DCF2 文件容器**（49 字节头部）：
 
 ```
 偏移  长度  字段
-0     4     magic "DCF2" = 44 43 46 32
+0     4     magic "DCF2"
 4     1     compression  0=none 1=gzip
 5     2     nameLength
 7     2     typeLength
-9     4     fileLength         原始文件长度
-13    4     transmittedLength  实际承载长度（压缩后或原始）
+9     4     fileLength
+13    4     transmittedLength
 17    32    sha256(原始文件)
 49    nameLength  name UTF-8
 49+nameLength  typeLength  type UTF-8
 49+nameLength+typeLength  transmitted bytes
 ```
 
-设计要点：
-- 每帧带完整头部，接收端可在播放中途锁定流；发送端重启会产生新 `sessionId`，接收端自动重新开始
-- gzip 仅在确实变小时启用（≥ 768 字节且非已压缩格式），熵编码媒体跳过
-- 接收端还原并校验 `sha256` 通过前，不应向用户提供文件
+设计要点：每帧自描述，接收端可中途锁定；发送端重启产生新 `sessionId`，接收端自动重新开始；gzip 仅在确实变小时启用（≥ 768 字节且非已压缩格式），熵编码媒体跳过；SHA-256 完成校验前不向用户提供文件。
 
-## 拖放处理
+### 5. noVNC / WebSocket 代理
 
-Win32 `WM_DROPFILES` 原生拖放（关闭 WebView2 内置拖放），可拿到完整文件路径；
-支持文件与文件夹混合拖入，文件夹递归扫描；输出路径为 Unix 风格 `/X:/...` 后交给传输层。
+内嵌 noVNC 1.4.0（来自 `http_shell_cli_vnc/public_fs/novnc/`），WebSocket 代理桥接浏览器 ↔ VNC Server。
+
+```
+浏览器(noVNC)  ──WebSocket──►  /websockify  ──TCP──►  VNC Server(127.0.0.1:5900+ / 15900+)
+```
+
+---
 
 ## 目录
 
 | 路径 | 说明 |
 |---|---|
 | `assets/02-windows-95.css` | Windows 95 设计 token |
-| `assets/drop3.ico` | 软件图标（Win95 风格，多尺寸） |
-| `assets/screenshot1.png` | TightVNC File Transfer 通道复用原型图 |
-| `src/localdropshell/app.py` | 入口（参数解析 / 事件挂接 / 传输调度） |
-| `src/localdropshell/drop.py` | 拖放处理（文件/文件夹扫描） |
-| `src/localdropshell/tightvnc.py` | RFB 扩展客户端（FC000106~FC00010B 消息对） |
+| `assets/drop3.ico` | 软件图标（Win95 风格，多尺寸帧） |
+| `assets/screenshot1.png` | TightVNC File Transfer 界面原型图 |
+| `src/localdropshell/cli.py` | **入口**（三角色解析 + 分发到 gui / server / client） |
+| `src/localdropshell/ui/` | pywebview Win95 界面（文件传送 + Shell 标签 + 日志） |
+| `src/localdropshell/shell.py` | ShellExecutor（pwsh → powershell → cmd，GBK/UTF-8 自适应，超时 Kill） |
+| `src/localdropshell/tightvnc.py` | RFB 扩展客户端（FC000102~FC000119 消息对） |
+| `src/localdropshell/rsync.py` | rsync Adler-32 + MD5 块级 delta（ComputeBlockSize / BuildBlockSet / ComputeDelta / ApplyDelta） |
+| `src/localdropshell/rfbftp.py` | RFB FTP 消息（CCSRSST / CFLRST / CFURST / CM5RST / ...） |
+| `src/localdropshell/vnc.py` | VNC 探测（端口 + 进程名）/ 内嵌 tvnserver 启动 / WebSocket 代理 |
 | `src/localdropshell/fountain.py` | 喷泉码编解码（Wire 帧 + DCF2 容器） |
-| `src/localdropshell/transfer.py` | 传输调度（TightVNC 优先 / HTTP 回退 / 单工判定） |
-| `src/localdropshell/http.py` | aiohttp 自托管服务端 |
-| `src/localdropshell/ui/` | pywebview 界面（菜单 / 列表 / 日志） |
-| `build_exe.py` | PyInstaller 打包脚本（产物 `LocalFileDropShell_{时间戳}.exe`） |
+| `src/localdropshell/transfer.py` | 传输调度（TightVNC 优先 / HTTP 回退 / 单工判定 / 校验） |
+| `src/localdropshell/server.py` | aiohttp 服务端路由注册（/exec /upload /download /rsync/* /rfb/* /vnc/ /websockify /health） |
+| `build_exe.py` | PyInstaller 打包（可选 `--with-vnc-bundle` 内嵌 TightVNC/noVNC），产物 `LocalFileDropShell_{时间戳}.exe` |
+
+参考工程：
+- **diffimg 图像差分**：pywebview + Tk + Windows 95 风格界面的组织方式（`src/odiffdiff/` 结构、`build_exe.py` venv 重执行 + 依赖探测 + 显式 collect-all）
+- **http_shell_cli_vnc**：HTTP Shell / rsync / RFB FTP / VNC 探测与内嵌 / CLI 客户端交互式 shell（Go 实现，本项目用 Python 原生重写）
+- **AirFountainZulu**：喷泉码 decimen v3（Wire.kt / Container.kt）
+- **TightVNC 2.8.90**：RFB FTP 协议（ft-common / ft-client-lib / file-lib）
+
+---
 
 ## 开发 / 运行 / 打包
 
 ```bash
-uv sync                                      # 安装依赖（pywebview / aiohttp / Pillow / tkinterdnd2，dev 组含 PyInstaller）
-uv run local-drop-shell                      # 启动应用
-uv run local-drop-shell --host 192.168.1.50 # 指定目标端
-uv run local-drop-shell --folder D:/data      # 启动时直接载入本地文件夹
-uv run local-drop-shell -v                   # 调试日志 + 开发者工具
-uv run python build_exe.py                   # PyInstaller 打包 dist/LocalFileDropShell_{yyyyMMddHHmmss}.exe
+uv sync                                                        # 安装依赖（Python 3.10+）
+uv run local-drop-shell --role gui                              # GUI（默认）
+uv run local-drop-shell --role server --host 0.0.0.0 --port 10022
+uv run local-drop-shell --role client --url http://192.168.1.100:10022
+uv run local-drop-shell --role client --url ... -c "Get-Process"
+uv run python build_exe.py                                      # 普通打包 dist/LocalFileDropShell_{时间戳}.exe
+uv run python build_exe.py --with-vnc-bundle                    # 额外内嵌 TightVNC + noVNC 前端
 ```
 
-- 依赖 Python 3.10+；Windows 下需要 WebView2 Runtime（Win10/11 一般已内置）
-- 参考工程：
-  - TightVNC 2.8.90 `ft-client-lib` / `ft-common` / `file-lib`（RFB 文件传输协议）
-  - AirFountainZulu `qr/core/Wire.kt` / `Container.kt`（decimen v3 喷泉码）
+环境变量：
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `HTTP_SHELL_PORT` | `10022` | 服务端监听端口 |
+| `HTTP_SHELL_HOST` | `0.0.0.0` | 服务端监听地址 |
+| `HTTP_SHELL_TIMEOUT` | `30` | 默认命令超时秒数 |
+
+打包产物：单文件 exe（约 10~15 MB，`--with-vnc-bundle` 额外 ~10 MB），零运行时依赖。
+
+---
 
 ## 设计决策
 
-1. **TightVNC 通道优先**：工控机一般预装 TightVNC Server，探测到后直接复用 `FC000106~FC00010B` 文件传输通道；目标端无需启动本软件，大幅降低部署门槛
-2. **自托管 HTTP 回退**：目标端无 TightVNC 时两端均运行本软件，aiohttp 服务端处理上传/枚举/删除
-3. **单工喷泉码**：通道判定为单工时（仅单向可通）启用 DCF2 + decimen v3，自描述帧支持中途锁定，gzip 有条件启用，SHA-256 完成校验
-4. **路径格式统一**：Unix 风格 `/X:/...`，与 TightVNC 文件传输协议保持一致
+1. **TightVNC RFB 通道优先**：工控机一般预装 TightVNC Server（监听 5900），探测到后直接复用 `FC000102~FC000119` FTP 扩展消息，**目标端无需启动本软件**——大幅降低部署门槛
+2. **HTTP / Shell / rsync / RFB / VNC 共享同一 aiohttp 服务端**：避免多端口、多进程；端口 10022 一条入口；CLI 客户端连接同一服务端
+3. **Rsync 自动回退**：增量效率 < 20% 或任一环节失败时自动退回全量传输，不会卡死
+4. **VNC 探测优先，内嵌兜底**：优先复用已有 VNC Server（零权限），无则内嵌（需管理员）；两种模式透明切换
+5. **CLI 单进程多角色**：同一个 `LocalFileDropShell.exe` 支持 gui / server / client 三种模式，部署最简
+6. **单工喷泉码判定阈值**：TCP 连通但无法获得稳定响应（RTT > 2s / 丢包率 > 50%）→ 自动切换 DCF2 + decimen v3；连通稳定则走普通传输通道
+7. **编码自适应**：Windows cmd 默认 GBK 输出，先 UTF-8 校验，失败则调 `MultiByteToWideChar(CP_ACP, ...)` 转 UTF-8；pwsh 直接 UTF-8
+8. **路径格式统一**：Unix 风格 `/X:/...`，与 TightVNC FTP 协议保持一致
+
+---
+
+## 安全提示
+
+本服务设计用于**离线内网工控机维护**，不提供身份认证。如需增强：
+- 前端反向代理（Nginx）加 Basic Auth / IP 白名单
+- 通过 VPN / 专线传输
+- 对敏感命令和文件传输启用 HTTPS（aiohttp 支持 ssl_context 参数）
+- VNC 远程桌面默认无密码，建议在受控网络中使用
+- 嵌入式 Shell 执行需信任调用方，不要暴露到公网
+
+---
+
+## License
+
+MIT

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>LocalFileDropShellPy — 工控机文件传送</title>
+  <title>LocalFileDropShell — 工控机文件/Shell/VNC 一体化远程运维</title>
   <link rel="icon" href="assets/drop3.ico" type="image/x-icon">
   <link rel="stylesheet" href="assets/02-windows-95.css">
   <style>
@@ -16,7 +16,7 @@
       font-family: var(--font);
       font-size: 13px;
     }
-    .desk { max-width: 1040px; margin: 0 auto; }
+    .desk { max-width: 1080px; margin: 0 auto; }
 
     .win {
       background: var(--chrome);
@@ -62,7 +62,7 @@
 
     .features {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
       gap: 10px;
       margin-top: 4px;
     }
@@ -103,6 +103,7 @@
       gap: 2px;
       padding: 2px;
       margin-top: 14px;
+      flex-wrap: wrap;
     }
     .statusbar span {
       font-size: 11px;
@@ -115,6 +116,21 @@
       white-space: nowrap;
     }
     .statusbar .grow { flex: 1; }
+
+    .api-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 6px;
+      font-size: 12px;
+    }
+    .api-table th, .api-table td {
+      border: 1px solid var(--chrome-dark);
+      padding: 4px 8px;
+      text-align: left;
+      vertical-align: top;
+    }
+    .api-table th { background: var(--chrome-light); font-weight: 700; }
+    .api-table code { background: var(--chrome-lighter); padding: 0 3px; }
   </style>
 </head>
 <body>
@@ -122,75 +138,123 @@
   <div class="win">
     <div class="caption">
       <img src="assets/drop3.ico" alt="logo">
-      <span>LocalFileDropShell — 工控机文件传送</span>
+      <span>LocalFileDropShell — 工控机一体化远程运维</span>
       <span class="ver">v26.11.5.1</span>
     </div>
     <div class="body">
-      <h1>LocalFileDropShell — 工控机文件/文件夹传送</h1>
+      <h1>LocalFileDropShell — 工控机文件/Shell/VNC 一体化远程运维</h1>
       <p class="lead">
-        面向<b>工控机与调试机</b>的本地文件传送工具，客户端与服务端一体。直接把文件或文件夹<b>拖入窗口</b>，
-        选择远程目标目录，一键传输。自动探测目标端是否已安装<b>TightVNC Server</b>，若存在则直接复用其
-        <code>FC000106~FC00010B</code> 文件传输通道（无需目标端启动本软件服务端）；否则启用自托管 HTTP 服务端。
-        单工传输工况下自动切换为<b>喷泉码</b>（DCF2 容器 + decimen v3 线格式）。
+        面向<b>工控机与调试机</b>的一体化远程运维工具。同一进程同时提供<b>文件传送</b>
+        （TightVNC RFB 通道优先 / aiohttp 回退 / 单工喷泉码）、
+        <b>HTTP Shell</b>（远程命令执行）、<b>rsync 增量同步</b>、
+        <b>RFB 断点续传</b>、<b>VNC 远程桌面</b>（noVNC + WebSocket 代理）与
+        <b>CLI 交互式 shell</b>。客户端与服务端一体——可直接拖入文件/文件夹开始传输，
+        也可纯 CLI 模式启动服务端或连接远程端。
       </p>
 
-      <img class="shot" src="assets/screenshot1.png" alt="TightVNC File Transfer 界面（通道复用原型）">
-      <p class="shot-note">通道复用原型：TightVNC File Transfer 左右窗格界面，本软件在探测到目标端已安装 TightVNC Server 时复用同一传输通道。</p>
+      <img class="shot" src="assets/screenshot1.png" alt="TightVNC File Transfer 界面">
+      <p class="shot-note">TightVNC File Transfer 界面原型——LocalFileDropShell 在此基础上复用 RFB 通道，同时叠加 HTTP Shell / rsync / VNC / CLI 能力。</p>
 
       <fieldset>
-        <legend>传输路径</legend>
+        <legend>传输路径与探测</legend>
         <p class="flow">
-          <span class="step">拖入文件/文件夹</span><span class="arrow">+</span><span class="step">选择远程目标目录</span><span class="arrow">→</span>
-          <span class="step">探测 TightVNC (5900)</span><span class="arrow">→</span>
-          <span class="step" style="background:#008080;color:#fff">复用 RFB 文件传输</span>
+          <span class="step">拖入 / CLI 指定</span><span class="arrow">→</span>
+          <span class="step">探测 VNC (5900 / 15900)</span><span class="arrow">→</span>
+          <span class="step" style="background:#008080;color:#fff">复用 RFB File Transfer</span>
           <span class="arrow">/</span>
-          <span class="step" style="background:#808080;color:#fff">自托管 HTTP 回退</span><span class="arrow">→</span><span class="step">完成</span>
+          <span class="step" style="background:#808080;color:#fff">自托管 HTTP 回退</span><span class="arrow">→</span>
+          <span class="step">单工？→ 喷泉码</span><span class="arrow">→</span>
+          <span class="step">完成（MD5 / SHA-256 校验）</span>
         </p>
+        <p class="shot-note">HTTP Shell 与 rsync / VNC 共享 aiohttp 服务端（默认 10022），VNC 通过 WebSocket 代理（/websockify）桥接到已有 VNC Server；无 VNC Server 时可在打包时内嵌 TightVNC + noVNC 兜底。</p>
       </fieldset>
 
       <fieldset>
         <legend>特性</legend>
         <div class="features">
           <div class="card">
-            <h3>TightVNC 通道复用</h3>
-            <p>工控机一般预装 TightVNC Server，探测到 5900 端口响应后直接发 FC000106~FC00010B 扩展消息，无需目标端启动本软件。</p>
+            <h3>TightVNC RFB 通道复用</h3>
+            <p>工控机一般预装 TightVNC Server，探测到 5900 / 15900 端口后直接发 FC000102~FC000119 扩展消息，无需目标端启动本软件服务端。</p>
           </div>
           <div class="card">
             <h3>自托管 HTTP 回退</h3>
-            <p>目标端无 TightVNC 时自动启动 aiohttp 服务，路径协商 /upload /list /delete，支持进度与取消；两端均需运行本软件。</p>
+            <p>目标端无 TightVNC 时自动启动 aiohttp 服务（默认 10022），路径协商 /upload /download /list /delete；同时托管 HTTP Shell / rsync / RFB / VNC。</p>
           </div>
           <div class="card">
-            <h3>拖入即用</h3>
-            <p>Win32 WM_DROPFILES 原生拖放，文件/文件夹不限，支持多路径同时拖入，自动递归扫描文件夹内容。</p>
+            <h3>HTTP Shell 远程执行</h3>
+            <p>自动探测 pwsh → powershell → cmd，GBK/UTF-8 编码自适应，命令超时自动 Kill，返回 stdout / stderr / exit_code / timeout。</p>
+          </div>
+          <div class="card">
+            <h3>rsync 增量同步</h3>
+            <p>Adler-32 滚动校验 + MD5 强校验双阶段，块大小 max(700, ceil(sqrt(size))) 向上 8 倍数；自动回退全量传输；支持 push / pull。</p>
+          </div>
+          <div class="card">
+            <h3>RFB 断点续传</h3>
+            <p>RFB FTP 扩展消息支持 offset 断点续传、MD5 块校验、目录列表；传输失败可从断点继续，避免长链路重头来过。</p>
+          </div>
+          <div class="card">
+            <h3>VNC 远程桌面（noVNC）</h3>
+            <p>自动检测已有 VNC Server（Tight/Real/Ultra，端口 5900-5909 / 15900-15909，进程名 tvnserver/vncserver/uvnc/realvnc）直接复用；WebSocket 代理 /websockify 桥接浏览器与 VNC。</p>
+          </div>
+          <div class="card">
+            <h3>Win32 原生拖放</h3>
+            <p>WM_DROPFILES 关闭 WebView2 内置拖放，文件/文件夹不限，多路径同时拖入，自动递归扫描文件夹内容。</p>
           </div>
           <div class="card">
             <h3>单工喷泉码</h3>
-            <p>通道判定为单工时切换 DCF2 容器 + decimen v3 Wire 帧格式，22 字节自描述头，支持中途锁定流与 session 重启续传。</p>
+            <p>通道判定为单工时切换 DCF2 容器（49B 自描述头 + SHA-256）+ decimen v3 Wire 帧（22B 自描述头），中途锁定与 session 重启续传。</p>
           </div>
           <div class="card">
-            <h3>批量与断点</h3>
-            <p>进度条、逐条日志、单条失败跳过；复用 TightVNC 时 MD5 块校验，HTTP 模式 SHA-256 容器校验。</p>
+            <h3>CLI 多角色 + 日志</h3>
+            <p>同进程支持 <code>-role gui</code>（默认，pywebview Win95）、<code>-role server</code>（纯 HTTP/aiohttp）、<code>-role client</code>（交互式 shell：exit/cd/pwd/upload/download/rsync/rfb-*/help）；服务端操作自动记录 <code>localdropshell_{时间戳}.log</code>。</p>
           </div>
           <div class="card">
             <h3>Win95 风格界面</h3>
-            <p>pywebview + 02-windows-95.css，左右窗格（本地 / 远程）+ 中间传输按钮，对标 TightVNC File Transfer。</p>
+            <p>pywebview + 02-windows-95.css 设计 token；Win32 WM_DROPFILES；状态栏 / 菜单 / 列表 / 日志对齐 TightVNC File Transfer 布局。</p>
           </div>
         </div>
       </fieldset>
 
       <fieldset>
+        <legend>HTTP / API 路由（aiohttp 服务端默认端口 10022）</legend>
+        <table class="api-table">
+          <thead><tr><th>方法</th><th>路径</th><th>用途</th></tr></thead>
+          <tbody>
+            <tr><td>POST</td><td><code>/exec</code></td><td>HTTP Shell：远程执行命令，JSON body：<code>{"command","timeout","work_dir"}</code></td></tr>
+            <tr><td>POST</td><td><code>/upload</code></td><td>文件上传（multipart/form-data）</td></tr>
+            <tr><td>POST</td><td><code>/download</code></td><td>文件下载（multipart/form-data）</td></tr>
+            <tr><td>POST</td><td><code>/rsync/blockset</code></td><td>获取文件块集合（Adler-32 + MD5）</td></tr>
+            <tr><td>POST</td><td><code>/rsync/delta</code></td><td>计算增量（push / pull 方向）</td></tr>
+            <tr><td>POST</td><td><code>/rsync/apply</code></td><td>应用增量重建文件</td></tr>
+            <tr><td>POST</td><td><code>/rfb/file/list</code></td><td>RFB FTP：列出目录</td></tr>
+            <tr><td>POST</td><td><code>/rfb/file/upload</code></td><td>RFB FTP：上传（支持 offset 断点续传）</td></tr>
+            <tr><td>POST</td><td><code>/rfb/file/download</code></td><td>RFB FTP：下载（支持 offset 断点续传）</td></tr>
+            <tr><td>POST</td><td><code>/rfb/file/md5</code></td><td>RFB FTP：MD5 校验</td></tr>
+            <tr><td>GET</td><td><code>/vnc/</code></td><td>noVNC 静态页面（访问 /vnc/vnc.html 打开远程桌面）</td></tr>
+            <tr><td>GET</td><td><code>/websockify</code></td><td>VNC WebSocket 代理（浏览器 ↔ VNC Server）</td></tr>
+            <tr><td>GET</td><td><code>/health</code></td><td>健康检查：shell / 时间 / vnc_detected</td></tr>
+          </tbody>
+        </table>
+      </fieldset>
+
+      <fieldset>
         <legend>快速开始</legend>
-        <pre>uv sync                                    # 安装依赖（Python 3.10+）
-uv run local-drop-shell                     # 启动应用
-uv run local-drop-shell --host 192.168.1.50 # 指定目标端
-uv run local-drop-shell --folder D:/data    # 启动时直接载入本地文件夹
-uv run python build_exe.py                  # 打包 dist/LocalFileDropShell_{时间戳}.exe</pre>
+        <pre>uv sync                                                         # 安装依赖（Python 3.10+）
+uv run local-drop-shell --role gui                              # GUI 模式（默认）
+uv run local-drop-shell --role server --host 0.0.0.0 --port 10022  # 纯服务端
+uv run local-drop-shell --role client --url http://192.168.1.100:10022  # 交互式 shell
+uv run local-drop-shell --role client --url ... -c "Get-Location"       # 单次命令
+uv run python build_exe.py --with-vnc-bundle                    # 打包 + 内嵌 TightVNC/noVNC
+uv run python build_exe.py                                      # 普通打包 dist/LocalFileDropShell_{时间戳}.exe</pre>
       </fieldset>
     </div>
     <div class="statusbar">
-      <span class="grow">拖入文件/文件夹 → TightVNC 通道优先 / HTTP 回退</span>
+      <span class="grow">文件传送（TightVNC RFB / HTTP / Fountain）+ HTTP Shell + rsync + RFB FTP + VNC/noVNC</span>
       <span>TightVNC RFB File Transfer</span>
-      <span>aiohttp HTTP</span>
+      <span>HTTP Shell Exec</span>
+      <span>Rsync Delta</span>
+      <span>RFB FTP</span>
+      <span>noVNC WebSocket</span>
       <span>Decimen v3 Fountain</span>
       <span>Windows 95 UI</span>
     </div>

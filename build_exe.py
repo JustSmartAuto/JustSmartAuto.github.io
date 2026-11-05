@@ -1,10 +1,16 @@
 """PyInstaller 打包：单文件 exe，命名 LocalFileDropShell_{yyyyMMddHHmmss}。
 
-用法：uv run python build_exe.py
+用法：
+    uv run python build_exe.py                        # 普通打包（不内嵌 VNC/noVNC，探测已有直接复用）
+    uv run python build_exe.py --with-vnc-bundle      # 额外内嵌 tvnserver + noVNC 前端（无 TightVNC 环境兜底）
+
+参考：diffimg/build_exe.py（pywebview/tkinterdnd2/pythonnet 显式 collect-all）、
+      http_shell_cli_vnc（单文件 Go 二进制零依赖）。
 """
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import subprocess
 import sys
@@ -19,7 +25,7 @@ VENV_PYTHON = (ROOT / ".venv" / "Scripts" / "python.exe").resolve()
 def reexec_in_venv() -> None:
     """不在项目 venv 里时（如双击用了系统 Python），改用 .venv 解释器重跑自身。
 
-    系统 Python 即使装了 PyInstaller，通常也没有 pywebview / aiohttp / tkinterdnd2，
+    系统 Python 即使装了 PyInstaller，通常也没有 pywebview / aiohttp / websockets / click，
     打出来的 exe 会缺 webview 或 HTTP 服务模块，所以统一强制走项目 venv。
     """
     if Path(sys.executable).resolve() == VENV_PYTHON:
@@ -36,7 +42,14 @@ def check_deps() -> None:
     """打包前确认关键依赖可导入，缺了就明确报错而不是产出坏 exe。"""
     missing = [
         name
-        for name in ("webview", "PIL", "aiohttp", "PyInstaller")
+        for name in (
+            "webview",
+            "PIL",
+            "aiohttp",
+            "websockets",
+            "click",
+            "PyInstaller",
+        )
         if importlib.util.find_spec(name) is None
     ]
     if missing:
@@ -46,27 +59,63 @@ def check_deps() -> None:
 def main() -> None:
     reexec_in_venv()
     check_deps()
+
+    parser = argparse.ArgumentParser(description="PyInstaller 打包 LocalFileDropShell")
+    parser.add_argument(
+        "--with-vnc-bundle",
+        action="store_true",
+        help="额外内嵌 tvnserver + noVNC 前端（默认不内嵌，探测已有 VNC Server 直接复用）",
+    )
+    args = parser.parse_args()
+
     stamp = datetime.now().strftime("%Y%m%d%H%M%S")
     name = f"LocalFileDropShell_{stamp}"
 
     cmd = [
-        sys.executable, "-m", "PyInstaller",
-        "--onefile", "--windowed", "--noconfirm", "--clean",
-        "--name", name,
-        "--icon", str(ASSETS / "drop3.ico"),
-        "--add-data", f"{ASSETS}{';'}assets",
-        "--paths", str(ROOT / "src"),
+        sys.executable,
+        "-m",
+        "PyInstaller",
+        "--onefile",
+        "--windowed",
+        "--noconfirm",
+        "--clean",
+        "--name",
+        name,
+        "--icon",
+        str(ASSETS / "drop3.ico"),
+        "--add-data",
+        f"{ASSETS}{';'}assets",
+        "--paths",
+        str(ROOT / "src"),
         # pywebview 通过 importlib 动态加载平台后端，且自带 js 数据文件，
         # PyInstaller 静态分析收不到，必须显式收集
-        "--collect-all", "webview",
-        "--collect-all", "pythonnet",
-        "--collect-all", "clr_loader",
+        "--collect-all",
+        "webview",
+        "--collect-all",
+        "pythonnet",
+        "--collect-all",
+        "clr_loader",
         # tkinterdnd2 自带 tkdnd 的 tcl 脚本与原生 dll，也必须整体收集
-        "--collect-all", "tkinterdnd2",
-        "--hidden-import", "webview.platforms.winforms",
-        "--hidden-import", "webview.platforms.edgechromium",
-        str(ROOT / "src" / "localdropshell" / "app.py"),
+        "--collect-all",
+        "tkinterdnd2",
+        "--hidden-import",
+        "webview.platforms.winforms",
+        "--hidden-import",
+        "webview.platforms.edgechromium",
     ]
+
+    if args.with_vnc_bundle:
+        vnc_dir = ROOT / "vnc_bundle"
+        if vnc_dir.exists():
+            cmd += ["--add-data", f"{vnc_dir}{';'}vnc_bundle"]
+        else:
+            print(
+                "警告：--with-vnc-bundle 已指定但 vnc_bundle/ 目录不存在，"
+                "打包将不内嵌 VNC 文件。请先从 http_shell_cli_vnc/public_fs "
+                "拷贝 tvnc/ 与 novnc/ 到项目根目录 vnc_bundle/"
+            )
+
+    cmd.append(str(ROOT / "src" / "localdropshell" / "cli.py"))
     print(" ".join(cmd))
     subprocess.run(cmd, cwd=ROOT, check=True)
     print(f"打包完成: {ROOT / 'dist' / (name + '.exe')}")
