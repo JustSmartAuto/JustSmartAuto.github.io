@@ -24,6 +24,8 @@ from svgoverlay import VERSION
 from svgoverlay.overlay import build_export_payload, build_preview_payload
 from svgoverlay.pairs import Pair, scan_folder
 
+SUBDIR_NAME = "叠加图"
+
 logger = logging.getLogger(__name__)
 
 
@@ -82,6 +84,7 @@ class OverlayApi:
         self._pairs: list[Pair] = []
         self._stats: dict = {}
         self._initial_folder: str = ""
+        self._to_subdir = False
         self._busy = False
         self._cancel = threading.Event()
 
@@ -148,16 +151,19 @@ class OverlayApi:
 
     # —— 批量生成 ————————————————————————————————————
 
-    def generate(self) -> dict:
+    def generate(self, to_subdir: bool = False) -> dict:
         if self._busy:
             return {"error": "正在生成中"}
         if not self._pairs:
             return {"error": "当前文件夹没有有效数据（图片需有同名 SVG）"}
         self._busy = True
+        self._to_subdir = bool(to_subdir)
         self._cancel.clear()
         pairs = list(self._pairs)
-        threading.Thread(target=self._generate_worker, args=(pairs,), daemon=True).start()
-        return {"started": True, "total": len(pairs)}
+        threading.Thread(
+            target=self._generate_worker, args=(pairs, self._to_subdir), daemon=True
+        ).start()
+        return {"started": True, "total": len(pairs), "subdir": self._to_subdir}
 
     def cancel(self) -> dict:
         if self._busy:
@@ -165,13 +171,19 @@ class OverlayApi:
             self._push("onLog", {"text": "已请求取消，等待当前文件完成…"})
         return {"ok": True}
 
-    def _generate_worker(self, pairs: list[Pair]) -> None:
+    def _generate_worker(self, pairs: list[Pair], to_subdir: bool) -> None:
         total = len(pairs)
         written = 0
         failed = 0
         cancelled = False
         started = time.monotonic()
         try:
+            if to_subdir and self._folder is not None:
+                subdir = self._folder / SUBDIR_NAME
+                try:
+                    subdir.mkdir(parents=True, exist_ok=True)
+                except OSError as exc:
+                    self._push("onLog", {"text": f"无法创建「{SUBDIR_NAME}」目录：{exc}"})
             for index, pair in enumerate(pairs, 1):
                 if self._cancel.is_set():
                     cancelled = True
@@ -184,7 +196,7 @@ class OverlayApi:
                     if self._renderer is None:
                         raise RuntimeError("渲染器未初始化")
                     data = self._renderer.render(build_export_payload(pair))
-                    output = pair.output
+                    output = self._output_path(pair, to_subdir)
                     temp = output.with_name(output.name + ".part")
                     temp.write_bytes(data)
                     os.replace(temp, output)
@@ -217,6 +229,12 @@ class OverlayApi:
                 "elapsed": round(elapsed, 1),
             })
 
+    def _output_path(self, pair: Pair, to_subdir: bool) -> Path:
+        """输出路径：勾选时输出到所选文件夹下的「叠加图」子目录。"""
+        if to_subdir and self._folder is not None:
+            return self._folder / SUBDIR_NAME / pair.output.name
+        return pair.output
+
     # —— 浏览器回调 ————————————————————————————————
 
     def render_result(self, token: str, data_url: str | None, error: str | None) -> dict:
@@ -229,8 +247,10 @@ class OverlayApi:
     def open_output_folder(self) -> dict:
         if self._folder is None or not self._folder.is_dir():
             return {"error": "尚未选择文件夹"}
+        subdir = self._folder / SUBDIR_NAME
+        target = subdir if subdir.is_dir() else self._folder
         try:
-            os.startfile(str(self._folder))  # noqa: S606 - Windows 打开资源管理器
+            os.startfile(str(target))  # noqa: S606 - Windows 打开资源管理器
         except OSError as exc:
             return {"error": f"打开目录失败：{exc}"}
         return {"ok": True}

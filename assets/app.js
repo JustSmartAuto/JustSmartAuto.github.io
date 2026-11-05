@@ -190,7 +190,7 @@
 
   async function generate() {
     if (state.busy) return;
-    const result = await bridge().generate();
+    const result = await bridge().generate($('output-subdir').checked);
     if (!result || result.error) {
       const message = (result && result.error) || '无法开始生成';
       setStatus(message);
@@ -201,7 +201,8 @@
     setBusy(true);
     $('progress-fill').style.width = '0%';
     $('progress-text').textContent = '0 / ' + result.total;
-    log('开始生成 ' + result.total + ' 个文件（3 倍分辨率 · JPEG 品质 95%）');
+    log('开始生成 ' + result.total + ' 个文件（3 倍分辨率 · JPEG 品质 95% · 输出到「' +
+      (result.subdir ? '叠加图/' : './') + '」）');
   }
 
   async function cancel() {
@@ -438,7 +439,8 @@
           '2. 同名 SVG 与图片配对：如 _NG_01246.bmp ↔ _NG_01246.svg。\n' +
           '3. 点击列表行可查看「原图 + SVG」叠加预览。\n' +
           '4. 点击「开始生成」，按原图 3 倍分辨率合成，保存为 {文件名}_叠加图.jpg（JPEG 品质 95）。\n' +
-          '5. 输出文件与原图同目录，已存在时直接覆盖。'
+          '5. 勾选「输出到叠加图目录」时输出到所选文件夹下的「叠加图」子文件夹；\n' +
+          '   未勾选时输出到原图同目录。已存在时直接覆盖。'
         );
         break;
       case 'about':
