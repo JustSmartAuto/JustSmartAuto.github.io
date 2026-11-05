@@ -13,51 +13,29 @@ from pathlib import Path
 
 import tkinter as tk
 
+from localdropshell.settings import DEFAULT_VNC_PORT, format_target, parse_target
 from localdropshell.ui.tk_main import Win95_COLORS, Win95_FONT, Win95_FONT_BOLD
+from localdropshell.webview_win import launch_window
 
 
 logger = logging.getLogger("localdropshell.ui.web_vnc")
 
 
-# ---------------------------------------------------------------------------
-# pywebview 全局事件循环 (与 web_shell 共用, 只启一次)
-# ---------------------------------------------------------------------------
+def open_vnc_window(
+    base_url: str,
+    host: str | None = None,
+    port: int | None = None,
+) -> None:
+    """拉起独立的 VNC 远程桌面窗口（独立子进程，pywebview 在 main thread 启动）.
 
-_started_event_loop = False
-_webview_windows: list = []
-
-
-def _ensure_webview_event_loop() -> None:
-    global _started_event_loop
-    if _started_event_loop:
-        return
-    try:
-        import webview  # type: ignore[import-not-found]
-    except ImportError:
-        logger.warning("pywebview 未安装, VNC GUI 不可用")
-        return
-
-    def _run() -> None:
-        try:
-            webview.start()
-        except Exception as exc:
-            logger.warning("webview.start 异常: %s", exc)
-        finally:
-            _started_event_loop = False
-
-    import threading as _t
-    _t.Thread(target=_run, daemon=True, name="pywebview-loop", args=()).start()
-    _started_event_loop = True
-
-
-def open_vnc_window(base_url: str) -> None:
-    """拉起独立的 VNC 远程桌面 pywebview 窗口."""
-    _ensure_webview_event_loop()
-    try:
-        import webview  # type: ignore[import-not-found]
-    except ImportError:
-        logger.warning("pywebview 未安装")
-        return
+    host/port 为空时使用服务端本机探测结果。
+    """
+    if host:
+        target_text = format_target(host, int(port or DEFAULT_VNC_PORT))
+        target_url = f"{base_url}/vnc/vnc.html?host={host}&port={int(port or DEFAULT_VNC_PORT)}"
+    else:
+        target_text = "服务端本机 VNC"
+        target_url = f"{base_url}/vnc/"
 
     html = f"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
@@ -73,8 +51,9 @@ a {{ color:#0f0; }}
 .btn:hover {{ background:#0000aa; }}
 </style></head><body>
 <h3>🖥 VNC 远程桌面 — LocalFileDropShell</h3>
+<p>目标 VNC = <code>{target_text}</code></p>
 <p>base_url = <code>{base_url}</code></p>
-<p>noVNC 前端入口: <a href="{base_url}/vnc/">{base_url}/vnc/</a></p>
+<p>noVNC 前端入口: <a href="{target_url}">{target_url}</a></p>
 <p>WebSocket 代理: <code>{base_url}/websockify</code></p>
 <hr>
 <p>noVNC.js 前端待集成 (打包时可通过 --with-vnc-bundle 内嵌 tvnserver + noVNC)。</p>
@@ -82,19 +61,19 @@ a {{ color:#0f0; }}
 </body></html>"""
 
     try:
-        w = webview.create_window(
-            "VNC 远程桌面 — LocalFileDropShell",
-            html=html,
-            url=f"{base_url}/vnc/",
+        proc = launch_window(
+            url=target_url,
+            title=f"VNC 远程桌面 — {target_text}",
             width=1040,
             height=720,
-            min_size=(640, 420),
-            text_select=True,
+            html=html,
         )
-        _webview_windows.append(w)
-        logger.info("VNC 远程桌面窗口已创建: %s", w)
+        if proc is None:
+            logger.warning("VNC 远程桌面窗口启动失败 (pywebview 不可用)")
+        else:
+            logger.info("VNC 远程桌面子进程已启动 pid=%s -> %s", proc.pid, target_text)
     except Exception as exc:
-        logger.warning("pywebview.create_window 失败: %s", exc)
+        logger.warning("pywebview 窗口启动失败: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +139,36 @@ def build_vnc_tab(parent: tk.Frame, base_url: str) -> None:
         justify=tk.LEFT,
     ).pack(anchor="w", padx=12, pady=4)
 
+    # 远程地址输入（收藏夹“远程桌面”快捷按钮会回填到这里）
+    addr_row = tk.Frame(frame, bg=Win95_COLORS["chrome"])
+    addr_row.pack(anchor="w", padx=12, pady=(6, 0))
+
+    tk.Label(
+        addr_row,
+        text="远程地址:",
+        bg=Win95_COLORS["chrome"],
+        fg=Win95_COLORS["ink"],
+        font=Win95_FONT_BOLD,
+    ).pack(side=tk.LEFT, padx=(0, 4))
+
+    addr_var = tk.StringVar(value="")
+    addr_entry = tk.Entry(
+        addr_row,
+        textvariable=addr_var,
+        width=24,
+        font=Win95_FONT,
+        bd=2,
+        relief=tk.SUNKEN,
+    )
+    addr_entry.pack(side=tk.LEFT)
+    tk.Label(
+        addr_row,
+        text="（留空 = 服务端本机 VNC；端口省略按 5900）",
+        bg=Win95_COLORS["chrome"],
+        fg="#000080",
+        font=Win95_FONT,
+    ).pack(side=tk.LEFT, padx=(8, 0))
+
     # 探测结果 Label — 延迟从 health 端点取 vnc_detected
     probe_lbl = tk.Label(
         frame,
@@ -194,13 +203,33 @@ def build_vnc_tab(parent: tk.Frame, base_url: str) -> None:
         "cursor": "hand2",
     }
 
+    def _open_current() -> None:
+        raw = addr_var.get().strip()
+        target_host: str | None = None
+        target_port: int | None = None
+        if raw:
+            try:
+                target_host, target_port = parse_target(raw)
+            except ValueError as exc:
+                probe_lbl.configure(text=f"⚠ 地址无效: {exc}", fg="#c00000")
+                return
+            addr_var.set(format_target(target_host, target_port))
+        open_vnc_window(base_url, target_host, target_port)
+
     open_btn = tk.Button(
         frame,
         text="🖥  打开 VNC 远程桌面 (noVNC)",
-        command=lambda: open_vnc_window(base_url),
+        command=_open_current,
         **btn_style,
     )
     open_btn.pack(padx=12, pady=(10, 6))
+
+    addr_entry.bind("<Return>", lambda _e: _open_current())
+
+    def _set_target(target_host: str, target_port: int | None = None) -> None:
+        """收藏夹“远程桌面”快捷按钮：回填地址（不自动打开窗口）."""
+        addr_var.set(format_target(target_host, int(target_port or DEFAULT_VNC_PORT)))
+        probe_lbl.configure(text=f"🖥 当前目标 VNC: {addr_var.get()}", fg="#000080")
 
     refresh_btn = tk.Button(
         frame,
@@ -261,3 +290,9 @@ def build_vnc_tab(parent: tk.Frame, base_url: str) -> None:
             bg=Win95_COLORS["chrome"], fg=Win95_COLORS["ink"],
             font=("Consolas", 9, "normal"), anchor="w",
         ).pack(fill=tk.X)
+
+    return {
+        "root": frame,
+        "set_target": _set_target,
+        "open": _open_current,
+    }

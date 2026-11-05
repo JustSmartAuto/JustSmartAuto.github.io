@@ -744,6 +744,11 @@ def cli(ctx: click.Context, role: str, host: str | None, port: int | None,
 
 def main() -> None:
     """pyproject.toml 脚本入口."""
+    # pywebview 子进程入口：必须绕开 click，让 webview.start() 跑在 main thread
+    from localdropshell.webview_win import WINDOW_ENTRY_FLAG, run_from_argv
+
+    if len(sys.argv) > 1 and sys.argv[1] == WINDOW_ENTRY_FLAG:
+        raise SystemExit(run_from_argv(sys.argv[2:]))
     cli()
 
 

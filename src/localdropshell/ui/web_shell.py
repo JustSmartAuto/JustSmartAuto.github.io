@@ -9,57 +9,22 @@
 from __future__ import annotations
 
 import logging
-import os
-from pathlib import Path
 
 import tkinter as tk
 
 from localdropshell.ui.tk_main import Win95_COLORS, Win95_FONT, Win95_FONT_BOLD
+from localdropshell.webview_win import launch_window
 
 
 logger = logging.getLogger("localdropshell.ui.web_shell")
 
 
-# ---------------------------------------------------------------------------
-# pywebview 全局事件循环 — 只启动一次
-# ---------------------------------------------------------------------------
-
-_started_event_loop = False
-_webview_windows: list = []  # 防止 GC
-
-
-def _ensure_webview_event_loop() -> None:
-    global _started_event_loop
-    if _started_event_loop:
-        return
-    try:
-        import webview  # type: ignore[import-not-found]
-    except ImportError:
-        logger.warning("pywebview 未安装, Shell CLI GUI 不可用")
-        return
-
-    def _run() -> None:
-        try:
-            webview.start()
-        except Exception as exc:
-            logger.warning("webview.start 异常: %s", exc)
-        finally:
-            _started_event_loop = False
-
-    import threading
-    t = threading.Thread(target=_run, daemon=True, name="pywebview-loop")
-    t.start()
-    _started_event_loop = True
-
-
 def open_shell_window(base_url: str) -> None:
-    """拉起独立的 Shell CLI GUI pywebview 窗口."""
-    _ensure_webview_event_loop()
-    try:
-        import webview  # type: ignore[import-not-found]
-    except ImportError:
-        logger.warning("pywebview 未安装")
-        return
+    """拉起独立的 Shell CLI GUI 窗口.
+
+    pywebview 5.x 要求 ``webview.start()`` 在 main thread 调用，而 Tk 主界面
+    已占用 main thread，因此窗口在独立子进程中打开（见 webview_win.py）。
+    """
 
     html = f"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
@@ -81,19 +46,17 @@ h3 {{ color:#fff; }} pre {{ white-space: pre-wrap; }} code {{ background:#222; p
 </body></html>"""
 
     try:
-        w = webview.create_window(
-            "Shell CLI GUI — LocalFileDropShell",
-            html=html,
+        proc = launch_window(
             url=f"{base_url}/shell/",  # server.py 里有 /shell/ 静态 handler
+            title="Shell CLI GUI — LocalFileDropShell",
             width=960,
             height=620,
-            min_size=(640, 420),
-            text_select=True,
+            html=html,
         )
-        _webview_windows.append(w)
-        logger.info("Shell CLI GUI 窗口已创建: %s", w)
+        if proc is None:
+            logger.warning("Shell CLI GUI 窗口启动失败 (pywebview 不可用)")
     except Exception as exc:
-        logger.warning("pywebview.create_window 失败: %s", exc)
+        logger.warning("pywebview 窗口启动失败: %s", exc)
 
 
 # ---------------------------------------------------------------------------

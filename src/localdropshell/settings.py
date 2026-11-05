@@ -1,0 +1,205 @@
+"""配置目录 & 收藏夹持久化.
+
+配置目录优先级:
+    1. 环境变量 ``LOCAL_DROP_CONFIG_DIR``（调试 / 便携部署用）
+    2. ``D:/JustSmart/LocalFileDropShell``（首选，自动创建）
+    3. ``%APPDATA%/LocalFileDropShell``（首选目录不可写时回退）
+
+收藏夹文件为 ``<配置目录>/favorites.json``，UTF-8 + 原子写。
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+
+logger = logging.getLogger("localdropshell.settings")
+
+
+APP_NAME = "LocalFileDropShell"
+PRIMARY_CONFIG_DIR = Path("D:/JustSmart/LocalFileDropShell")
+FAVORITES_FILE = "favorites.json"
+DEFAULT_VNC_PORT = 5900
+
+_cached_dir: Path | None = None
+
+
+# ---------------------------------------------------------------------------
+# 配置目录
+# ---------------------------------------------------------------------------
+
+def _fallback_dir() -> Path:
+    """%APPDATA%/LocalFileDropShell（无 APPDATA 时退到用户目录）."""
+    appdata = os.environ.get("APPDATA")
+    root = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
+    return root / APP_NAME
+
+
+def config_dir() -> Path:
+    """返回（并尽力创建）配置目录；首选目录不可写时回退到 APPDATA."""
+    global _cached_dir
+    if _cached_dir is not None:
+        return _cached_dir
+
+    candidates: list[Path] = []
+    override = os.environ.get("LOCAL_DROP_CONFIG_DIR", "").strip()
+    if override:
+        candidates.append(Path(override))
+    candidates.append(PRIMARY_CONFIG_DIR)
+    candidates.append(_fallback_dir())
+
+    for path in candidates:
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            logger.info("配置目录不可用 %s (%s)", path, exc)
+            continue
+        _cached_dir = path
+        logger.info("配置目录: %s", path)
+        return path
+
+    # 全部失败：返回回退路径，后续读写会以异常形式暴露
+    _cached_dir = candidates[-1]
+    logger.warning("所有配置目录均不可用，回退到 %s", _cached_dir)
+    return _cached_dir
+
+
+def favorites_path() -> Path:
+    return config_dir() / FAVORITES_FILE
+
+
+# ---------------------------------------------------------------------------
+# 地址解析
+# ---------------------------------------------------------------------------
+
+def parse_target(text: str, default_port: int = DEFAULT_VNC_PORT) -> tuple[str, int]:
+    """解析 ``ip[:端口]``，端口省略时用 default_port（TightVNC 默认 5900）."""
+    raw = (text or "").strip()
+    if not raw:
+        raise ValueError("请输入远程地址，例如 192.168.1.10 或 192.168.1.10:5900")
+    if "://" in raw:
+        raw = raw.split("://", 1)[1]
+    raw = raw.split("/", 1)[0]
+
+    port_text = ""
+    if raw.startswith("["):  # [::1]:5900
+        end = raw.find("]")
+        if end < 0:
+            raise ValueError(f"IPv6 地址格式错误: {raw}")
+        host = raw[1:end]
+        rest = raw[end + 1:]
+        if rest.startswith(":"):
+            port_text = rest[1:]
+    elif raw.count(":") == 1:
+        host, port_text = raw.split(":", 1)
+    else:
+        host = raw
+
+    host = host.strip()
+    port_text = port_text.strip()
+    if not host:
+        raise ValueError("远程地址缺少主机名 / IP")
+    if " " in host:
+        raise ValueError(f"远程地址含空格: {host!r}")
+
+    if port_text:
+        try:
+            port = int(port_text)
+        except ValueError:
+            raise ValueError(f"端口必须是数字: {port_text!r}") from None
+        if not 1 <= port <= 65535:
+            raise ValueError(f"端口超出范围 (1-65535): {port}")
+    else:
+        port = default_port
+    return host, port
+
+
+def format_target(host: str, port: int) -> str:
+    return f"{host}:{port}"
+
+
+# ---------------------------------------------------------------------------
+# 收藏夹数据模型
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Favorite:
+    """一条收藏：备注名 + 远程主机/端口 + 文件传输默认路径."""
+
+    name: str
+    host: str
+    port: int = DEFAULT_VNC_PORT
+    path: str = "/"
+
+    def address(self) -> str:
+        return format_target(self.host, self.port)
+
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "host": self.host,
+            "port": self.port,
+            "path": self.path,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Favorite":
+        host = str(data.get("host") or "").strip()
+        name = str(data.get("name") or "").strip() or host
+        try:
+            port = int(data.get("port") or DEFAULT_VNC_PORT)
+        except (TypeError, ValueError):
+            port = DEFAULT_VNC_PORT
+        path = str(data.get("path") or data.get("dir") or "/").strip() or "/"
+        return cls(name=name, host=host, port=port, path=path)
+
+
+def load_favorites() -> list[Favorite]:
+    """读取收藏夹；文件缺失 / 损坏时返回空列表."""
+    path = favorites_path()
+    if not path.is_file():
+        return []
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        logger.warning("读取收藏夹失败 %s: %s", path, exc)
+        return []
+
+    items = raw.get("favorites") if isinstance(raw, dict) else raw
+    if not isinstance(items, list):
+        return []
+
+    favorites: list[Favorite] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        fav = Favorite.from_dict(item)
+        if fav.host:
+            favorites.append(fav)
+    return favorites
+
+
+def save_favorites(favorites: list[Favorite]) -> Path:
+    """原子写入收藏夹，返回写入的路径."""
+    path = favorites_path()
+    payload = {
+        "version": 1,
+        "favorites": [fav.to_dict() for fav in favorites],
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".favorites-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2)
+        os.replace(tmp_name, path)
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+    return path

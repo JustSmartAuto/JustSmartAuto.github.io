@@ -19,8 +19,10 @@ import hashlib
 import json
 import logging
 import os
+import posixpath
 import socket
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -136,20 +138,54 @@ def _get_vnc_tcp_port(app: web.Application) -> int | None:
     return getattr(result, "port", None) or None
 
 
-def _open_rfb_ftp(app: web.Application) -> tuple[_rfbftp.FtpSession, socket.socket]:
+def _parse_rfb_target(body: dict[str, Any] | None) -> tuple[str | None, int | None]:
+    """从请求 body / multipart meta 解析可选的远程目标 host/port.
+
+    未提供 host 时返回 (None, None)，表示使用服务端本机探测到的 VNC Server。
+    显式指定 host 而未指定 port 时按 TightVNC 默认端口 5900 处理。
+    """
+    if not body:
+        return None, None
+    raw_host = body.get("host")
+    host = raw_host.strip() if isinstance(raw_host, str) else ""
+    if not host:
+        return None, None
+
+    raw_port = body.get("port")
+    if raw_port in (None, ""):
+        port = 5900
+    else:
+        try:
+            port = int(raw_port)
+        except (TypeError, ValueError):
+            raise ValueError(f"port 必须是整数: {raw_port!r}") from None
+        if not 1 <= port <= 65535:
+            raise ValueError(f"port 超出范围 (1-65535): {port}")
+    return host, port
+
+
+def _open_rfb_ftp(
+    app: web.Application,
+    host: str | None = None,
+    port: int | None = None,
+) -> tuple[_rfbftp.FtpSession, socket.socket]:
     """连接 tightvnc (RFB FTP 扩展), 返回 (FtpSession, sock).
 
-    调用方负责在使用完毕后关闭 sock. 若未检测到 tightvnc 或连接失败,
-    抛 RuntimeError.
+    host/port 未指定时连接本机探测到的 VNC Server
+    （host 取 ``HTTP_SHELL_VNC_HOST``，默认 127.0.0.1）。
+    调用方负责在使用完毕后关闭 sock. 连接失败抛 RuntimeError.
     """
-    port = _get_vnc_tcp_port(app)
-    if port is None:
-        raise RuntimeError("未检测到可用的 VNC Server (tightvnc)")
-    host = os.environ.get("HTTP_SHELL_VNC_HOST", "127.0.0.1")
+    if host:
+        target_port = port or 5900
+    else:
+        target_port = _get_vnc_tcp_port(app)
+        if target_port is None:
+            raise RuntimeError("未检测到可用的 VNC Server (tightvnc)")
+        host = os.environ.get("HTTP_SHELL_VNC_HOST", "127.0.0.1")
     try:
-        sock = socket.create_connection((host, port), timeout=10.0)
+        sock = socket.create_connection((host, target_port), timeout=10.0)
     except OSError as e:
-        raise RuntimeError(f"连接 VNC Server 失败 {host}:{port} ({e})") from e
+        raise RuntimeError(f"连接 VNC Server 失败 {host}:{target_port} ({e})") from e
     # 跳过 RFB 握手 (TightVNC FTP 要求先走 VNC 握手再发扩展消息).
     # 为简单起见, 这里直接发 FTP 扩展请求; 实际 tightvnc 对 RFB 握手
     # 失败会关闭连接, 本函数调用者将在后续 FtpSession 请求时收到异常.
@@ -218,30 +254,44 @@ async def exec_handler(request: web.Request) -> web.Response:
 
 
 async def upload_handler(request: web.Request) -> web.Response:
-    """POST /upload — multipart 上传文件到本地."""
+    """POST /upload — multipart 上传文件.
+
+    * 未带 ``host`` 字段：上传到服务端本机路径（RFB FTP 可用时同步推送到本机 VNC Server）。
+    * 带 ``host`` / ``port`` 字段：直接经 RFB FTP 写入该远程主机，不落本地磁盘。
+    """
     started = time.perf_counter()
     sock = None
     ftp: _rfbftp.FtpSession | None = None
+    tmp_path: Path | None = None
     try:
-        vnc_port = _get_vnc_tcp_port(request.app)
-        if vnc_port is not None:
-            try:
-                ftp, sock = _open_rfb_ftp(request.app)
-            except Exception:
-                ftp, sock = None, None
-
         data = await request.multipart()
-        file_field: Any = None  # 真正的文件体字段 (带 filename)
         meta: dict[str, Any] = {}
+        total_size = 0
+        # 文件体必须在遍历 multipart 时立即读取 —— aiohttp 在 next() 之后
+        # 会消耗掉上一个 part 的剩余数据，事后读会拿到空内容。
         while True:
             part = await data.next()
             if part is None:
                 break
             filename = getattr(part, "filename", None)
             if filename:
-                # 有 filename 的 part 视为文件体
-                file_field = part
+                # 有 filename 的 part 视为文件体，直接落到系统临时文件
                 meta["filename"] = filename
+                if tmp_path is not None:
+                    try:
+                        tmp_path.unlink()
+                    except OSError:
+                        pass
+                fd, tmp_name = tempfile.mkstemp(prefix="lds-upload-", suffix=".part")
+                tmp_path = Path(tmp_name)
+                total_size = 0
+                with os.fdopen(fd, "wb") as f:
+                    while True:
+                        chunk = await part.read_chunk()
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        total_size += len(chunk)
             else:
                 # 其它 part 收集为元数据
                 try:
@@ -249,49 +299,88 @@ async def upload_handler(request: web.Request) -> web.Response:
                 except Exception:
                     meta[part.name] = ""
 
+        try:
+            remote_host, remote_port = _parse_rfb_target(meta)
+        except ValueError as e:
+            return json_error(str(e), 400)
+        remote_mode = remote_host is not None
+
         target_path = meta.get("path") or meta.get("remote")
         if not target_path:
             return json_error("缺少 path 字段", 400)
 
-        try:
-            local_path = _validate_path(target_path)
-        except ValueError as e:
-            return json_error(str(e), 400)
+        if remote_mode:
+            remote_dir = (meta.get("dir") or meta.get("remote_dir") or "/").strip() or "/"
+            if target_path.startswith("/"):
+                remote_path = target_path
+            else:
+                remote_path = posixpath.join(remote_dir, target_path)
+            local_path = None
+        else:
+            try:
+                local_path = _validate_path(target_path)
+            except ValueError as e:
+                return json_error(str(e), 400)
+            remote_path = target_path
 
-        # 父目录自动创建
+        if tmp_path is None:  # 没有文件体 —— 当成空文件
+            fd, tmp_name = tempfile.mkstemp(prefix="lds-upload-", suffix=".part")
+            tmp_path = Path(tmp_name)
+            os.close(fd)
+
+        if remote_mode:
+            try:
+                ftp, sock = _open_rfb_ftp(request.app, remote_host, remote_port)
+                offset = int(meta.get("offset") or 0)
+                await _run_in_executor(
+                    _rfb_upload_inplace, ftp, str(tmp_path), remote_path, offset, True,
+                )
+            finally:
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
+                    sock = None
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            logger.info("POST /upload -> rfb %s:%s path=%s bytes=%d ms=%d",
+                        remote_host, remote_port, remote_path, total_size, elapsed_ms)
+            return json_ok({
+                "path": remote_path,
+                "size": total_size,
+                "target": f"{remote_host}:{remote_port}",
+            })
+
+        # 本地模式：RFB FTP 回传本机 VNC Server（存在时）
+        assert local_path is not None
         try:
             local_path.parent.mkdir(parents=True, exist_ok=True)
         except OSError as e:
             return json_error(f"无法创建父目录: {e}", 500)
 
-        # 先落盘到临时文件 (RFB FTP 模式也先本地缓存, 简化流程)
-        tmp_path = local_path.with_name(local_path.name + ".part")
-        total_size = 0
-        with open(tmp_path, "wb") as f:
-            if file_field is not None:
-                while True:
-                    chunk = await file_field.read_chunk()
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    total_size += len(chunk)
-
-        # RFB FTP 回传远程 (tightvnc 存在时)
-        if ftp is not None:
+        if _get_vnc_tcp_port(request.app) is not None:
             try:
+                ftp, sock = _open_rfb_ftp(request.app)
                 offset = int(meta.get("offset") or 0)
                 await _run_in_executor(
                     _rfb_upload_inplace,
                     ftp, str(tmp_path), target_path, offset, bool(meta.get("overwrite", True)),
                 )
             except Exception as e:
-                # RFB FTP 失败不影响本地已写入 — 把本地文件重命名为最终名
+                # RFB FTP 失败不影响本地已写入
                 logger.warning("RFB FTP 上传失败, 保留本地: %s", e)
 
         try:
             os.replace(tmp_path, local_path)
+            tmp_path = None
         except OSError as e:
-            return json_error(f"重命名临时文件失败: {e}", 500)
+            try:
+                import shutil
+
+                shutil.move(str(tmp_path), str(local_path))
+                tmp_path = None
+            except OSError as move_err:
+                return json_error(f"保存文件失败: {move_err} (原错误: {e})", 500)
 
         elapsed_ms = int((time.perf_counter() - started) * 1000)
         logger.info("POST /upload path=%s bytes=%d ms=%d", local_path, total_size, elapsed_ms)
@@ -300,6 +389,11 @@ async def upload_handler(request: web.Request) -> web.Response:
         logger.exception("POST /upload 异常")
         return json_error(str(exc), 500)
     finally:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
         if sock is not None:
             try:
                 sock.close()
@@ -347,6 +441,17 @@ async def download_handler(request: web.Request) -> web.Response:
             offset = int(body.get("offset") or 0)
         except (TypeError, ValueError):
             return json_error("offset 必须是整数", 400)
+
+        try:
+            remote_host, _remote_port = _parse_rfb_target(body)
+        except ValueError as e:
+            return json_error(str(e), 400)
+        if remote_host is not None:
+            return json_error(
+                "远程目标暂不支持下载（RFB 下载协议未实现），"
+                "请改用 http://127.0.0.1:10022/download 走本机路径或 CLI 命令",
+                501,
+            )
 
         try:
             local_path = _validate_path(path)
@@ -573,12 +678,47 @@ async def rsync_apply_handler(request: web.Request) -> web.Response:
 # ---------------------------------------------------------------------------
 
 async def rfb_list_handler(request: web.Request) -> web.Response:
-    """POST /rfb/file/list — 列出远程或本地目录."""
+    """POST /rfb/file/list — 列出远程或本地目录.
+
+    body 支持可选 ``host`` / ``port``：
+      * 指定 host → 必须通过该主机的 RFB FTP 列举（失败直接报错，不回退本地）
+      * 未指定 → 本机探测到的 VNC Server 优先，失败回退本地目录
+    """
     started = time.perf_counter()
     sock: socket.socket | None = None
     try:
         body = await request.json()
         path = body.get("path", "/")
+        try:
+            remote_host, remote_port = _parse_rfb_target(body)
+        except ValueError as e:
+            return json_error(str(e), 400)
+
+        if remote_host is not None:
+            try:
+                ftp, sock = _open_rfb_ftp(request.app, remote_host, remote_port)
+                entries = await _run_in_executor(ftp.list_dir, path)
+            except Exception as e:
+                logger.info("RFB list 远程目标失败 %s:%s: %s", remote_host, remote_port, e)
+                return json_error(
+                    f"连接远程 VNC 失败 {remote_host}:{remote_port} — {e}", 502
+                )
+            finally:
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
+                    sock = None
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            logger.info("POST /rfb/file/list (rfb %s:%s) path=%s entries=%d ms=%d",
+                        remote_host, remote_port, path, len(entries), elapsed_ms)
+            return json_ok({
+                "path": path,
+                "entries": entries,
+                "target": f"{remote_host}:{remote_port}",
+            })
+
         vnc_port = _get_vnc_tcp_port(request.app)
         if vnc_port is not None:
             try:
@@ -698,13 +838,24 @@ async def rfb_md5_handler(request: web.Request) -> web.Response:
 # ---------------------------------------------------------------------------
 
 async def vnc_static_handler(request: web.Request) -> web.Response:
-    """GET /vnc/ — noVNC UI 入口 (实际静态由 UI 层提供)."""
+    """GET /vnc/ — noVNC UI 入口 (实际静态由 UI 层提供).
+
+    支持 ``?host=&port=`` 查询参数，用于收藏夹"远程桌面"快捷跳转。
+    """
     vnc_result = request.app.get("vnc_result")
-    port = getattr(vnc_result, "port", None) if vnc_result else None
+    detected_port = getattr(vnc_result, "port", None) if vnc_result else None
+    query_host = (request.query.get("host") or "").strip()
+    query_port = (request.query.get("port") or "").strip()
+    host = query_host or "127.0.0.1"
+    try:
+        port = int(query_port) if query_port else detected_port
+    except ValueError:
+        port = detected_port
     payload = {
         "vnc_detected": bool(port),
+        "host": host,
         "port": port,
-        "noVNC_url": f"/vnc/vnc.html?host=127.0.0.1&port={port}" if port else None,
+        "noVNC_url": f"/vnc/vnc.html?host={host}&port={port}" if port else None,
     }
     return json_ok(payload)
 

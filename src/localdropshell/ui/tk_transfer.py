@@ -14,20 +14,59 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import posixpath
 import queue
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import tkinter as tk
 import tkinter.ttk as ttk
 
+from localdropshell.settings import DEFAULT_VNC_PORT, format_target, parse_target
 from localdropshell.ui.tk_drop import enable_drop_dnd
 
 
 logger = logging.getLogger("localdropshell.ui.tk_transfer")
+
+
+# ---------------------------------------------------------------------------
+# 通用格式化 / 远程目标参数
+# ---------------------------------------------------------------------------
+
+def _format_size(n: int) -> str:
+    if n < 1024:
+        return f"{n} B"
+    if n < 1024 ** 2:
+        return f"{n / 1024:.1f} KB"
+    if n < 1024 ** 3:
+        return f"{n / (1024 ** 2):.1f} MB"
+    return f"{n / (1024 ** 3):.2f} GB"
+
+
+def _format_mtime(ts: float) -> str:
+    if not ts:
+        return ""
+    try:
+        return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
+    except Exception:
+        return ""
+
+
+def _target_fields(target: dict[str, Any] | None) -> dict[str, Any]:
+    """把当前目标转换成请求里要带的 host/port；未连接时返回空 dict."""
+    if not target or not target.get("connected"):
+        return {}
+    host = str(target.get("host") or "").strip()
+    if not host:
+        return {}
+    try:
+        port = int(target.get("port") or DEFAULT_VNC_PORT)
+    except (TypeError, ValueError):
+        port = DEFAULT_VNC_PORT
+    return {"host": host, "port": port}
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +136,10 @@ def _http_worker(base_url: str, req: _HttpRequest) -> None:
                         form = aiohttp.FormData()
                         form.add_field("path", os.path.basename(local_path))
                         form.add_field("dir", remote_dir)
+                        host = str(req.payload.get("host") or "")
+                        if host:
+                            form.add_field("host", host)
+                            form.add_field("port", str(req.payload.get("port") or DEFAULT_VNC_PORT))
                         form.add_field("file", fh, filename=os.path.basename(local_path))
 
                         async with sess.post(
@@ -112,9 +155,12 @@ def _http_worker(base_url: str, req: _HttpRequest) -> None:
                     local_dir: str = req.payload.get("local_dir", str(Path.home()))
                     out["data"] = {"local_dir": local_dir}
 
+                    body = {"path": remote_path}
+                    body.update(_target_fields(req.payload))
+
                     async with sess.post(
                         f"{base_url}/download",
-                        json={"path": remote_path},
+                        json=body,
                         timeout=aiohttp.ClientTimeout(total=300),
                     ) as resp:
                         if resp.status == 200:
@@ -159,7 +205,6 @@ def _run_http(base_url: str, kind: str, payload: dict) -> dict:
 def build_transfer_tab(
     parent: tk.Frame,
     base_url: str,
-    host: str | None = None,
     initial_folder: str | None = None,
 ) -> dict:
     """在 parent 内构造完整的文件传输 UI.
@@ -167,11 +212,67 @@ def build_transfer_tab(
     Returns
     -------
     dict
-        {"root": frame, "add_paths": callable, "log": callable, "set_progress": callable}
+        {"root", "add_paths", "log", "set_progress", "set_target", "get_target"}
+        ``set_target(host, port, path)`` 供收藏夹快捷按钮填入远程地址并连接。
     """
 
     root = tk.Frame(parent, bg=Win95_COLORS["chrome"])
     root.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+
+    # ========= 顶部: 远程地址栏 =========
+    initial_host = "127.0.0.1"
+    target: dict[str, Any] = {
+        "host": initial_host,
+        "port": DEFAULT_VNC_PORT,
+        "dir": "/",
+        "connected": False,  # False 表示沿用服务端本机探测到的 VNC Server
+    }
+
+    addr_bar = tk.Frame(root, bg=Win95_COLORS["chrome"])
+    addr_bar.pack(side=tk.TOP, fill=tk.X, pady=(0, 4))
+
+    tk.Label(addr_bar, text="远程地址:", bg=Win95_COLORS["chrome"],
+             fg=Win95_COLORS["ink"], font=Win95_FONT_BOLD).pack(side=tk.LEFT, padx=(2, 4))
+
+    addr_var = tk.StringVar(value=initial_host)
+    addr_entry = tk.Entry(addr_bar, textvariable=addr_var, width=20, font=Win95_FONT,
+                          bd=2, relief=tk.SUNKEN)
+    addr_entry.pack(side=tk.LEFT, padx=(0, 6))
+
+    tk.Label(addr_bar, text="远程目录:", bg=Win95_COLORS["chrome"],
+             fg=Win95_COLORS["ink"], font=Win95_FONT_BOLD).pack(side=tk.LEFT, padx=(6, 4))
+
+    dir_var = tk.StringVar(value="/")
+    dir_entry = tk.Entry(addr_bar, textvariable=dir_var, width=16, font=Win95_FONT,
+                         bd=2, relief=tk.SUNKEN)
+    dir_entry.pack(side=tk.LEFT, padx=(0, 6))
+
+    small_btn_style = {
+        "font": Win95_FONT,
+        "bg": Win95_COLORS["chrome"],
+        "fg": Win95_COLORS["ink"],
+        "activebackground": Win95_COLORS["chrome_light"],
+        "activeforeground": Win95_COLORS["ink"],
+        "bd": 2,
+        "relief": tk.RAISED,
+        "padx": 8,
+        "pady": 2,
+    }
+
+    connect_btn = tk.Button(addr_bar, text="连接", width=8, **small_btn_style)
+    connect_btn.pack(side=tk.LEFT, padx=2)
+
+    refresh_btn = tk.Button(addr_bar, text="刷新列表", **small_btn_style)
+    refresh_btn.pack(side=tk.LEFT, padx=2)
+
+    status_lbl = tk.Label(
+        addr_bar,
+        text="当前目标: 服务端本机 VNC（未连接远程地址）",
+        bg=Win95_COLORS["chrome"],
+        fg="#000080",
+        font=Win95_FONT,
+    )
+    status_lbl.pack(side=tk.LEFT, padx=(10, 2))
 
     # ========= 顶部 Paned 三栏 =========
     paned = tk.PanedWindow(
@@ -237,13 +338,13 @@ def build_transfer_tab(
     }
 
     tk.Button(mid_frame, text="→ 上传选中", **btn_style,
-              command=lambda: _do_upload(base_url, local_tree, remote_tree, _item_store, log, set_progress)).pack(fill=tk.X, padx=4, pady=2)
+              command=lambda: _do_upload(base_url, local_tree, remote_tree, _item_store, log, set_progress, target)).pack(fill=tk.X, padx=4, pady=2)
     tk.Button(mid_frame, text="← 下载选中", **btn_style,
-              command=lambda: _do_download(base_url, local_tree, remote_tree, _item_store, log, set_progress)).pack(fill=tk.X, padx=4, pady=2)
+              command=lambda: _do_download(base_url, local_tree, remote_tree, _item_store, log, set_progress, target)).pack(fill=tk.X, padx=4, pady=2)
     tk.Button(mid_frame, text="批量生成 (递归)", **btn_style,
-              command=lambda: _do_batch(base_url, local_tree, remote_tree, _item_store, log, set_progress)).pack(fill=tk.X, padx=4, pady=2)
+              command=lambda: _do_batch(base_url, local_tree, remote_tree, _item_store, log, set_progress, target)).pack(fill=tk.X, padx=4, pady=2)
     tk.Button(mid_frame, text="刷新远程列表", **btn_style,
-              command=lambda: _refresh_remote(base_url, remote_tree, _item_store, log)).pack(fill=tk.X, padx=4, pady=2)
+              command=lambda: _refresh_remote(base_url, remote_tree, _item_store, log, target)).pack(fill=tk.X, padx=4, pady=2)
     tk.Button(mid_frame, text="清除本地列表", **btn_style,
               command=lambda: _clear_tree(local_tree, _item_store["local"])).pack(fill=tk.X, padx=4, pady=2)
 
@@ -280,7 +381,7 @@ def build_transfer_tab(
     # 右键 → 刷新
     remote_menu = tk.Menu(root, tearoff=0)
     remote_menu.add_command(label="刷新列表",
-                            command=lambda: _refresh_remote(base_url, remote_tree, _item_store, log))
+                            command=lambda: _refresh_remote(base_url, remote_tree, _item_store, log, target))
     remote_tree.bind("<Button-3>", lambda e: remote_menu.tk_popup(e.x_root, e.y_root))
 
     # ========= 底部: 进度条 + 日志 =========
@@ -321,23 +422,6 @@ def build_transfer_tab(
     }
 
     # ========= 工具函数 =========
-    def _format_size(n: int) -> str:
-        if n < 1024:
-            return f"{n} B"
-        elif n < 1024 ** 2:
-            return f"{n / 1024:.1f} KB"
-        elif n < 1024 ** 3:
-            return f"{n / (1024 ** 2):.1f} MB"
-        return f"{n / (1024 ** 3):.2f} GB"
-
-    def _format_mtime(ts: float) -> str:
-        if not ts:
-            return ""
-        try:
-            return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
-        except Exception:
-            return ""
-
     def _add_paths(paths: list[str]) -> None:
         """把绝对路径追加到本地列表."""
         for raw in paths:
@@ -405,6 +489,42 @@ def build_transfer_tab(
     set_progress = _set_progress
     add_paths = _add_paths
 
+    # ========= 远程地址栏动作 =========
+    def _on_connect() -> None:
+        try:
+            t_host, t_port = parse_target(addr_var.get())
+        except ValueError as exc:
+            status_lbl.configure(text=f"⚠ {exc}", fg="#c00000")
+            log(f"⚠ {exc}")
+            return
+        target["host"] = t_host
+        target["port"] = t_port
+        target["dir"] = dir_var.get().strip() or "/"
+        target["connected"] = True
+        addr_var.set(format_target(t_host, t_port))
+        status_lbl.configure(
+            text=f"当前目标: {format_target(t_host, t_port)}  目录 {target['dir']}",
+            fg="#000080",
+        )
+        log(f"ℹ 已连接远程目标 {format_target(t_host, t_port)}，目录 {target['dir']}")
+        _refresh_remote(base_url, remote_tree, _item_store, log, target)
+
+    def _on_refresh() -> None:
+        target["dir"] = dir_var.get().strip() or "/"
+        _refresh_remote(base_url, remote_tree, _item_store, log, target)
+
+    def _set_target(t_host: str, t_port: int | None = None, t_path: str | None = None) -> None:
+        """供收藏夹快捷按钮调用：填入地址/目录并立即连接."""
+        addr_var.set(format_target(t_host, int(t_port or DEFAULT_VNC_PORT)))
+        if t_path:
+            dir_var.set(t_path)
+        _on_connect()
+
+    connect_btn.configure(command=_on_connect)
+    refresh_btn.configure(command=_on_refresh)
+    addr_entry.bind("<Return>", lambda _e: _on_connect())
+    dir_entry.bind("<Return>", lambda _e: _on_refresh())
+
     # 初始化目录
     if initial_folder:
         log(f"ℹ 初始目录: {initial_folder}")
@@ -412,13 +532,15 @@ def build_transfer_tab(
 
     # 启动后异步探测远程
     log(f"ℹ 文件传输标签页已挂载, base_url={base_url}")
-    root.after(400, lambda: _refresh_remote(base_url, remote_tree, _item_store, log))
+    root.after(400, lambda: _refresh_remote(base_url, remote_tree, _item_store, log, target))
 
     return {
         "root": root,
         "add_paths": add_paths,
         "log": log,
         "set_progress": set_progress,
+        "set_target": _set_target,
+        "get_target": lambda: dict(target),
     }
 
 
@@ -486,9 +608,14 @@ def _refresh_remote(
     tree: ttk.Treeview,
     store: dict[str, FileItem],
     log: Callable[[str], None],
+    target: dict[str, Any] | None = None,
 ) -> None:
+    remote_dir = str((target or {}).get("dir") or "/")
+    payload: dict[str, Any] = {"path": remote_dir}
+    payload.update(_target_fields(target))
+
     def _worker() -> None:
-        result = _run_http(base_url, "list_remote", {"dir": "/"})
+        result = _run_http(base_url, "list_remote", payload)
         root = tree.winfo_toplevel()
 
         def _apply() -> None:
@@ -498,21 +625,23 @@ def _refresh_remote(
             if not result.get("ok"):
                 log(f"⚠ 远程列表获取失败: {result.get('error') or result.get('data')}")
                 return
-            items = (result.get("data") or {}).get("items", [])
-            for it in items:
-                path = it.get("path") or it.get("name") or ""
+            data = result.get("data") or {}
+            entries = data.get("entries") or data.get("items") or []
+            base_dir = data.get("path") or remote_dir
+            for it in entries:
+                name = it.get("name") or str(it.get("path") or "").rsplit("/", 1)[-1]
+                path = it.get("path") or posixpath.join(base_dir, name)
+                size = int(it.get("size") or 0)
+                mtime = float(it.get("mod_time", it.get("mtime", 0)) or 0)
+                status = "目录" if it.get("is_dir") else "文件"
                 uid = tree.insert(
                     "", tk.END,
-                    values=(
-                        path.split("/")[-1] or path,
-                        it.get("size", 0),
-                        it.get("mtime", 0),
-                        "远程",
-                    ),
+                    values=(name, _format_size(size), _format_mtime(mtime), status),
                 )
-                store[uid] = FileItem(path=path, size=it.get("size", 0),
-                                      mtime=it.get("mtime", 0.0), status="远程")
-            log(f"ℹ 远程列表刷新成功, {len(items)} 项")
+                store[uid] = FileItem(path=path, size=size, mtime=mtime, status=status)
+            target_text = (result.get("data") or {}).get("target")
+            suffix = f" @ {target_text}" if target_text else ""
+            log(f"ℹ 远程列表刷新成功{suffix}, {len(entries)} 项")
         try:
             root.after(0, _apply)
         except Exception:
@@ -533,26 +662,30 @@ def _do_upload(
     store: dict[str, dict[str, FileItem]],
     log: Callable[[str], None],
     set_progress: Callable[[float, float, str], None],
+    target: dict[str, Any] | None = None,
 ) -> None:
     items = _get_selected_items(local_tree, store["local"])
     if not items:
         log("⚠ 请先在左侧选择要上传的本地文件")
         return
+    remote_dir = str((target or {}).get("dir") or "/")
 
     def _worker() -> None:
         total = len(items)
         for idx, item in enumerate(items, 1):
             set_progress(idx, total, f"上传 {os.path.basename(item.path)}")
-            result = _run_http(base_url, "upload", {
+            payload: dict[str, Any] = {
                 "local_path": item.path,
-                "remote_dir": "/",
-            })
+                "remote_dir": remote_dir,
+            }
+            payload.update(_target_fields(target))
+            result = _run_http(base_url, "upload", payload)
             log(f"{'✅' if result.get('ok') else '❌'} 上传 {item.label()}: {result.get('data') or result.get('error')}")
         set_progress(total, total, "上传完成")
         # 刷新远程列表
-        _refresh_remote(base_url, remote_tree, store["remote"], log)
+        _refresh_remote(base_url, remote_tree, store["remote"], log, target)
 
-    log(f"ℹ 开始上传 {len(items)} 个文件...")
+    log(f"ℹ 开始上传 {len(items)} 个文件 → {remote_dir} ...")
     threading.Thread(target=_worker, daemon=True).start()
 
 
@@ -563,6 +696,7 @@ def _do_download(
     store: dict[str, dict[str, FileItem]],
     log: Callable[[str], None],
     set_progress: Callable[[float, float, str], None],
+    target: dict[str, Any] | None = None,
 ) -> None:
     items = _get_selected_items(remote_tree, store["remote"])
     if not items:
@@ -574,10 +708,12 @@ def _do_download(
         total = len(items)
         for idx, item in enumerate(items, 1):
             set_progress(idx, total, f"下载 {item.label()}")
-            result = _run_http(base_url, "download", {
+            payload: dict[str, Any] = {
                 "remote_path": item.path,
                 "local_dir": local_dir,
-            })
+            }
+            payload.update(_target_fields(target))
+            result = _run_http(base_url, "download", payload)
             log(f"{'✅' if result.get('ok') else '❌'} 下载 {item.label()}: {result.get('data') or result.get('error')}")
         set_progress(total, total, "下载完成")
 
@@ -592,12 +728,14 @@ def _do_batch(
     store: dict[str, dict[str, FileItem]],
     log: Callable[[str], None],
     set_progress: Callable[[float, float, str], None],
+    target: dict[str, Any] | None = None,
 ) -> None:
     """批量生成 — 递归扫描选中目录并逐个上传."""
     items = _get_selected_items(local_tree, store["local"])
     if not items:
         log("⚠ 请先在左侧选择要批量上传的本地条目")
         return
+    remote_dir = str((target or {}).get("dir") or "/")
 
     # 展开目录里所有文件
     from pathlib import Path
@@ -617,10 +755,12 @@ def _do_batch(
         total = len(flat)
         for idx, abs_path in enumerate(flat, 1):
             set_progress(idx, total, f"批量上传 {os.path.basename(abs_path)}")
-            result = _run_http(base_url, "upload", {
+            payload: dict[str, Any] = {
                 "local_path": abs_path,
-                "remote_dir": "/",
-            })
+                "remote_dir": remote_dir,
+            }
+            payload.update(_target_fields(target))
+            result = _run_http(base_url, "upload", payload)
             ok = result.get("ok")
             label = os.path.basename(abs_path)
             if ok:
@@ -628,7 +768,7 @@ def _do_batch(
             else:
                 log(f"❌ {label}: {result.get('error') or result.get('data')}")
         set_progress(total, total, "批量上传完成")
-        _refresh_remote(base_url, remote_tree, store["remote"], log)
+        _refresh_remote(base_url, remote_tree, store["remote"], log, target)
 
     threading.Thread(target=_worker, daemon=True).start()
 

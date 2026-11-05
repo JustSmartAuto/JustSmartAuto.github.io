@@ -241,6 +241,9 @@ def main() -> None:
         "webview.platforms.winforms",
         "--hidden-import",
         "webview.platforms.edgechromium",
+        # 独立 pywebview 子进程入口（exe 自身以 --webview-window 再启动一次）
+        "--hidden-import",
+        "localdropshell.webview_win",
         # —— tkinterdnd2（Win32 WM_DROPFILES 原生拖放，主界面文件传输）——
         "--collect-all",
         "tkinterdnd2",

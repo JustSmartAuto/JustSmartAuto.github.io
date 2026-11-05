@@ -10,13 +10,15 @@
 | **rsync 增量同步** | Tk 主界面 / CLI | Adler-32 + MD5 双阶段块级 delta，push / pull 双向，自动回退全量 |
 | **RFB 文件传输** | Tk 主界面 | TightVNC FTP 扩展消息，支持 offset 断点续传、MD5 块校验、目录列表 |
 | **VNC 远程桌面** | pywebview 标签页（VNC） | 自动探测已有 TightVNC / RealVNC / UltraVNC 直接复用；无则可内嵌启动 + noVNC + WebSocket 代理；未安装 TightVNC 时用内嵌 MSI 静默提权安装 |
+| **远程地址 / 收藏夹** | Tk 文件传输页顶栏 + 收藏夹页 | 输入 `ip[:端口]`（省略按 5900）点“连接”直连该远程 VNC；收藏备注名 / ip:port / 文件传输默认路径，持久化到 `D:/JustSmart/LocalFileDropShell/favorites.json`（不可写回退 `%APPDATA%/LocalFileDropShell`） |
 | **CLI 交互式 shell** | 纯控制台 | 同进程三角色（`gui` / `server` / `client`），内置 upload / download / rsync / rfb-* 等命令 |
 
 **混合 UI 架构**：
 - **主窗口（Tkinter + tkinterdnd2）**：负责文件/文件夹拖放、传输列表、进度条、日志输出、批量生成——Windows 95 风格（3D 凸起边框、Teal 标题栏、MS Sans Serif）
 - **VNC 标签页（pywebview 内嵌）**：noVNC 前端，通过 WebSocket 代理桥接到本机 VNC Server
 - **Shell CLI GUI 标签页（pywebview 内嵌）**：本地 Web Terminal，通过 `/exec` 路由发送命令，实时回显 stdout/stderr/exit_code
-- 三个子界面共享同一 **aiohttp 服务端**（默认端口 10022），pywebview 标签页只做"壳"，全部业务逻辑在本地 HTTP
+- **收藏夹标签页（Tk）**：每条收藏带“文件传输”/“远程桌面”快捷按钮，点击切页并自动填入远程地址与默认路径，便于运维批量切换工控机
+- 四个子界面共享同一 **aiohttp 服务端**（默认端口 10022），pywebview 标签页只做"壳"，全部业务逻辑在本地 HTTP
 
 ---
 
@@ -29,8 +31,9 @@
 │  │ 文件  传输  Shell  VNC  帮助                                │   │
 │  └────────────────────────────────────────────────────────────┘   │
 │  ┌─ Tk Notebook 标签页 ─────────────────────────────────────┐   │
-│  │ [ 文件传输 ] [ Shell CLI GUI ] [ VNC 远程桌面 ]          │   │
+│  │ [ 文件传输 ] [ Shell CLI GUI ] [ VNC 远程桌面 ] [ ⭐ 收藏夹 ] │   │
 │  │  ┌─ 文件传输 (Tk Frame) ──────────────────────────────┐   │   │
+│  │  │ [远程地址 ip[:端口]] [连接] [远程目录] [刷新列表]   │   │   │
 │  │  │ 本地列表 Treeview │ 远程列表 Treeview │ 传输按钮   │   │   │
 │  │  │ (拖入 Win32 WM_DROPFILES 直接追加)   │ ↵ / → / ☰  │   │   │
 │  │  │ 进度条 / 日志 / 批量生成                           │   │   │
@@ -105,7 +108,18 @@ Shell 自动检测优先级：`pwsh.exe` → `powershell.exe` → `cmd.exe`。Wi
 
 ### `POST /upload` / `POST /download` 文件上传下载
 
-multipart/form-data：`file=@local.bin` + `path=/remote/dir/`（可选）。返回 `saved_as`、`size`。
+multipart/form-data：`file=@local.bin` + `path=/remote/dir/`（可选）。返回 `path`、`size`。
+
+可选字段 `host` / `port`（TightVNC 端口，默认 5900）：
+- 带 `host` → 服务端把文件经 RFB FTP **直接写入该远程主机**的 `dir/文件名`，不落本地磁盘（系统临时文件在传输后即删除）
+- 不带 `host` → 保持原有行为（写服务端本机路径，并在本机 VNC Server 可用时同步推送）
+
+`POST /download` 的 `host` 分支当前返回 501（RFB 下载协议尚未实现），本地路径下载不受影响。
+
+```json
+// POST /download（本地）
+{"path":"C:/Users/Public/a.bin","offset":0}
+```
 
 ### Rsync 增量同步接口
 
@@ -161,9 +175,16 @@ Rsync 自动回退全量传输的条件：远程文件不存在 / blockset 获�
 #### `POST /rfb/file/list` 列出目录
 
 ```json
+// 本机 VNC（不传 host）
 {"path":"C:/Users"}
-// → {"files":[{"name":"Desktop","size":0,"mod_time":1730000000,"is_dir":true},...]}
+// → {"path":"C:/Users","entries":[{"name":"Desktop","size":0,"mod_time":1730000000,"is_dir":true},...]}
+
+// 指定远程目标（收藏夹“文件传输”快捷按钮即走这条）
+{"path":"/data/inbox","host":"192.168.1.10","port":5900}
+// → {"path":"/data/inbox","entries":[...],"target":"192.168.1.10:5900"}
 ```
+
+指定 `host` 时只连该主机（失败返回 502，不回退本地目录）；未指定时沿用本机探测到的 VNC Server，失败回退本地目录列举。
 
 #### `POST /rfb/file/upload` 上传（支持断点续传）
 
@@ -419,7 +440,10 @@ pywebview VNC 标签页
 | `assets/tightvnc-2.8.87-gpl-setup-64bit.msi` | 内嵌 TightVNC 安装包（未安装时静默提权安装，随 exe 打包） |
 | `src/localdropshell/cli.py` | **入口**（三角色解析 + 启动 aiohttp + 分发到 gui / server / client） |
 | `src/localdropshell/ui/tk_main.py` | **Tk 根窗口**：菜单栏 + Notebook 标签页 + 状态栏 |
-| `src/localdropshell/ui/tk_transfer.py` | **文件传输标签页**：本地/远程 Treeview、进度条、日志、批量 |
+| `src/localdropshell/ui/tk_transfer.py` | **文件传输标签页**：远程地址栏（ip[:端口]）/ 远程目录、本地/远程 Treeview、进度条、日志、批量 |
+| `src/localdropshell/ui/tk_favorites.py` | **收藏夹标签页**：备注名 / ip:port / 文件传输默认路径，每条提供“文件传输”“远程桌面”快捷跳转 |
+| `src/localdropshell/settings.py` | 配置目录（`D:/JustSmart/LocalFileDropShell` → 回退 `%APPDATA%/LocalFileDropShell`）+ `favorites.json` 原子读写 + `ip[:端口]` 解析 |
+| `src/localdropshell/webview_win.py` | pywebview 独立窗口进程：主线程 `webview.start()`，打包后由 exe `--webview-window <json>` 再启动一次 |
 | `src/localdropshell/ui/tk_drop.py` | **Win32 拖放**：tkinterdnd2 + WM_DROPFILES 关闭 WebView2 内置拖放 |
 | `src/localdropshell/ui/web_shell.py` | **Shell CLI GUI pywebview 子窗口**：xterm.js Web Terminal |
 | `src/localdropshell/ui/web_vnc.py` | **VNC pywebview 子窗口**：noVNC + WebSocket 代理 |
@@ -460,6 +484,8 @@ uv run python build_exe.py --with-vnc-bundle                    # 额外内嵌 T
 | `HTTP_SHELL_PORT` | `10022` | 服务端监听端口 |
 | `HTTP_SHELL_HOST` | `0.0.0.0` | 服务端监听地址 |
 | `HTTP_SHELL_TIMEOUT` | `30` | 默认命令超时秒数 |
+| `HTTP_SHELL_VNC_HOST` | `127.0.0.1` | 未在界面填远程地址时，服务端连接的 VNC 主机 |
+| `LOCAL_DROP_CONFIG_DIR` | 空 | 覆盖收藏夹配置目录（调试 / 便携部署用） |
 
 打包产物：单文件 exe（约 10~15 MB，`--with-vnc-bundle` 额外 ~10 MB），零运行时依赖。
 
@@ -478,6 +504,9 @@ uv run python build_exe.py --with-vnc-bundle                    # 额外内嵌 T
 9. **路径格式统一**：Unix 风格 `/X:/...`，与 TightVNC FTP 协议保持一致
 10. **Win95 风格跨 UI 层统一**：assets/02-windows-95.css 的 token（`--bg` `--chrome` `--title` `--font` 等）同时用于 Tk 主界面（配色/字体/边框）和 pywebview Shell/VNC 标签页（内嵌 Web 页内），视觉一致
 11. **TightVNC 缺失自动安装**：`assets/tightvnc-2.8.87-gpl-setup-64bit.msi` 随 exe 内嵌（PyInstaller `--add-data`）；启动 gui/server 时若「安装目录 + 卸载注册表项」都查不到，则 `ShellExecuteExW(lpVerb="runas")` 提权执行 `msiexec /i <msi> /qn /norestart`，等待退出码后复查安装结果，失败/取消 UAC 只记录日志不阻塞启动（参考 `silent安装器/mosquitto_installer` 的内嵌安装器做法）
+12. **远程目标由 UI 透传到服务端**：文件传输页顶栏的 `ip[:端口]` 解析后，作为 `host`/`port` 字段随 `/rfb/file/list`、`/upload` 请求下发；服务端 `_open_rfb_ftp(app, host, port)` 直连该 VNC，避免为每台工控机再起一个服务端进程
+13. **收藏夹随配置目录走**：优先 `D:/JustSmart/LocalFileDropShell`（与运维其它工具统一归档），目录创建失败则回退 `%APPDATA%/LocalFileDropShell`；`favorites.json` 采用临时文件 + `os.replace` 原子写，避免断电损坏
+14. **pywebview 窗口放独立子进程**：pywebview 5.x 的 `webview.start()` 会校验 `threading.current_thread().name == 'MainThread'`，Tk 主界面已占用主线程，因此 VNC / Shell 窗口改由 `sys.executable --webview-window <json>` 再启动一个自身进程（打包后即同一 exe），子进程在主线程正常起 WebView2；PyInstaller 侧按 SvgOverlayPy 的做法 `--collect-all webview/pythonnet/clr_loader` + 显式 `hidden-import webview.platforms.winforms/edgechromium`
 
 ---
 
