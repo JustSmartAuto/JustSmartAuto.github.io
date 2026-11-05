@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>SvgOverlayPy — SVG 叠加图生成器</title>
-  <link rel="icon" href="assets/overlay_icon.png">
+  <title>LocalFileDropShellPy — 工控机文件传送</title>
+  <link rel="icon" href="assets/drop3.ico" type="image/x-icon">
   <link rel="stylesheet" href="assets/02-windows-95.css">
   <style>
     * { box-sizing: border-box; }
@@ -121,29 +121,30 @@
 <div class="desk">
   <div class="win">
     <div class="caption">
-      <img src="assets/overlay_icon.png" alt="logo">
-      <span>SvgOverlayPy 叠加图生成器 — SvgOverlayPy.exe</span>
-      <span class="ver">v26.11.4.1</span>
+      <img src="assets/drop3.ico" alt="logo">
+      <span>LocalFileDropShell — 工控机文件传送</span>
+      <span class="ver">v26.11.5.1</span>
     </div>
     <div class="body">
-      <h1>SvgOverlayPy — SVG 叠加图生成器</h1>
+      <h1>LocalFileDropShell — 工控机文件/文件夹传送</h1>
       <p class="lead">
-        把检测相机输出的<b>「底图 + 同名标注 SVG」</b>合成为一张高分辨率叠加图：
-        按原图 <b>3 倍 DPI</b> 栅格化，保存为 <b>{文件名}_叠加图.jpg</b>（JPEG 品质 95），
-        方便肉眼核对焊缝检测 NG 标注。Windows 95 风格界面，基于 pywebview / WebView2 渲染。
+        面向<b>工控机与调试机</b>的本地文件传送工具，客户端与服务端一体。直接把文件或文件夹<b>拖入窗口</b>，
+        选择远程目标目录，一键传输。自动探测目标端是否已安装<b>TightVNC Server</b>，若存在则直接复用其
+        <code>FC000106~FC00010B</code> 文件传输通道（无需目标端启动本软件服务端）；否则启用自托管 HTTP 服务端。
+        单工传输工况下自动切换为<b>喷泉码</b>（DCF2 容器 + decimen v3 线格式）。
       </p>
 
-      <img class="shot" src="assets/screenshot1.png" alt="SvgOverlayPy 界面效果图">
-      <p class="shot-note">效果图：左列为「图片 + 同名 SVG」数据文件，右侧为 3 倍输出尺寸的叠加预览。</p>
+      <img class="shot" src="assets/screenshot1.png" alt="TightVNC File Transfer 界面（通道复用原型）">
+      <p class="shot-note">通道复用原型：TightVNC File Transfer 左右窗格界面，本软件在探测到目标端已安装 TightVNC Server 时复用同一传输通道。</p>
 
       <fieldset>
-        <legend>数据规则</legend>
+        <legend>传输路径</legend>
         <p class="flow">
-          <span class="step">图片（格式不限）</span><span class="arrow">+</span><span class="step">同名 .svg</span><span class="arrow">→</span><span class="step">{文件名}_叠加图.jpg（3× · 品质 95）</span>
-        </p>
-        <p class="lead" style="margin-bottom:0">
-          直接把文件夹<b>拖入窗口</b>即可扫描配对（主名不区分大小写）；没有 SVG 配对的图片不计入，
-          已生成的叠加图自动跳过，输出与原图同目录、同名覆盖。
+          <span class="step">拖入文件/文件夹</span><span class="arrow">+</span><span class="step">选择远程目标目录</span><span class="arrow">→</span>
+          <span class="step">探测 TightVNC (5900)</span><span class="arrow">→</span>
+          <span class="step" style="background:#008080;color:#fff">复用 RFB 文件传输</span>
+          <span class="arrow">/</span>
+          <span class="step" style="background:#808080;color:#fff">自托管 HTTP 回退</span><span class="arrow">→</span><span class="step">完成</span>
         </p>
       </fieldset>
 
@@ -151,36 +152,46 @@
         <legend>特性</legend>
         <div class="features">
           <div class="card">
-            <h3>3 倍 DPI 栅格化</h3>
-            <p>SVG 以 3 倍尺寸在 WebView2 canvas 中绘制，文字与标注线远比原图清晰；438×832 的底图输出 1314×2496。</p>
+            <h3>TightVNC 通道复用</h3>
+            <p>工控机一般预装 TightVNC Server，探测到 5900 端口响应后直接发 FC000106~FC00010B 扩展消息，无需目标端启动本软件。</p>
           </div>
           <div class="card">
-            <h3>拖入文件夹即用</h3>
-            <p>Win32 WM_DROPFILES 原生拖放，图片格式不限（Pillow 支持即可），必须存在同名 SVG 才算一对有效数据。</p>
+            <h3>自托管 HTTP 回退</h3>
+            <p>目标端无 TightVNC 时自动启动 aiohttp 服务，路径协商 /upload /list /delete，支持进度与取消；两端均需运行本软件。</p>
           </div>
           <div class="card">
-            <h3>实时叠加预览</h3>
-            <p>点击列表行即可查看「原图 + SVG」叠加效果，可单独开关叠加层；生成后状态实时回填到列表。</p>
+            <h3>拖入即用</h3>
+            <p>Win32 WM_DROPFILES 原生拖放，文件/文件夹不限，支持多路径同时拖入，自动递归扫描文件夹内容。</p>
           </div>
           <div class="card">
-            <h3>批量生成可取消</h3>
-            <p>逐个合成、进度条与日志实时反馈；先写 .part 再原子重命名，失败单条跳过不影响整体。</p>
+            <h3>单工喷泉码</h3>
+            <p>通道判定为单工时切换 DCF2 容器 + decimen v3 Wire 帧格式，22 字节自描述头，支持中途锁定流与 session 重启续传。</p>
+          </div>
+          <div class="card">
+            <h3>批量与断点</h3>
+            <p>进度条、逐条日志、单条失败跳过；复用 TightVNC 时 MD5 块校验，HTTP 模式 SHA-256 容器校验。</p>
+          </div>
+          <div class="card">
+            <h3>Win95 风格界面</h3>
+            <p>pywebview + 02-windows-95.css，左右窗格（本地 / 远程）+ 中间传输按钮，对标 TightVNC File Transfer。</p>
           </div>
         </div>
       </fieldset>
 
       <fieldset>
         <legend>快速开始</legend>
-        <pre>uv sync                                # 安装依赖（Python 3.13+）
-uv run svg-overlay                     # 启动应用
-uv run svg-overlay --folder D:/pics    # 启动时直接载入文件夹
-uv run python build_exe.py             # 打包 dist/SvgOverlayPy_{时间戳}.exe</pre>
+        <pre>uv sync                                    # 安装依赖（Python 3.10+）
+uv run local-drop-shell                     # 启动应用
+uv run local-drop-shell --host 192.168.1.50 # 指定目标端
+uv run local-drop-shell --folder D:/data    # 启动时直接载入本地文件夹
+uv run python build_exe.py                  # 打包 dist/LocalFileDropShell_{时间戳}.exe</pre>
       </fieldset>
     </div>
     <div class="statusbar">
-      <span class="grow">图片 + 同名 SVG → 3 倍分辨率叠加图</span>
-      <span>pywebview / WebView2</span>
-      <span>Pillow</span>
+      <span class="grow">拖入文件/文件夹 → TightVNC 通道优先 / HTTP 回退</span>
+      <span>TightVNC RFB File Transfer</span>
+      <span>aiohttp HTTP</span>
+      <span>Decimen v3 Fountain</span>
       <span>Windows 95 UI</span>
     </div>
   </div>

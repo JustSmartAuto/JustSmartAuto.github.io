@@ -1,10 +1,12 @@
 [project]
-name = "ImageDiffPy"
-version = "26.11.4.1"
-description = "图像差分 diff 器（Python Tk + odiff.exe）"
+name = "LocalFileDropShellPy"
+version = "26.11.5.1"
+description = "面向工控机/调试机的本地文件与文件夹传送，客户端与服务端一体；支持 TightVNC 文件传输通道复用，单工时自动启用喷泉码"
 requires-python = ">=3.10"
 dependencies = [
     "pillow>=10",
+    "pywebview>=5",
+    "aiohttp>=3.9",
     "tkinterdnd2>=0.7.0",
 ]
 
@@ -14,7 +16,7 @@ dev = [
 ]
 
 [project.scripts]
-odiff-diff = "odiffdiff.app:main"
+local-drop-shell = "localdropshell.app:main"
 
 [build-system]
 requires = ["setuptools>=68"]
