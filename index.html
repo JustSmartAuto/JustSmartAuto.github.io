@@ -131,6 +131,14 @@
     }
     .api-table th { background: var(--chrome-light); font-weight: 700; }
     .api-table code { background: var(--chrome-lighter); padding: 0 3px; }
+
+    .two-col {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-top: 4px;
+    }
+    .two-col .card { border-color: var(--chrome-dark) var(--chrome-lighter) var(--chrome-lighter) var(--chrome-dark); }
   </style>
 </head>
 <body>
@@ -139,7 +147,7 @@
     <div class="caption">
       <img src="assets/drop3.ico" alt="logo">
       <span>LocalFileDropShell — 工控机一体化远程运维</span>
-      <span class="ver">v26.11.5.1</span>
+      <span class="ver">v26.11.5.2</span>
     </div>
     <div class="body">
       <h1>LocalFileDropShell — 工控机文件/Shell/VNC 一体化远程运维</h1>
@@ -148,17 +156,35 @@
         （TightVNC RFB 通道优先 / aiohttp 回退 / 单工喷泉码）、
         <b>HTTP Shell</b>（远程命令执行）、<b>rsync 增量同步</b>、
         <b>RFB 断点续传</b>、<b>VNC 远程桌面</b>（noVNC + WebSocket 代理）与
-        <b>CLI 交互式 shell</b>。客户端与服务端一体——可直接拖入文件/文件夹开始传输，
-        也可纯 CLI 模式启动服务端或连接远程端。
+        <b>CLI 交互式 shell</b>。
       </p>
 
       <img class="shot" src="assets/screenshot1.png" alt="TightVNC File Transfer 界面">
       <p class="shot-note">TightVNC File Transfer 界面原型——LocalFileDropShell 在此基础上复用 RFB 通道，同时叠加 HTTP Shell / rsync / VNC / CLI 能力。</p>
 
       <fieldset>
+        <legend>混合 UI 架构</legend>
+        <p class="lead" style="margin-bottom:8px">
+          <b>主窗口（Tkinter + tkinterdnd2）</b>负责文件/文件夹拖放、传输列表、日志、批量生成、进度条；
+          右侧标签页区嵌入两个<b>pywebview 子窗口</b>：
+        </p>
+        <div class="two-col">
+          <div class="card">
+            <h3>🖥 VNC 远程桌面（pywebview）</h3>
+            <p>内嵌 noVNC 前端，通过 WebSocket 代理桥接到已有 VNC Server（探测端口 5900-5909 / 15900-15909 + 进程名 tvnserver/vncserver/uvnc/realvnc）；无 VNC 时可在打包时内嵌启动。</p>
+          </div>
+          <div class="card">
+            <h3>⌨ Shell CLI GUI（pywebview）</h3>
+            <p>内嵌本地 Web Terminal（xterm.js 或简化版），通过 <code>/exec</code> 路由发送命令，实时回显 stdout/stderr/exit_code；pwsh → powershell → cmd 自动检测，GBK/UTF-8 编码自适应，超时自动 Kill。</p>
+          </div>
+        </div>
+        <p class="shot-note">三个子界面共享同一 aiohttp 服务端（默认端口 10022），Tk 主界面同时负责文件传输调度与服务端生命周期管理；pywebview 标签页只做"壳"，全部业务逻辑在本地 HTTP。</p>
+      </fieldset>
+
+      <fieldset>
         <legend>传输路径与探测</legend>
         <p class="flow">
-          <span class="step">拖入 / CLI 指定</span><span class="arrow">→</span>
+          <span class="step">Tk 拖入</span><span class="arrow">/</span><span class="step">CLI 指定</span><span class="arrow">→</span>
           <span class="step">探测 VNC (5900 / 15900)</span><span class="arrow">→</span>
           <span class="step" style="background:#008080;color:#fff">复用 RFB File Transfer</span>
           <span class="arrow">/</span>
@@ -193,24 +219,24 @@
             <p>RFB FTP 扩展消息支持 offset 断点续传、MD5 块校验、目录列表；传输失败可从断点继续，避免长链路重头来过。</p>
           </div>
           <div class="card">
-            <h3>VNC 远程桌面（noVNC）</h3>
-            <p>自动检测已有 VNC Server（Tight/Real/Ultra，端口 5900-5909 / 15900-15909，进程名 tvnserver/vncserver/uvnc/realvnc）直接复用；WebSocket 代理 /websockify 桥接浏览器与 VNC。</p>
+            <h3>VNC noVNC WebSocket</h3>
+            <p>自动检测已有 VNC Server（Tight/Real/Ultra）直接复用；WebSocket 代理 /websockify 桥接浏览器与 VNC；无 VNC 可打包内嵌兜底。</p>
           </div>
           <div class="card">
-            <h3>Win32 原生拖放</h3>
-            <p>WM_DROPFILES 关闭 WebView2 内置拖放，文件/文件夹不限，多路径同时拖入，自动递归扫描文件夹内容。</p>
+            <h3>Win32 原生拖放（Tk）</h3>
+            <p>tkinterdnd2 + WM_DROPFILES 关闭 WebView2 内置拖放，文件/文件夹不限，多路径同时拖入，自动递归扫描文件夹内容。</p>
           </div>
           <div class="card">
             <h3>单工喷泉码</h3>
             <p>通道判定为单工时切换 DCF2 容器（49B 自描述头 + SHA-256）+ decimen v3 Wire 帧（22B 自描述头），中途锁定与 session 重启续传。</p>
           </div>
           <div class="card">
-            <h3>CLI 多角色 + 日志</h3>
-            <p>同进程支持 <code>-role gui</code>（默认，pywebview Win95）、<code>-role server</code>（纯 HTTP/aiohttp）、<code>-role client</code>（交互式 shell：exit/cd/pwd/upload/download/rsync/rfb-*/help）；服务端操作自动记录 <code>localdropshell_{时间戳}.log</code>。</p>
+            <h3>CLI 三角色 + 日志</h3>
+            <p>同进程支持 <code>-role gui</code>（默认，Tk 主界面 + webview 标签页）、<code>-role server</code>（纯 aiohttp）、<code>-role client</code>（交互式 shell：exit/cd/pwd/upload/download/rsync/rfb-*/help）。</p>
           </div>
           <div class="card">
-            <h3>Win95 风格界面</h3>
-            <p>pywebview + 02-windows-95.css 设计 token；Win32 WM_DROPFILES；状态栏 / 菜单 / 列表 / 日志对齐 TightVNC File Transfer 布局。</p>
+            <h3>Windows 95 风格</h3>
+            <p>设计 token 来自 assets/02-windows-95.css，Tk 主界面与内嵌 Web 页统一视觉（3D 凸起边框、Teal 标题栏、MS Sans Serif）。</p>
           </div>
         </div>
       </fieldset>
@@ -230,7 +256,7 @@
             <tr><td>POST</td><td><code>/rfb/file/upload</code></td><td>RFB FTP：上传（支持 offset 断点续传）</td></tr>
             <tr><td>POST</td><td><code>/rfb/file/download</code></td><td>RFB FTP：下载（支持 offset 断点续传）</td></tr>
             <tr><td>POST</td><td><code>/rfb/file/md5</code></td><td>RFB FTP：MD5 校验</td></tr>
-            <tr><td>GET</td><td><code>/vnc/</code></td><td>noVNC 静态页面（访问 /vnc/vnc.html 打开远程桌面）</td></tr>
+            <tr><td>GET</td><td><code>/vnc/</code></td><td>noVNC 静态页面（Tk 标签页内嵌访问 /vnc/vnc.html）</td></tr>
             <tr><td>GET</td><td><code>/websockify</code></td><td>VNC WebSocket 代理（浏览器 ↔ VNC Server）</td></tr>
             <tr><td>GET</td><td><code>/health</code></td><td>健康检查：shell / 时间 / vnc_detected</td></tr>
           </tbody>
@@ -240,7 +266,7 @@
       <fieldset>
         <legend>快速开始</legend>
         <pre>uv sync                                                         # 安装依赖（Python 3.10+）
-uv run local-drop-shell --role gui                              # GUI 模式（默认）
+uv run local-drop-shell --role gui                              # GUI 模式（Tk 主界面 + webview 标签页，默认）
 uv run local-drop-shell --role server --host 0.0.0.0 --port 10022  # 纯服务端
 uv run local-drop-shell --role client --url http://192.168.1.100:10022  # 交互式 shell
 uv run local-drop-shell --role client --url ... -c "Get-Location"       # 单次命令
@@ -249,14 +275,15 @@ uv run python build_exe.py                                      # 普通打包 d
       </fieldset>
     </div>
     <div class="statusbar">
-      <span class="grow">文件传送（TightVNC RFB / HTTP / Fountain）+ HTTP Shell + rsync + RFB FTP + VNC/noVNC</span>
-      <span>TightVNC RFB File Transfer</span>
-      <span>HTTP Shell Exec</span>
-      <span>Rsync Delta</span>
+      <span class="grow">Tk 主界面（文件/拖放/传输）+ pywebview 标签页（VNC/noVNC + Shell CLI GUI）+ 共享 aiohttp 10022</span>
+      <span>Win32 WM_DROPFILES</span>
+      <span>TightVNC RFB FTP</span>
+      <span>HTTP Shell</span>
+      <span>Rsync</span>
       <span>RFB FTP</span>
       <span>noVNC WebSocket</span>
       <span>Decimen v3 Fountain</span>
-      <span>Windows 95 UI</span>
+      <span>Windows 95</span>
     </div>
   </div>
 </div>

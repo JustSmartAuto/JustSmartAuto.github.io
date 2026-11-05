@@ -1,5 +1,11 @@
 """PyInstaller 打包：单文件 exe，命名 LocalFileDropShell_{yyyyMMddHHmmss}。
 
+混合 UI 架构：
+    - 主界面（文件/文件夹拖放、传输列表、日志）使用 tkinter + tkinterdnd2
+      （Win32 WM_DROPFILES 原生拖放）+ Windows 95 风格
+    - VNC 远程桌面（noVNC + WebSocket 代理）和 Shell CLI GUI
+      使用 pywebview 内嵌浏览器实现
+
 用法：
     uv run python build_exe.py                        # 普通打包（不内嵌 VNC/noVNC，探测已有直接复用）
     uv run python build_exe.py --with-vnc-bundle      # 额外内嵌 tvnserver + noVNC 前端（无 TightVNC 环境兜底）
@@ -39,7 +45,11 @@ def reexec_in_venv() -> None:
 
 
 def check_deps() -> None:
-    """打包前确认关键依赖可导入，缺了就明确报错而不是产出坏 exe。"""
+    """打包前确认关键依赖可导入，缺了就明确报错而不是产出坏 exe。
+
+    tkinter 是 Python 标准库，此处仅检查 pip 安装的第三方包；stdlib 的 tkinter
+    若不存在说明 Python 安装时勾掉了 Tcl/Tk（常见嵌入式发行版），运行时才会报错。
+    """
     missing = [
         name
         for name in (
@@ -49,6 +59,7 @@ def check_deps() -> None:
             "websockets",
             "click",
             "PyInstaller",
+            "tkinterdnd2",
         )
         if importlib.util.find_spec(name) is None
     ]
@@ -87,21 +98,23 @@ def main() -> None:
         f"{ASSETS}{';'}assets",
         "--paths",
         str(ROOT / "src"),
-        # pywebview 通过 importlib 动态加载平台后端，且自带 js 数据文件，
-        # PyInstaller 静态分析收不到，必须显式收集
+        # —— pywebview 部分（用于 VNC 远程桌面和 Shell CLI GUI 标签页）——
         "--collect-all",
         "webview",
         "--collect-all",
         "pythonnet",
         "--collect-all",
         "clr_loader",
-        # tkinterdnd2 自带 tkdnd 的 tcl 脚本与原生 dll，也必须整体收集
-        "--collect-all",
-        "tkinterdnd2",
         "--hidden-import",
         "webview.platforms.winforms",
         "--hidden-import",
         "webview.platforms.edgechromium",
+        # —— tkinterdnd2（Win32 WM_DROPFILES 原生拖放，主界面文件传输）——
+        "--collect-all",
+        "tkinterdnd2",
+        # PyInstaller 对 tkinter 标准库的子模块收集不完整，显式补全
+        "--collect-submodules",
+        "tkinter",
     ]
 
     if args.with_vnc_bundle:
