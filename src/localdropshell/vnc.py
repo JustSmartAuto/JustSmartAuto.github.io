@@ -9,14 +9,17 @@ from __future__ import annotations
 
 import atexit
 import csv
+import ctypes
 import io
 import os
 import re
 import socket
 import subprocess
+import sys
 import time
 import winreg
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable
 
 
@@ -328,3 +331,215 @@ def make_websockify_handler(
     handler.__vnc_host__ = vnc_host  # type: ignore[attr-defined]
     handler.__vnc_port__ = vnc_port  # type: ignore[attr-defined]
     return handler
+
+
+# ---------------------------------------------------------------------------
+# 7. 内嵌 TightVNC MSI：缺失时静默提权安装
+# ---------------------------------------------------------------------------
+
+TIGHTVNC_MSI_GLOB = "tightvnc-*-setup-64bit.msi"
+
+_SEE_MASK_NOCLOSEPROCESS = 0x00000040
+_SW_HIDE = 0
+_WAIT_TIMEOUT = 0x00000102
+_ERROR_CANCELLED = 1223
+
+
+class _ShellExecuteInfoW(ctypes.Structure):
+    """SHELLEXECUTEINFOW，仅声明 runas 提权 + 等待退出所需字段."""
+
+    _fields_ = [
+        ("cbSize", ctypes.c_uint32),
+        ("fMask", ctypes.c_uint32),
+        ("hwnd", ctypes.c_void_p),
+        ("lpVerb", ctypes.c_wchar_p),
+        ("lpFile", ctypes.c_wchar_p),
+        ("lpParameters", ctypes.c_wchar_p),
+        ("lpDirectory", ctypes.c_wchar_p),
+        ("nShow", ctypes.c_int),
+        ("hInstApp", ctypes.c_void_p),
+        ("lpIDList", ctypes.c_void_p),
+        ("lpClass", ctypes.c_wchar_p),
+        ("hkeyClass", ctypes.c_void_p),
+        ("dwHotKey", ctypes.c_uint32),
+        ("hIcon", ctypes.c_void_p),
+        ("hProcess", ctypes.c_void_p),
+    ]
+
+
+@dataclass
+class TightVncInstallResult:
+    """TightVNC 自动安装结果."""
+
+    ok: bool
+    action: str  # already / installed / cancelled / failed / missing
+    detail: str = ""
+
+
+def bundle_asset_dir() -> Path | None:
+    """内嵌资源目录：PyInstaller 解包目录 ``_MEIPASS/assets``，开发时为项目 ``assets/``."""
+    candidates: list[Path] = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(Path(meipass) / "assets")
+    candidates.append(Path(__file__).resolve().parents[2] / "assets")
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
+def find_tightvnc_installer() -> Path | None:
+    """在内嵌资源目录中查找 TightVNC MSI（``tightvnc-*-setup-64bit.msi``）."""
+    asset_dir = bundle_asset_dir()
+    if asset_dir is None:
+        return None
+    matches = sorted(asset_dir.glob(TIGHTVNC_MSI_GLOB))
+    return matches[0] if matches else None
+
+
+def tightvnc_install_dir() -> Path | None:
+    """已安装的 TightVNC 目录（以存在 ``tvnserver.exe`` 为准）."""
+    for env_name in ("ProgramFiles", "ProgramFiles(x86)"):
+        base = os.environ.get(env_name)
+        if not base:
+            continue
+        candidate = Path(base) / "TightVNC"
+        if (candidate / "tvnserver.exe").is_file():
+            return candidate
+    return None
+
+
+def _registry_tightvnc_installed() -> bool:
+    """卸载注册表项中是否有 DisplayName 含 TightVNC 的条目（64/32 位视图都查）."""
+    uninstall_key = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
+    for view in (winreg.KEY_WOW64_64KEY, winreg.KEY_WOW64_32KEY):
+        try:
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE, uninstall_key, 0, winreg.KEY_READ | view
+            ) as root:
+                for index in range(2000):
+                    try:
+                        subkey = winreg.EnumKey(root, index)
+                    except OSError:
+                        break
+                    try:
+                        with winreg.OpenKey(root, subkey) as entry:
+                            display_name, _ = winreg.QueryValueEx(entry, "DisplayName")
+                    except OSError:
+                        continue
+                    if "tightvnc" in str(display_name).lower():
+                        return True
+        except OSError:
+            continue
+    return False
+
+
+def is_tightvnc_installed() -> bool:
+    """TightVNC 是否已安装（安装目录存在 tvnserver.exe 或注册表有卸载项）."""
+    return tightvnc_install_dir() is not None or _registry_tightvnc_installed()
+
+
+def _run_elevated(exe: str, params: str, timeout: float = 900.0) -> tuple[bool, int, str]:
+    """用 ShellExecuteExW(runas) 提权运行并等待结束，返回 ``(成功, 退出码, 说明)``.
+
+    用户取消 UAC 时退出码为 1223（ERROR_CANCELLED）；超时/启动失败返回 -1。
+    """
+    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    shell32.ShellExecuteExW.argtypes = [ctypes.POINTER(_ShellExecuteInfoW)]
+    shell32.ShellExecuteExW.restype = ctypes.c_int
+    kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    kernel32.WaitForSingleObject.restype = ctypes.c_uint32
+    kernel32.GetExitCodeProcess.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_uint32),
+    ]
+    kernel32.GetExitCodeProcess.restype = ctypes.c_int
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_int
+
+    info = _ShellExecuteInfoW()
+    info.cbSize = ctypes.sizeof(_ShellExecuteInfoW)
+    info.fMask = _SEE_MASK_NOCLOSEPROCESS
+    info.lpVerb = "runas"
+    info.lpFile = exe
+    info.lpParameters = params
+    info.nShow = _SW_HIDE
+
+    if not shell32.ShellExecuteExW(ctypes.byref(info)):
+        error = ctypes.get_last_error()
+        if error == _ERROR_CANCELLED:
+            return False, _ERROR_CANCELLED, "用户取消了 UAC 提权"
+        return False, error, f"ShellExecuteExW 失败（错误码 {error}）"
+
+    handle = info.hProcess
+    if not handle:  # 极少数情况下拿不到进程句柄
+        return True, 0, ""
+
+    try:
+        wait_ms = min(int(timeout * 1000), 0xFFFFFFFF)
+        wait_rc = kernel32.WaitForSingleObject(handle, wait_ms)
+        if wait_rc == _WAIT_TIMEOUT:
+            return False, -1, f"等待安装完成超时（{timeout:.0f}s）"
+        exit_code = ctypes.c_uint32()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            return False, -1, "读取安装进程退出码失败"
+        code = int(exit_code.value)
+        return code == 0, code, "" if code == 0 else f"msiexec 返回码 {code}"
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def install_tightvnc_silently(
+    timeout: float = 900.0,
+    log: Callable[[str], None] = print,
+) -> TightVncInstallResult:
+    """用内嵌 MSI 静默安装 TightVNC（``msiexec /i <msi> /qn /norestart``，自动弹 UAC）."""
+    msi = find_tightvnc_installer()
+    if msi is None:
+        log(f"[tightvnc] 未找到内嵌安装包（assets/{TIGHTVNC_MSI_GLOB}）")
+        return TightVncInstallResult(False, "missing", "内嵌 MSI 缺失")
+
+    log(f"[tightvnc] 开始静默安装 {msi.name}（请批准 UAC 提权弹窗）")
+    ok, code, detail = _run_elevated("msiexec.exe", f'/i "{msi}" /qn /norestart', timeout)
+    if not ok:
+        action = "cancelled" if code == _ERROR_CANCELLED else "failed"
+        log(f"[tightvnc] 安装未完成：{detail or f'退出码 {code}'}")
+        return TightVncInstallResult(False, action, detail or f"退出码 {code}")
+
+    # msiexec 返回 0 后，注册表/安装目录落盘可能略有延迟，最多再等 30s
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline and not is_tightvnc_installed():
+        time.sleep(1.0)
+    if not is_tightvnc_installed():
+        log("[tightvnc] msiexec 执行成功，但未检测到 TightVNC 安装结果")
+        return TightVncInstallResult(False, "failed", "安装后未检测到 TightVNC")
+
+    install_dir = tightvnc_install_dir()
+    detail = str(install_dir) if install_dir else "注册表已登记"
+    log(f"[tightvnc] 安装完成：{detail}")
+    return TightVncInstallResult(True, "installed", detail)
+
+
+def ensure_tightvnc_installed(
+    log: Callable[[str], None] = print,
+) -> TightVncInstallResult:
+    """确保本机有 TightVNC：已安装直接复用，缺失时用内嵌 MSI 静默提权安装.
+
+    未安装但已有其他 VNC Server 在运行（如 UltraVNC/RealVNC）时不安装，
+    避免抢占 5900 端口；这种情况继续沿用已有通道。
+    """
+    install_dir = tightvnc_install_dir()
+    if install_dir is not None:
+        log(f"[tightvnc] 已安装：{install_dir}，跳过")
+        return TightVncInstallResult(True, "already", str(install_dir))
+    if _registry_tightvnc_installed():
+        log("[tightvnc] 注册表已登记 TightVNC，跳过")
+        return TightVncInstallResult(True, "already", "注册表已登记")
+
+    if detect_vnc().port is not None:
+        log("[tightvnc] 未安装 TightVNC，但已有其他 VNC Server 在运行，跳过安装")
+        return TightVncInstallResult(True, "already", "已有其他 VNC Server")
+
+    return install_tightvnc_silently(log=log)

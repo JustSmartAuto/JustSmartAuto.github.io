@@ -9,7 +9,7 @@
 | **HTTP Shell** | pywebview 标签页（Shell GUI） | `/exec` 远程命令执行，pwsh → powershell → cmd 自动检测，GBK/UTF-8 自适应，超时 Kill |
 | **rsync 增量同步** | Tk 主界面 / CLI | Adler-32 + MD5 双阶段块级 delta，push / pull 双向，自动回退全量 |
 | **RFB 文件传输** | Tk 主界面 | TightVNC FTP 扩展消息，支持 offset 断点续传、MD5 块校验、目录列表 |
-| **VNC 远程桌面** | pywebview 标签页（VNC） | 自动探测已有 TightVNC / RealVNC / UltraVNC 直接复用；无则可内嵌启动 + noVNC + WebSocket 代理 |
+| **VNC 远程桌面** | pywebview 标签页（VNC） | 自动探测已有 TightVNC / RealVNC / UltraVNC 直接复用；无则可内嵌启动 + noVNC + WebSocket 代理；未安装 TightVNC 时用内嵌 MSI 静默提权安装 |
 | **CLI 交互式 shell** | 纯控制台 | 同进程三角色（`gui` / `server` / `client`），内置 upload / download / rsync / rfb-* 等命令 |
 
 **混合 UI 架构**：
@@ -240,13 +240,22 @@ multipart/form-data：`file=@local.bin` + `path=/remote/dir/file.bin` + `offset=
   │       │        跳过注册表写入和 tvnserver 启动
   │       │        ✅ 零权限要求
   │       │
-  │       └─ 未命中 → 内嵌模式
-  │          自动递增 RFB 端口避免冲突（默认 15900）
-  │          释放 .cache/tvnc/ 二进制
-  │          写注册表 SOFTWARE\\TightVNC\\Server
-  │          启动 tvnserver -install / -start
-  │          启动监控协程：tvnserver 退出则本进程退出
-  │          ⚠️ 需要管理员权限
+  │       └─ 未命中 → 先判断 TightVNC 是否已安装
+  │          （检查 %ProgramFiles%\TightVNC\tvnserver.exe + 卸载注册表项，64/32 位视图）
+  │          │
+  │          ├─ 已安装 → 内嵌模式
+  │          │  自动递增 RFB 端口避免冲突（默认 15900）
+  │          │  释放 .cache/tvnc/ 二进制
+  │          │  写注册表 SOFTWARE\\TightVNC\\Server
+  │          │  启动 tvnserver -install / -start
+  │          │  启动监控协程：tvnserver 退出则本进程退出
+  │          │  ⚠️ 需要管理员权限
+  │          │
+  │          └─ 未安装 → 用内嵌 MSI 自动安装（静默 + UAC 提权）
+  │             msiexec /i "assets/tightvnc-2.8.87-gpl-setup-64bit.msi" /qn /norestart
+  │             ShellExecuteExW(lpVerb="runas") 弹 UAC 并等待 msiexec 退出
+  │             用户取消 UAC / 安装失败 → 记录日志后继续启动，不阻塞服务
+  │             已有其他 VNC Server 在运行（如 UltraVNC）→ 跳过安装，避免抢占 5900
   │
   └─ 启动 noVNC HTTP 服务 + WebSocket 代理 /websockify
 ```
@@ -407,6 +416,7 @@ pywebview VNC 标签页
 | `assets/02-windows-95.css` | Windows 95 设计 token（Tk 主界面配色/字体参考） |
 | `assets/drop3.ico` | 软件图标（Win95 风格，多尺寸帧） |
 | `assets/screenshot1.png` | TightVNC File Transfer 界面原型图 |
+| `assets/tightvnc-2.8.87-gpl-setup-64bit.msi` | 内嵌 TightVNC 安装包（未安装时静默提权安装，随 exe 打包） |
 | `src/localdropshell/cli.py` | **入口**（三角色解析 + 启动 aiohttp + 分发到 gui / server / client） |
 | `src/localdropshell/ui/tk_main.py` | **Tk 根窗口**：菜单栏 + Notebook 标签页 + 状态栏 |
 | `src/localdropshell/ui/tk_transfer.py` | **文件传输标签页**：本地/远程 Treeview、进度条、日志、批量 |
@@ -417,11 +427,11 @@ pywebview VNC 标签页
 | `src/localdropshell/tightvnc.py` | RFB 扩展客户端（FC000102~FC000119 消息对） |
 | `src/localdropshell/rsync.py` | rsync Adler-32 + MD5 块级 delta |
 | `src/localdropshell/rfbftp.py` | RFB FTP 消息（CCSRSST / CFLRST / CFURST / CM5RST / ...） |
-| `src/localdropshell/vnc.py` | VNC 探测（端口 + 进程名）/ 内嵌 tvnserver 启动 / WebSocket 代理 |
+| `src/localdropshell/vnc.py` | VNC 探测（端口 + 进程名）/ 内嵌 tvnserver 启动 / WebSocket 代理 / 内嵌 MSI 静默提权安装 |
 | `src/localdropshell/fountain.py` | 喷泉码编解码（Wire 帧 + DCF2 容器） |
 | `src/localdropshell/transfer.py` | 传输调度（TightVNC 优先 / HTTP 回退 / 单工判定 / 校验） |
 | `src/localdropshell/server.py` | aiohttp 服务端路由注册（/exec /upload /download /rsync/* /rfb/* /vnc/ /shell/ /websockify /health） |
-| `build_exe.py` | PyInstaller 打包（可选 `--with-vnc-bundle`），产物 `LocalFileDropShell_{时间戳}.exe` |
+| `build_exe.py` | PyInstaller 打包（自动嵌入 `assets/`，含 TightVNC MSI；可选 `--with-vnc-bundle`），产物 `LocalFileDropShell_{时间戳}.exe` |
 
 参考工程：
 - **diffimg 图像差分**：pywebview + Tk + Windows 95 风格界面的组织方式（`src/odiffdiff/` 结构、`build_exe.py` venv 重执行 + 依赖探测 + 显式 collect-all）
@@ -467,6 +477,7 @@ uv run python build_exe.py --with-vnc-bundle                    # 额外内嵌 T
 8. **编码自适应**：Windows cmd 默认 GBK 输出，先 UTF-8 校验，失败则调 `MultiByteToWideChar(CP_ACP, ...)` 转 UTF-8；pwsh 直接 UTF-8
 9. **路径格式统一**：Unix 风格 `/X:/...`，与 TightVNC FTP 协议保持一致
 10. **Win95 风格跨 UI 层统一**：assets/02-windows-95.css 的 token（`--bg` `--chrome` `--title` `--font` 等）同时用于 Tk 主界面（配色/字体/边框）和 pywebview Shell/VNC 标签页（内嵌 Web 页内），视觉一致
+11. **TightVNC 缺失自动安装**：`assets/tightvnc-2.8.87-gpl-setup-64bit.msi` 随 exe 内嵌（PyInstaller `--add-data`）；启动 gui/server 时若「安装目录 + 卸载注册表项」都查不到，则 `ShellExecuteExW(lpVerb="runas")` 提权执行 `msiexec /i <msi> /qn /norestart`，等待退出码后复查安装结果，失败/取消 UAC 只记录日志不阻塞启动（参考 `silent安装器/mosquitto_installer` 的内嵌安装器做法）
 
 ---
 

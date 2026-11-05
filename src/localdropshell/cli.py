@@ -46,6 +46,14 @@ def _check_essential_deps() -> None:
         sys.exit(2)
 
 
+def _echo_safe(message: str) -> None:
+    """--windowed 打包（无 stdout）时也能安全输出，避免启动阶段抛异常."""
+    try:
+        click.echo(message)
+    except Exception:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # 延迟导入的重量级依赖
 # ---------------------------------------------------------------------------
@@ -79,6 +87,14 @@ def run_server(host: str | None = None, port: int | None = None) -> None:
     cfg_port = port or _parse_env_int("HTTP_SHELL_PORT", 10022)
 
     cfg = ServerConfig(host=cfg_host, port=cfg_port)
+
+    # 工控机首次部署：未安装 TightVNC 时用内嵌 MSI 静默提权安装（失败不阻塞启动）
+    try:
+        from localdropshell.vnc import ensure_tightvnc_installed
+
+        ensure_tightvnc_installed(log=_echo_safe)
+    except Exception as exc:
+        _echo_safe(f"[tightvnc] 自动安装异常: {exc}")
 
     # 启动前先探测 VNC (用于 CLI 级 banner)
     vnc_info = detect_vnc()
@@ -625,6 +641,14 @@ def run_gui(host: str | None = None, port: int | None = None, folder: str | None
     # 本地 loop 端口固定为 10022 供 Tk UI 调用
     ui_port = port or 10022
     ui_host = "127.0.0.1"
+
+    # 工控机首次部署：未安装 TightVNC 时用内嵌 MSI 静默提权安装（失败不阻塞启动）
+    try:
+        from localdropshell.vnc import ensure_tightvnc_installed
+
+        ensure_tightvnc_installed(log=_echo_safe)
+    except Exception as exc:
+        _echo_safe(f"[tightvnc] 自动安装异常: {exc}")
 
     def _run_server_thread() -> None:
         asyncio.run(start_server(ServerConfig(host=cfg_host, port=cfg_port)))
