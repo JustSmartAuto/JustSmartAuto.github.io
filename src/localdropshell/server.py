@@ -182,15 +182,16 @@ def _open_rfb_ftp(
         if target_port is None:
             raise RuntimeError("未检测到可用的 VNC Server (tightvnc)")
         host = os.environ.get("HTTP_SHELL_VNC_HOST", "127.0.0.1")
+    password = os.environ.get("LDS_VNC_PASSWORD") or None
     try:
-        sock = socket.create_connection((host, target_port), timeout=10.0)
+        # FtpSession 构造时完成 RFB 握手（Tight 安全类型），
+        # 只有 Tight 模式服务端才会注册文件传输扩展消息。
+        ftp = _rfbftp.FtpSession((host, target_port), password=password, timeout=15.0)
     except OSError as e:
         raise RuntimeError(f"连接 VNC Server 失败 {host}:{target_port} ({e})") from e
-    # 跳过 RFB 握手 (TightVNC FTP 要求先走 VNC 握手再发扩展消息).
-    # 为简单起见, 这里直接发 FTP 扩展请求; 实际 tightvnc 对 RFB 握手
-    # 失败会关闭连接, 本函数调用者将在后续 FtpSession 请求时收到异常.
-    ftp = _rfbftp.FtpSession(sock)
-    return ftp, sock
+    except _rfbftp.FtpError as e:
+        raise RuntimeError(f"VNC 文件传输不可用 {host}:{target_port} — {e}") from e
+    return ftp, ftp.sock
 
 
 # ---------------------------------------------------------------------------
@@ -414,14 +415,11 @@ def _rfb_upload_inplace(
     offset: int,
     overwrite: bool,
 ) -> None:
-    """调用 FtpSession 上传; 若 offset > 0, 则先 mkdir 再整体上传 (简化版)."""
-    # 先尝试创建远程父目录, 无视错误
-    parent = str(Path(remote_path).parent)
-    if parent and parent not in (".", "/", ""):
-        try:
-            ftp.mkdir(parent)
-        except _rfbftp.FtpError:
-            pass
+    """调用 FtpSession 上传；远程父目录不存在时逐级创建."""
+    try:
+        ftp.mkdir_parents(remote_path)
+    except _rfbftp.FtpError as exc:
+        logger.info("创建远程父目录失败（继续尝试上传）: %s", exc)
     ftp.upload_file(local_path, remote_path, overwrite=overwrite)
 
 
@@ -443,15 +441,58 @@ async def download_handler(request: web.Request) -> web.Response:
             return json_error("offset 必须是整数", 400)
 
         try:
-            remote_host, _remote_port = _parse_rfb_target(body)
+            remote_host, remote_port = _parse_rfb_target(body)
         except ValueError as e:
             return json_error(str(e), 400)
         if remote_host is not None:
-            return json_error(
-                "远程目标暂不支持下载（RFB 下载协议未实现），"
-                "请改用 http://127.0.0.1:10022/download 走本机路径或 CLI 命令",
-                501,
-            )
+            # 远程模式：经 RFB FTP 下载到临时文件，再流式返回给客户端
+            ftp = None
+            sock = None
+            tmp_path = None
+            try:
+                fd, tmp_name = tempfile.mkstemp(prefix="lds-download-", suffix=".part")
+                os.close(fd)
+                tmp_path = Path(tmp_name)
+                ftp, sock = _open_rfb_ftp(request.app, remote_host, remote_port)
+                written = await _run_in_executor(
+                    ftp.download_file, path, str(tmp_path), offset
+                )
+                headers = {
+                    "Content-Length": str(written),
+                    "Content-Type": "application/octet-stream",
+                    "X-File-Path": path,
+                    "X-File-Size": str(written),
+                    "X-Offset": str(offset),
+                }
+                resp = web.StreamResponse(status=200, headers=headers)
+                await resp.prepare(request)
+                with open(tmp_path, "rb") as f:
+                    while True:
+                        buf = f.read(256 * 1024)
+                        if not buf:
+                            break
+                        await resp.write(buf)
+                await resp.write_eof()
+                elapsed_ms = int((time.perf_counter() - started) * 1000)
+                logger.info("POST /download (rfb %s:%s) path=%s bytes=%d ms=%d",
+                            remote_host, remote_port, path, written, elapsed_ms)
+                return resp
+            except Exception as exc:
+                logger.info("RFB 下载失败 %s:%s: %s", remote_host, remote_port, exc)
+                return json_error(
+                    f"远程下载失败 {remote_host}:{remote_port} — {exc}", 502
+                )
+            finally:
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
+                if tmp_path is not None:
+                    try:
+                        tmp_path.unlink()
+                    except OSError:
+                        pass
 
         try:
             local_path = _validate_path(path)
@@ -510,7 +551,7 @@ async def delete_handler(request: web.Request) -> web.Response:
             sock: socket.socket | None = None
             try:
                 ftp, sock = _open_rfb_ftp(request.app)
-                await _run_in_executor(ftp.delete, path)
+                await _run_in_executor(ftp.remove, path)
                 elapsed_ms = int((time.perf_counter() - started) * 1000)
                 logger.info("POST /delete (rfb) path=%s ms=%d", path, elapsed_ms)
                 return json_ok({"path": path, "deleted": True})

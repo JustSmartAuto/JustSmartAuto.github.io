@@ -1,601 +1,635 @@
-"""RFB FTP 子类型消息编解码（TightVNC 2.8.90 扩展协议）。
+"""TightVNC 2.8 的 RFB 文件传输扩展（同步 socket 实现）.
 
-提供：
-- 基础 struct 编解码（大端 / 小端）
-- RFB FTP 消息子类型常量
-- HTTP-like 包装的同步 Socket 层（send_request / recv_response）
-- CompressedBlock 结构（TightVNC FTP 数据块压缩）
-- 常用请求构造器（返回 body bytes）
-- FtpSession 高层封装
-- FtpError 异常
+协议要点（已按 TightVNC 2.8.90 源码 ft-common/FTMessage.h、
+ft-client-lib/FileTransferRequestSender.cpp、FileTransferReplyBuffer.cpp 核对）：
+
+* 必须使用 **Tight(16) 安全类型** 连接。服务端只有在
+  ``RfbInitializer::doTightAuth`` 之后才会把 ``m_tightEnabled`` 置位并注册
+  FTP 扩展消息；用 None(1) 连接时发送 0xFC 前缀消息会被直接断开。
+* 所有整数均为 **大端**（RFB 约定）。消息头是 UINT32 messageId
+  (0xFC0001xx)，首字节 0xFC 即 RFB 扩展消息标记。
+* 字符串为 UINT32 长度 + UTF-8 字节。
+* 文件列表 / 下载数据回复是 CompressedBlock：
+  UINT8 compressionLevel + UINT32 compressedSize +
+  UINT32 uncompressedSize + 数据（level=1 时 zlib 压缩）。
+
+Python 3.10+。
 """
 
 from __future__ import annotations
 
-import hashlib
-import os
 import socket
 import struct
 import time
 import zlib
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Any, Optional
 
-
-# ---------------------------------------------------------------------------
-# 自定义异常
-# ---------------------------------------------------------------------------
 
 class FtpError(Exception):
-    """RFB FTP 操作失败。"""
+    """RFB FTP 操作失败."""
 
-    def __init__(self, message: str, rfb_subtype: Optional[int] = None) -> None:
+    def __init__(self, message: str, message_id: Optional[int] = None) -> None:
         super().__init__(message)
         self.message = message
-        self.rfb_subtype = rfb_subtype
+        self.message_id = message_id
 
     def __str__(self) -> str:
-        if self.rfb_subtype is not None:
-            return f"[FtpError subtype=0x{self.rfb_subtype:02X}] {self.message}"
+        if self.message_id is not None:
+            return f"[FtpError 0x{self.message_id:08X}] {self.message}"
         return self.message
 
 
 # ---------------------------------------------------------------------------
-# RFB FTP 消息子类型常量
+# 消息 ID（TightVNC 2.x FTP 扩展，全部大端）
 # ---------------------------------------------------------------------------
 
-CCSRSST = 0x11  # 压缩支持检查
-CFLRST = 0x12  # 文件列表
-CMDRST = 0x13  # 创建目录
-CFRRST = 0x14  # 删除文件
-CFMRST = 0x15  # 移动/重命名
-CFURST = 0x16  # 开始上传
-CUDRST = 0x17  # 上传数据块
-CUERST = 0x18  # 上传结束
-CFDRST = 0x19  # 开始下载
-CDDRST = 0x1A  # 下载数据块
-CDSRST = 0x1B  # 目录大小
-CM5RST = 0x1C  # MD5 校验
-LAST_REQUEST_FAILED = 0xFF  # 失败响应
+COMPRESSION_SUPPORT_REQUEST = 0xFC000100
+COMPRESSION_SUPPORT_REPLY = 0xFC000101
+FILE_LIST_REQUEST = 0xFC000102
+FILE_LIST_REPLY = 0xFC000103
+MD5_REQUEST = 0xFC000104
+MD5_REPLY = 0xFC000105
+UPLOAD_START_REQUEST = 0xFC000106
+UPLOAD_START_REPLY = 0xFC000107
+UPLOAD_DATA_REQUEST = 0xFC000108
+UPLOAD_DATA_REPLY = 0xFC000109
+UPLOAD_END_REQUEST = 0xFC00010A
+UPLOAD_END_REPLY = 0xFC00010B
+DOWNLOAD_START_REQUEST = 0xFC00010C
+DOWNLOAD_START_REPLY = 0xFC00010D
+DOWNLOAD_DATA_REQUEST = 0xFC00010E
+DOWNLOAD_DATA_REPLY = 0xFC00010F
+DOWNLOAD_END_REPLY = 0xFC000110
+MKDIR_REQUEST = 0xFC000111
+MKDIR_REPLY = 0xFC000112
+REMOVE_REQUEST = 0xFC000113
+REMOVE_REPLY = 0xFC000114
+RENAME_REQUEST = 0xFC000115
+RENAME_REPLY = 0xFC000116
+DIRSIZE_REQUEST = 0xFC000117
+DIRSIZE_REPLY = 0xFC000118
+LAST_REQUEST_FAILED_REPLY = 0xFC000119
 
+# 文件项 flags
+FILE_FLAG_DIR = 0x1
+FILE_FLAG_EXECUTABLE = 0x2
 
-# ---------------------------------------------------------------------------
-# RFB FTP 扩展 ID（3 字节小端）
-# ---------------------------------------------------------------------------
+SEC_TYPE_NONE = 1
+SEC_TYPE_TIGHT = 16
+AUTH_CAP_VNC = 2  # AuthDefs::VNC
 
-# TightVNC FTP 扩展 ID（常见值 0x000102，对应 TightVNC 的扩展号）
-# 小端序列化后为 bytes([0x02, 0x01, 0x00])
-TIGHTVNC_FTP_EXT_ID = 0x000102
-
-
-# RFB 协议 prefix：Client-to-Server Extension 消息
-# RFB 规范中，扩展消息以一个标识字节开头；TightVNC FTP 使用 0xFC 作为 prefix
-RFB_FTP_PREFIX = 0xFC
-
-
-# ---------------------------------------------------------------------------
-# 基础编解码工具
-# ---------------------------------------------------------------------------
-
-def pack_uint8(v: int) -> bytes:
-    return struct.pack("!B", v & 0xFF)
-
-
-def pack_uint16be(v: int) -> bytes:
-    return struct.pack("!H", v & 0xFFFF)
-
-
-def pack_uint16le(v: int) -> bytes:
-    return struct.pack("<H", v & 0xFFFF)
-
-
-def pack_uint32be(v: int) -> bytes:
-    return struct.pack("!I", v & 0xFFFFFFFF)
-
-
-def pack_uint32le(v: int) -> bytes:
-    return struct.pack("<I", v & 0xFFFFFFFF)
-
-
-def pack_string_utf8(s: str) -> bytes:
-    """UTF-8 编码字符串，附带 uint32be 长度前缀。"""
-    data = s.encode("utf-8")
-    return pack_uint32be(len(data)) + data
-
-
-def unpack_uint8(buf: bytes, offset: int) -> tuple[int, int]:
-    (v,) = struct.unpack_from("!B", buf, offset)
-    return v, offset + 1
-
-
-def unpack_uint16be(buf: bytes, offset: int) -> tuple[int, int]:
-    (v,) = struct.unpack_from("!H", buf, offset)
-    return v, offset + 2
-
-
-def unpack_uint16le(buf: bytes, offset: int) -> tuple[int, int]:
-    (v,) = struct.unpack_from("<H", buf, offset)
-    return v, offset + 2
-
-
-def unpack_uint32be(buf: bytes, offset: int) -> tuple[int, int]:
-    (v,) = struct.unpack_from("!I", buf, offset)
-    return v, offset + 4
-
-
-def unpack_uint32le(buf: bytes, offset: int) -> tuple[int, int]:
-    (v,) = struct.unpack_from("<I", buf, offset)
-    return v, offset + 4
-
-
-def unpack_string_utf8(buf: bytes, offset: int) -> tuple[str, int]:
-    length, offset = unpack_uint32be(buf, offset)
-    s = buf[offset:offset + length].decode("utf-8", errors="replace")
-    return s, offset + length
+DEFAULT_CHUNK = 64 * 1024
 
 
 # ---------------------------------------------------------------------------
-# HTTP 包装协议（同步 Socket 层）
+# 握手用 DES（VNC 认证）
 # ---------------------------------------------------------------------------
 
-def _recv_exact(sock: socket.socket, n: int, timeout: float = 30.0) -> bytes:
-    """从 socket 精确读取 n 字节。"""
-    sock.settimeout(timeout)
-    chunks = bytearray()
-    remaining = n
-    while remaining > 0:
-        chunk = sock.recv(remaining)
-        if not chunk:
-            raise FtpError(f"连接关闭，期望 {n} 字节，仅收到 {len(chunks)}")
-        chunks.extend(chunk)
-        remaining -= len(chunk)
-    return bytes(chunks)
+# VNC 认证的固定密钥（RFC 6143 / vncviewer 约定，注意字节顺序）
+_VNC_KEY = (23, 82, 107, 6, 35, 78, 88, 7)
 
 
-def send_request(
-    sock: socket.socket,
-    subtype: int,
-    body: bytes = b"",
-    ext_id: int = TIGHTVNC_FTP_EXT_ID,
-    prefix: int = RFB_FTP_PREFIX,
-) -> None:
-    """构造并发送完整的 RFB FTP 请求。
+def _des_encrypt(challenge: bytes, password: str) -> bytes:
+    """把 password 补齐 8 字节后用共享密钥 DES-ECB 加密 16 字节 challenge."""
+    try:
+        from Crypto.Cipher import DES  # pycryptodome
+    except ImportError:
+        DES = None
 
-    布局: [prefix:uint8][ext_id:3bytes_LE][subtype:uint8][body:...]
-    """
-    header = (
-        pack_uint8(prefix)
-        + pack_uint32le(ext_id)[:3]  # 取小端最低 3 字节
-        + pack_uint8(subtype)
+    key = password[:8].ljust(8, "\0").encode("latin-1", "ignore")
+
+    if DES is not None:
+        cipher = DES.new(key, DES.MODE_ECB)
+        return cipher.encrypt(challenge[:8]) + cipher.encrypt(challenge[8:16])
+
+    raise FtpError(
+        "连接需要 VNC 密码，但未安装 pycryptodome（pip install pycryptodome）"
     )
-    sock.sendall(header + body)
 
 
-def recv_response(
-    sock: socket.socket,
-    timeout: float = 30.0,
-) -> tuple[int, bytes]:
-    """读取完整的 RFB FTP 响应。
+def vnc_auth_response(challenge: bytes, password: str) -> bytes:
+    """按 VNC 约定生成 16 字节认证响应."""
+    key = password[:8].ljust(8, "\0")
+    # 第一步：用固定密钥 DES 加密 password
+    fixed = _des_encrypt_bytes(bytes(_VNC_KEY), key.encode("latin-1", "ignore"))
+    # 第二步：用加密后的 password 作为密钥加密 challenge
+    return _des_encrypt_bytes(fixed, challenge[:16])
 
-    返回 (subtype, body)。
-    """
-    # 先读 8 字节头: prefix(1) + ext_id(3) + subtype(1) + body_length(3)?
-    # TightVNC FTP 响应头: prefix(1) + ext_id(3) + subtype(1) + body_len_be4?
-    # 实际 TightVNC FTP 扩展响应头格式:
-    #   [prefix:uint8][ext_id:3bytes_LE][subtype:uint8][body_length:uint32be]
-    header = _recv_exact(sock, 12, timeout=timeout)  # 1+3+1+4 = 9，多读以防变体
-    # 按约定的最小格式解析: prefix + 3B ext_id + subtype + 4B body_len
-    # 但为了宽容，我们只强制读取 prefix + ext_id + subtype + length
-    # 先解析 header 前 9 字节
-    offset = 0
-    prefix_byte, offset = unpack_uint8(header, offset)
-    _ext_id_bytes = header[offset:offset + 3]
-    offset += 3
-    subtype, offset = unpack_uint8(header, offset)
-    body_len, offset = unpack_uint32be(header, offset)
 
-    # 读剩余 body
-    body = _recv_exact(sock, body_len, timeout=timeout) if body_len > 0 else b""
-    return subtype, body
+def _des_encrypt_bytes(key8: bytes, data8: bytes) -> bytes:
+    try:
+        from Crypto.Cipher import DES
+
+        return DES.new(key8, DES.MODE_ECB).encrypt(data8)
+    except ImportError:
+        return _des_impl(key8, data8)
+
+
+# --- 纯 Python DES（仅 VNC 认证用；未装 pycryptodome 时的兜底） ------------
+
+_PC1 = [
+    57, 49, 41, 33, 25, 17, 9, 1, 58, 50, 42, 34, 26, 18,
+    10, 2, 59, 51, 43, 35, 27, 19, 11, 3, 60, 52, 44, 36,
+    63, 55, 47, 39, 31, 23, 15, 7, 62, 54, 46, 38, 30, 22,
+    14, 6, 61, 53, 45, 37, 29, 21, 13, 5, 28, 20, 12, 4,
+]
+_PC2 = [
+    14, 17, 11, 24, 1, 5, 3, 28, 15, 6, 21, 10,
+    23, 19, 12, 4, 26, 8, 16, 7, 27, 20, 13, 2,
+    41, 52, 31, 37, 47, 55, 30, 40, 51, 45, 33, 48,
+    44, 49, 39, 56, 34, 53, 46, 42, 50, 36, 29, 32,
+]
+_IP = [
+    58, 50, 42, 34, 26, 18, 10, 2, 60, 52, 44, 36, 28, 20, 12, 4,
+    62, 54, 46, 38, 30, 22, 14, 6, 64, 56, 48, 40, 32, 24, 16, 8,
+    57, 49, 41, 33, 25, 17, 9, 1, 59, 51, 43, 35, 27, 19, 11, 3,
+    61, 53, 45, 37, 29, 21, 13, 5, 63, 55, 47, 39, 31, 23, 15, 7,
+]
+_FP = [
+    40, 8, 48, 16, 56, 24, 64, 32, 39, 7, 47, 15, 55, 23, 63, 31,
+    38, 6, 46, 14, 54, 22, 62, 30, 37, 5, 45, 13, 53, 21, 61, 29,
+    36, 4, 44, 12, 52, 20, 60, 28, 35, 3, 43, 11, 51, 19, 59, 27,
+    34, 2, 42, 10, 50, 18, 58, 26, 33, 1, 41, 9, 49, 17, 57, 25,
+]
+_E = [
+    32, 1, 2, 3, 4, 5, 4, 5, 6, 7, 8, 9,
+    8, 9, 10, 11, 12, 13, 12, 13, 14, 15, 16, 17,
+    16, 17, 18, 19, 20, 21, 20, 21, 22, 23, 24, 25,
+    24, 25, 26, 27, 28, 29, 28, 29, 30, 31, 32, 1,
+]
+_P = [
+    16, 7, 20, 21, 29, 12, 28, 17, 1, 15, 23, 26, 5, 18, 31, 10,
+    2, 8, 24, 14, 32, 27, 3, 9, 19, 13, 30, 6, 22, 11, 4, 25,
+]
+_SHIFTS = [1, 1, 2, 2, 2, 2, 2, 2, 1, 2, 2, 2, 2, 2, 2, 1]
+
+_SBOX = [
+    [
+        14, 4, 13, 1, 2, 15, 11, 8, 3, 10, 6, 12, 5, 9, 0, 7,
+        0, 15, 7, 4, 14, 2, 13, 1, 10, 6, 12, 11, 9, 5, 3, 8,
+        4, 1, 14, 8, 13, 6, 2, 11, 15, 12, 9, 7, 3, 10, 5, 0,
+        15, 12, 8, 2, 4, 9, 1, 7, 5, 11, 3, 14, 10, 0, 6, 13,
+    ],
+    [
+        15, 1, 8, 14, 6, 11, 3, 4, 9, 7, 2, 13, 12, 0, 5, 10,
+        3, 13, 4, 7, 15, 2, 8, 14, 12, 0, 1, 10, 6, 9, 11, 5,
+        0, 14, 7, 11, 10, 4, 13, 1, 5, 8, 12, 6, 9, 3, 2, 15,
+        13, 8, 10, 1, 3, 15, 4, 2, 11, 6, 7, 12, 0, 5, 14, 9,
+    ],
+    [
+        10, 0, 9, 14, 6, 3, 15, 5, 1, 13, 12, 7, 11, 4, 2, 8,
+        13, 7, 0, 9, 3, 4, 6, 10, 2, 8, 5, 14, 12, 11, 15, 1,
+        13, 6, 4, 9, 8, 15, 3, 0, 11, 1, 2, 12, 5, 10, 14, 7,
+        1, 10, 13, 0, 6, 9, 8, 7, 4, 15, 14, 3, 11, 5, 2, 12,
+    ],
+    [
+        7, 13, 14, 3, 0, 6, 9, 10, 1, 2, 8, 5, 11, 12, 4, 15,
+        13, 8, 11, 5, 6, 15, 0, 3, 4, 7, 2, 12, 1, 10, 14, 9,
+        10, 6, 9, 0, 12, 11, 7, 13, 15, 1, 3, 14, 5, 2, 8, 4,
+        3, 15, 0, 6, 10, 1, 13, 8, 9, 4, 5, 11, 12, 7, 2, 14,
+    ],
+    [
+        2, 12, 4, 1, 7, 10, 11, 6, 8, 5, 3, 15, 13, 0, 14, 9,
+        14, 11, 2, 12, 4, 7, 13, 1, 5, 0, 15, 10, 3, 9, 8, 6,
+        4, 2, 1, 11, 10, 13, 7, 8, 15, 9, 12, 5, 6, 3, 0, 14,
+        11, 8, 12, 7, 1, 14, 2, 13, 6, 15, 0, 9, 10, 4, 5, 3,
+    ],
+    [
+        12, 1, 10, 15, 9, 2, 6, 8, 0, 13, 3, 4, 14, 7, 5, 11,
+        10, 15, 4, 2, 7, 12, 9, 5, 6, 1, 13, 14, 0, 11, 3, 8,
+        9, 14, 15, 5, 2, 8, 12, 3, 7, 0, 4, 10, 1, 13, 11, 6,
+        4, 3, 2, 12, 9, 5, 15, 10, 11, 14, 1, 7, 6, 0, 8, 13,
+    ],
+    [
+        4, 11, 2, 14, 15, 0, 8, 13, 3, 12, 9, 7, 5, 10, 6, 1,
+        13, 0, 11, 7, 4, 9, 1, 10, 14, 3, 5, 12, 2, 15, 8, 6,
+        1, 4, 11, 13, 12, 3, 7, 14, 10, 15, 6, 8, 0, 5, 9, 2,
+        6, 11, 13, 8, 1, 4, 10, 7, 9, 5, 0, 15, 14, 2, 3, 12,
+    ],
+    [
+        13, 2, 8, 4, 6, 15, 11, 1, 10, 9, 3, 14, 5, 0, 12, 7,
+        1, 15, 13, 8, 10, 3, 7, 4, 12, 5, 6, 11, 0, 14, 9, 2,
+        7, 11, 4, 1, 9, 12, 14, 2, 0, 6, 10, 13, 15, 3, 5, 8,
+        2, 1, 14, 7, 4, 10, 8, 13, 15, 12, 9, 0, 3, 5, 6, 11,
+    ],
+]
+
+
+def _permute(block: int, table: list[int], width: int) -> int:
+    out = 0
+    for pos in table:
+        out = (out << 1) | ((block >> (width - pos)) & 1)
+    return out
+
+
+def _des_impl(key: bytes, data: bytes) -> bytes:
+    """纯 Python DES-ECB 单块加密（8 字节 key，8 字节 data）."""
+    key_int = int.from_bytes(key, "big")
+    perm = _permute(key_int, _PC1, 64)
+    c = perm >> 28
+    d = perm & 0xFFFFFFF
+    subkeys = []
+    for shift in _SHIFTS:
+        c = ((c << shift) | (c >> (28 - shift))) & 0xFFFFFFF
+        d = ((d << shift) | (d >> (28 - shift))) & 0xFFFFFFF
+        subkeys.append(_permute((c << 28) | d, _PC2, 56))
+
+    block = _permute(int.from_bytes(data, "big"), _IP, 64)
+    left = block >> 32
+    right = block & 0xFFFFFFFF
+    for k in subkeys:
+        expanded = _permute(right, _E, 32) ^ k
+        s_out = 0
+        for i in range(8):
+            six = (expanded >> (42 - 6 * i)) & 0x3F
+            row = ((six >> 4) & 0x2) | (six & 0x1)
+            col = (six >> 1) & 0xF
+            s_out = (s_out << 4) | _SBOX[i][row * 16 + col]
+        f_out = _permute(s_out, _P, 32)
+        left, right = right, left ^ f_out
+    pre = (right << 32) | left
+    return _permute(pre, _FP, 64).to_bytes(8, "big")
 
 
 # ---------------------------------------------------------------------------
-# CompressedBlock 结构
-# ---------------------------------------------------------------------------
-
-def pack_compressed_block(data: bytes, compression_level: int = 0) -> bytes:
-    """打包一个 CompressedBlock。
-
-    布局: [compressionLevel:uint8][compressedSize:uint32le][uncompressedSize:uint32le][compressedData]
-    compression_level=0 表示不压缩；1-9 使用 zlib 压缩。
-    """
-    if compression_level <= 0:
-        level = 0
-        compressed_data = data
-    else:
-        level = min(compression_level, 9)
-        compressed_data = zlib.compress(data, level)
-
-    header = (
-        pack_uint8(level)
-        + pack_uint32le(len(compressed_data))
-        + pack_uint32le(len(data))
-    )
-    return header + compressed_data
-
-
-def unpack_compressed_block(buf: bytes) -> bytes:
-    """解包一个 CompressedBlock，返回原始未压缩数据。"""
-    offset = 0
-    level, offset = unpack_uint8(buf, offset)
-    compressed_size, offset = unpack_uint32le(buf, offset)
-    _uncompressed_size, offset = unpack_uint32le(buf, offset)
-    compressed_data = buf[offset:offset + compressed_size]
-
-    if level == 0:
-        return compressed_data
-    return zlib.decompress(compressed_data)
-
-
-# ---------------------------------------------------------------------------
-# 常用消息构造器（返回 body bytes，不含 RFB prefix/ext_id/subtype）
-# ---------------------------------------------------------------------------
-
-def make_mkdir_request(path: str) -> bytes:
-    """CMDRST body: UTF-8 长度前缀字符串。"""
-    return pack_string_utf8(path)
-
-
-def make_upload_start_request(
-    remote_path: str,
-    total_size: int,
-    overwrite: bool = True,
-) -> bytes:
-    """CFURST body: [path:string_utf8][total_size:uint64le][overwrite:uint8]"""
-    body = pack_string_utf8(remote_path)
-    # 注意：RFB FTP 文件大小通常用 uint32le 或 uint64le，这里用 uint64le 以支持大文件
-    body += pack_uint32le(total_size & 0xFFFFFFFF)
-    # 高 32 位
-    body += pack_uint32le((total_size >> 32) & 0xFFFFFFFF)
-    body += pack_uint8(1 if overwrite else 0)
-    return body
-
-
-def make_upload_data_request(
-    offset: int,
-    block: bytes,
-    compression: int = 0,
-) -> bytes:
-    """CUDRST body: [offset:uint64le][block:CompressedBlock]"""
-    body = pack_uint32le(offset & 0xFFFFFFFF)
-    body += pack_uint32le((offset >> 32) & 0xFFFFFFFF)
-    body += pack_compressed_block(block, compression)
-    return body
-
-
-def make_upload_end_request() -> bytes:
-    """CUERST body: 空。"""
-    return b""
-
-
-def make_list_request(path: str) -> bytes:
-    """CFLRST body: UTF-8 长度前缀字符串。"""
-    return pack_string_utf8(path)
-
-
-def make_delete_request(path: str) -> bytes:
-    """CFRRST body: UTF-8 长度前缀字符串。"""
-    return pack_string_utf8(path)
-
-
-def make_move_request(src: str, dst: str) -> bytes:
-    """CFMRST body: [src:string_utf8][dst:string_utf8]"""
-    return pack_string_utf8(src) + pack_string_utf8(dst)
-
-
-def make_download_start_request(remote_path: str, offset: int = 0) -> bytes:
-    """CFDRST body: [path:string_utf8][offset:uint64le]"""
-    body = pack_string_utf8(remote_path)
-    body += pack_uint32le(offset & 0xFFFFFFFF)
-    body += pack_uint32le((offset >> 32) & 0xFFFFFFFF)
-    return body
-
-
-def make_md5_request(path: str, offset: int, length: int) -> bytes:
-    """CM5RST body: [path:string_utf8][offset:uint64le][length:uint32le]"""
-    body = pack_string_utf8(path)
-    body += pack_uint32le(offset & 0xFFFFFFFF)
-    body += pack_uint32le((offset >> 32) & 0xFFFFFFFF)
-    body += pack_uint32le(length & 0xFFFFFFFF)
-    return body
-
-
-# ---------------------------------------------------------------------------
-# 响应解析辅助
+# 握手
 # ---------------------------------------------------------------------------
 
 @dataclass
-class DirEntry:
+class RfbServerInfo:
+    width: int
+    height: int
     name: str
-    size: int
-    mod_time: float  # Unix 时间戳（秒）
-    is_dir: bool
+    tight_enabled: bool
+    file_transfer: bool
 
 
-def parse_list_response(body: bytes) -> list[DirEntry]:
-    """解析 CFLRST 响应 body。
+def _recv_exact(sock: socket.socket, n: int) -> bytes:
+    buf = b""
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise FtpError("VNC 连接已关闭")
+        buf += chunk
+    return buf
 
-    TightVNC FTP 列表响应体格式：
-      [entry_count:uint32le]
-      N × [
-          name:string_utf8
-          size:uint64le
-          mod_time:uint64le  (Unix 毫秒时间戳)
-          attr:uint8         (0=普通文件, 1=目录)
-      ]
-    """
-    offset = 0
-    count, offset = unpack_uint32le(body, offset)
-    entries: list[DirEntry] = []
-    for _ in range(count):
-        name, offset = unpack_string_utf8(body, offset)
-        size_low, offset = unpack_uint32le(body, offset)
-        size_high, offset = unpack_uint32le(body, offset)
-        size = size_low | (size_high << 32)
-        mtime_low, offset = unpack_uint32le(body, offset)
-        mtime_high, offset = unpack_uint32le(body, offset)
-        mod_time_ms = mtime_low | (mtime_high << 32)
-        attr, offset = unpack_uint8(body, offset)
-        entries.append(
-            DirEntry(
-                name=name,
-                size=size,
-                mod_time=mod_time_ms / 1000.0,
-                is_dir=(attr == 1),
-            )
+
+def _recv_u8(sock: socket.socket) -> int:
+    return _recv_exact(sock, 1)[0]
+
+
+def _recv_u32(sock: socket.socket) -> int:
+    return struct.unpack(">I", _recv_exact(sock, 4))[0]
+
+
+def _recv_utf8(sock: socket.socket) -> str:
+    n = _recv_u32(sock)
+    return _recv_exact(sock, n).decode("utf-8", "replace")
+
+
+def _pack_utf8(s: str) -> bytes:
+    data = s.encode("utf-8")
+    return struct.pack(">I", len(data)) + data
+
+
+def _handshake(sock: socket.socket, password: str | None) -> RfbServerInfo:
+    """完成 RFB 握手；优先 Tight(16)，返回服务器信息."""
+    banner = b""
+    while not banner.endswith(b"\n"):
+        chunk = sock.recv(16)
+        if not chunk:
+            raise FtpError("VNC 服务端未返回协议版本")
+        banner += chunk
+    major, minor = 3, 8
+    try:
+        ver = banner.strip().decode("ascii", "replace").split()[-1]
+        major, minor = (int(x) for x in ver.split(".")[2:4])
+    except Exception:
+        pass
+
+    sock.sendall(b"RFB 003.008\n")
+
+    if (major, minor) >= (3, 7):
+        count = _recv_u8(sock)
+        if count == 0:
+            reason_len = _recv_u32(sock)
+            reason = _recv_exact(sock, reason_len).decode("utf-8", "replace")
+            raise FtpError(f"VNC 服务端拒绝连接: {reason}")
+        sec_types = [_recv_u8(sock) for _ in range(count)]
+    else:
+        sec_types = [struct.unpack(">I", _recv_exact(sock, 4))[0]]
+
+    if SEC_TYPE_TIGHT not in sec_types:
+        raise FtpError(
+            "该 VNC 服务端未提供 Tight 安全类型，无法使用文件传输扩展"
+            f"（可用安全类型: {sec_types}）。请改用 TightVNC 2.x 服务端。"
         )
-    return entries
 
+    sock.sendall(bytes([SEC_TYPE_TIGHT]))
+    tunnel_count = _recv_u32(sock)
+    for _ in range(tunnel_count):
+        raise FtpError("暂不支持 Tight 隧道类型")
 
-def parse_md5_response(body: bytes) -> str:
-    """解析 CM5RST 响应 body，返回 16 字节 MD5 的 hex 字符串（32 字符小写）。
+    auth_count = _recv_u32(sock)
+    auth_caps = []
+    for _ in range(auth_count):
+        code = _recv_u32(sock)
+        _recv_exact(sock, 4)  # vendor signature
+        _recv_exact(sock, 8)  # name signature
+        auth_caps.append(code)
 
-    格式：[md5:16bytes]
-    """
-    if len(body) < 16:
-        return ""
-    return body[:16].hex()
+    if auth_count:
+        if AUTH_CAP_VNC not in auth_caps:
+            raise FtpError(f"服务端只支持未实现的认证方式: {auth_caps}")
+        sock.sendall(struct.pack(">I", AUTH_CAP_VNC))
+        challenge = _recv_exact(sock, 16)
+        if not password:
+            raise FtpError("该 VNC 服务端要求密码认证，请在远程地址中提供密码")
+        sock.sendall(vnc_auth_response(challenge, password))
 
+    status = _recv_u32(sock)
+    if status != 0:
+        if status == 1:
+            raise FtpError("VNC 认证失败（密码错误）")
+        raise FtpError(f"VNC 认证失败 (status={status})")
 
-def parse_upload_response(body: bytes) -> int:
-    """解析 CFURST / CUDRST / CUERST 响应，返回服务器分配的文件句柄或 0。
+    sock.sendall(b"\x01")  # ClientInit shared=1
 
-    TightVNC FTP 上传开始响应返回文件句柄（uint32le）。
-    数据块/结束响应通常为空。
-    """
-    if len(body) >= 4:
-        val, _ = unpack_uint32le(body, 0)
-        return val
-    return 0
+    width, height = struct.unpack(">HH", _recv_exact(sock, 4))
+    _recv_exact(sock, 16)  # pixel format
+    name = _recv_utf8(sock)
 
+    # Tight 模式下紧随 ServerInit 的是 interaction caps
+    srv_cnt, cl_cnt, enc_cnt, _pad = struct.unpack(">HHHH", _recv_exact(sock, 8))
+    caps = []
+    for _ in range(srv_cnt + cl_cnt + enc_cnt):
+        code = _recv_u32(sock)
+        _recv_exact(sock, 4)
+        _recv_exact(sock, 8)
+        caps.append(code)
 
-def parse_download_response(body: bytes) -> tuple[int, int]:
-    """解析 CFDRST 响应 body。
-
-    返回 (file_handle, file_size)，均为 uint64le / uint32le 组合。
-    """
-    if len(body) < 12:
-        return 0, 0
-    offset = 0
-    handle_low, offset = unpack_uint32le(body, offset)
-    handle_high, offset = unpack_uint32le(body, offset)
-    size_low, offset = unpack_uint32le(body, offset)
-    size_high, offset = unpack_uint32le(body, offset)
-    handle = handle_low | (handle_high << 32)
-    size = size_low | (size_high << 32)
-    return handle, size
+    return RfbServerInfo(
+        width=width,
+        height=height,
+        name=name,
+        tight_enabled=True,
+        file_transfer=FILE_LIST_REPLY in caps,
+    )
 
 
 # ---------------------------------------------------------------------------
-# FtpSession —— 高层会话封装
+# 客户端
 # ---------------------------------------------------------------------------
 
 class FtpSession:
-    """基于已连接 RFB socket 的 FTP 高层会话。"""
+    """TightVNC RFB 文件传输会话（同步）. 连接建立即完成 VNC 握手."""
+    DEFAULT_CHUNK_SIZE = DEFAULT_CHUNK
 
-    DEFAULT_CHUNK_SIZE = 64 * 1024  # 64 KB
-
-    def __init__(self, sock: socket.socket) -> None:
-        self.sock = sock
-        self.handles: dict[str, int] = {}  # 远程路径 -> 文件句柄（预留）
+    def __init__(
+        self,
+        sock: socket.socket | tuple[str, int],
+        password: str | None = None,
+        timeout: float = 15.0,
+    ) -> None:
+        """sock 可以是已连接的 socket，也可以是 (host, port) 元组."""
+        if isinstance(sock, tuple):
+            self.sock = socket.create_connection(sock, timeout=timeout)
+            self._owns_socket = True
+        else:
+            self.sock = sock
+            self._owns_socket = False
+        self.sock.settimeout(timeout)
+        self.server_info = _handshake(self.sock, password)
+        if not self.server_info.file_transfer:
+            raise FtpError("服务端 Tight 会话未声明文件传输扩展")
 
     # ---- 基础收发 --------------------------------------------------------
 
-    def _do_request(self, subtype: int, body: bytes = b"") -> tuple[int, bytes]:
-        send_request(self.sock, subtype, body)
-        resp_subtype, resp_body = recv_response(self.sock)
-        if resp_subtype == LAST_REQUEST_FAILED:
-            raise FtpError(
-                f"RFB FTP 请求失败 subtype=0x{subtype:02X}",
-                rfb_subtype=resp_subtype,
-            )
-        return resp_subtype, resp_body
+    def _send(self, payload: bytes) -> None:
+        self.sock.sendall(payload)
 
-    # ---- 高层 API --------------------------------------------------------
+    def _read_message_id(self) -> int:
+        return struct.unpack(">I", _recv_exact(self.sock, 4))[0]
+
+    def _read_failure(self, mid: int) -> FtpError:
+        try:
+            message = _recv_utf8(self.sock)
+        except Exception:
+            message = "服务端返回失败（无错误描述）"
+        return FtpError(f"远程操作失败: {message}", mid)
+
+    def _expect(self, expected: int) -> None:
+        mid = self._read_message_id()
+        if mid == LAST_REQUEST_FAILED_REPLY:
+            raise self._read_failure(mid)
+        if mid != expected:
+            raise FtpError(f"响应不匹配: 期望 0x{expected:08X}，实际 0x{mid:08X}", mid)
+
+    def _read_compressed_block(self) -> bytes:
+        level = _recv_u8(self.sock)
+        csize = _recv_u32(self.sock)
+        usize = _recv_u32(self.sock)
+        data = _recv_exact(self.sock, csize) if csize else b""
+        if level:
+            if usize and csize:
+                return zlib.decompress(data)
+            return b""
+        return data
+
+    def close(self) -> None:
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+    # ---- 文件列表 --------------------------------------------------------
+
+    def list_dir(self, path: str) -> list[dict[str, Any]]:
+        """列出远程目录. path 使用 TightVNC 风格："/" 列盘符，"/C:" 列 C 盘."""
+        self._send(
+            struct.pack(">I", FILE_LIST_REQUEST)
+            + b"\x00"
+            + _pack_utf8(path)
+        )
+        self._expect(FILE_LIST_REPLY)
+        raw = self._read_compressed_block()
+        if not raw:
+            return []
+
+        count = struct.unpack(">I", raw[:4])[0]
+        offset = 4
+        entries: list[dict[str, Any]] = []
+        for _ in range(count):
+            size, mtime, flags = struct.unpack(">QQH", raw[offset:offset + 18])
+            offset += 18
+            name_len = struct.unpack(">I", raw[offset:offset + 4])[0]
+            offset += 4
+            name = raw[offset:offset + name_len].decode("utf-8", "replace").rstrip("\x00")
+            offset += name_len
+            entries.append({
+                "name": name,
+                "size": size,
+                "mod_time": mtime / 1000.0 if mtime else 0.0,
+                "is_dir": bool(flags & FILE_FLAG_DIR),
+            })
+        return entries
+
+    # ---- 目录操作 --------------------------------------------------------
 
     def mkdir(self, path: str) -> None:
-        resp_subtype, _ = self._do_request(CMDRST, make_mkdir_request(path))
-        # 期望返回 subtype=CMDRST 或空响应
-        if resp_subtype != CMDRST:
-            raise FtpError(
-                f"mkdir 响应 subtype 不匹配：期望 0x{CMDRST:02X}，实际 0x{resp_subtype:02X}",
-                rfb_subtype=resp_subtype,
-            )
+        self._send(struct.pack(">I", MKDIR_REQUEST) + _pack_utf8(path))
+        self._expect(MKDIR_REPLY)
 
-    def delete(self, path: str) -> None:
-        resp_subtype, _ = self._do_request(CFRRST, make_delete_request(path))
-        if resp_subtype != CFRRST:
-            raise FtpError(
-                f"delete 响应 subtype 不匹配：期望 0x{CFRRST:02X}，实际 0x{resp_subtype:02X}",
-                rfb_subtype=resp_subtype,
-            )
+    def mkdir_parents(self, path: str) -> None:
+        """逐级创建父目录，已存在则忽略（盘符层不创建）."""
+        parts = [p for p in path.replace("\\", "/").split("/") if p]
+        if len(parts) <= 1:
+            return
+        current = ""
+        for part in parts[:-1]:
+            if not current and part.upper().endswith(":"):
+                current = f"/{part}"
+                continue
+            parent = current or "/"
+            current = f"{current}/{part}"
+            try:
+                self.mkdir(current)
+            except FtpError:
+                # 目录已存在时服务端同样返回失败，确认一次再决定是否抛出
+                if self._dir_exists(parent, part):
+                    continue
+                raise
 
-    def move(self, src: str, dst: str) -> None:
-        resp_subtype, _ = self._do_request(CFMRST, make_move_request(src, dst))
-        if resp_subtype != CFMRST:
-            raise FtpError(
-                f"move 响应 subtype 不匹配：期望 0x{CFMRST:02X}，实际 0x{resp_subtype:02X}",
-                rfb_subtype=resp_subtype,
-            )
-
-    def list_dir(self, path: str) -> list[dict]:
-        _resp_subtype, body = self._do_request(CFLRST, make_list_request(path))
-        entries = parse_list_response(body)
-        return [
-            {
-                "name": e.name,
-                "size": e.size,
-                "mod_time": e.mod_time,
-                "is_dir": e.is_dir,
-            }
-            for e in entries
-        ]
-
-    def md5_check(
-        self,
-        remote_path: str,
-        offset: int = 0,
-        length: int = 65536,
-    ) -> str:
-        resp_subtype, body = self._do_request(
-            CM5RST, make_md5_request(remote_path, offset, length)
+    def _dir_exists(self, parent_path: str, name: str) -> bool:
+        try:
+            entries = self.list_dir(parent_path or "/")
+        except FtpError:
+            return False
+        return any(
+            e["is_dir"] and str(e["name"]).lower() == name.lower() for e in entries
         )
-        if resp_subtype != CM5RST:
-            return ""
-        return parse_md5_response(body)
+
+    def remove(self, path: str) -> None:
+        self._send(struct.pack(">I", REMOVE_REQUEST) + _pack_utf8(path))
+        self._expect(REMOVE_REPLY)
+
+    def rename(self, src: str, dst: str) -> None:
+        self._send(
+            struct.pack(">I", RENAME_REQUEST) + _pack_utf8(src) + _pack_utf8(dst)
+        )
+        self._expect(RENAME_REPLY)
+
+    def dir_size(self, path: str) -> int:
+        self._send(struct.pack(">I", DIRSIZE_REQUEST) + _pack_utf8(path))
+        self._expect(DIRSIZE_REPLY)
+        return struct.unpack(">Q", _recv_exact(self.sock, 8))[0]
+
+    # ---- 上传 ------------------------------------------------------------
 
     def upload_file(
         self,
         local_path: str,
         remote_path: str,
-        progress_cb: Optional[Callable[[int, int], None]] = None,
-        compression: int = 0,
-        chunk_size: int = DEFAULT_CHUNK_SIZE,
         overwrite: bool = True,
-    ) -> None:
-        """分块上传本地文件到远程。
-
-        Args:
-            local_path: 本地文件路径。
-            remote_path: 远程文件路径。
-            progress_cb: 进度回调 `cb(已上传字节数, 总大小)`。
-            compression: 压缩级别 0-9，0 表示不压缩。
-            chunk_size: 每块字节数（未压缩）。
-            overwrite: 是否覆盖已存在的远程文件。
-        """
-        total_size = os.path.getsize(local_path)
-
-        # 1) 开始上传
-        resp_subtype, resp_body = self._do_request(
-            CFURST,
-            make_upload_start_request(remote_path, total_size, overwrite=overwrite),
+        chunk_size: int = DEFAULT_CHUNK,
+    ) -> int:
+        """上传本地文件，返回字节数."""
+        size = 0
+        self._send(
+            struct.pack(">I", UPLOAD_START_REQUEST)
+            + _pack_utf8(remote_path)
+            + (b"\x01" if overwrite else b"\x00")
+            + struct.pack(">Q", 0)
         )
-        if resp_subtype != CFURST:
-            raise FtpError(
-                f"upload_start 响应 subtype 不匹配：期望 0x{CFURST:02X}，实际 0x{resp_subtype:02X}",
-                rfb_subtype=resp_subtype,
-            )
+        self._expect(UPLOAD_START_REPLY)
 
-        # 2) 分块发送
-        sent = 0
         with open(local_path, "rb") as f:
             while True:
                 block = f.read(chunk_size)
                 if not block:
                     break
-                self._do_request(
-                    CUDRST,
-                    make_upload_data_request(sent, block, compression=compression),
+                self._send(
+                    struct.pack(">I", UPLOAD_DATA_REQUEST)
+                    + b"\x00"
+                    + struct.pack(">II", len(block), len(block))
+                    + block
                 )
-                sent += len(block)
-                if progress_cb:
-                    try:
-                        progress_cb(sent, total_size)
-                    except Exception:
-                        # 回调失败不影响上传
-                        pass
+                self._expect(UPLOAD_DATA_REPLY)
+                size += len(block)
 
-        # 3) 上传结束
-        end_subtype, _ = self._do_request(CUERST, make_upload_end_request())
-        if end_subtype != CUERST:
-            raise FtpError(
-                f"upload_end 响应 subtype 不匹配：期望 0x{CUERST:02X}，实际 0x{end_subtype:02X}",
-                rfb_subtype=end_subtype,
-            )
+        import os
 
+        mtime_ms = int(os.stat(local_path).st_mtime * 1000)
+        self._send(
+            struct.pack(">I", UPLOAD_END_REQUEST)
+            + struct.pack(">H", 0)
+            + struct.pack(">Q", mtime_ms)
+        )
+        self._expect(UPLOAD_END_REPLY)
+        return size
 
-# ---------------------------------------------------------------------------
-# 自检（python -m localdropshell.rfbftp 时运行）
-# ---------------------------------------------------------------------------
+    # ---- 下载 ------------------------------------------------------------
 
-if __name__ == "__main__":  # pragma: no cover - 仅开发自检
-    import io
+    def download_file(
+        self,
+        remote_path: str,
+        local_path: str,
+        offset: int = 0,
+        chunk_size: int = DEFAULT_CHUNK,
+    ) -> int:
+        """下载远程文件到本地，返回写入字节数."""
+        self._send(
+            struct.pack(">I", DOWNLOAD_START_REQUEST)
+            + _pack_utf8(remote_path)
+            + struct.pack(">Q", offset)
+        )
+        self._expect(DOWNLOAD_START_REPLY)
 
-    # 基础编解码自检
-    assert pack_uint8(0xFF) == b"\xff"
-    assert pack_uint16be(0x1234) == b"\x12\x34"
-    assert pack_uint16le(0x1234) == b"\x34\x12"
-    assert pack_uint32be(0x11223344) == b"\x11\x22\x33\x44"
-    assert pack_uint32le(0x11223344) == b"\x44\x33\x22\x11"
+        written = 0
+        with open(local_path, "wb") as f:
+            while True:
+                self._send(
+                    struct.pack(">I", DOWNLOAD_DATA_REQUEST)
+                    + b"\x00"
+                    + struct.pack(">I", chunk_size)
+                )
+                mid = self._read_message_id()
+                if mid == LAST_REQUEST_FAILED_REPLY:
+                    raise self._read_failure(mid)
+                if mid == DOWNLOAD_END_REPLY:
+                    _recv_u8(self.sock)                    # file flags
+                    _recv_exact(self.sock, 8)              # modification time
+                    break
+                if mid != DOWNLOAD_DATA_REPLY:
+                    raise FtpError(
+                        f"下载响应不匹配: 0x{mid:08X}", mid
+                    )
+                data = self._read_compressed_block()
+                if not data:
+                    break
+                f.write(data)
+                written += len(data)
+        return written
 
-    buf = pack_string_utf8("hello")
-    s, off = unpack_string_utf8(buf, 0)
-    assert s == "hello" and off == len(buf), (s, off)
+    def read_file(self, remote_path: str) -> bytes:
+        """读取远程文件内容到内存（小文件用）."""
+        import tempfile
 
-    # CompressedBlock 自检
-    plain = b"A" * 1024
-    packed = pack_compressed_block(plain, compression_level=6)
-    # 头: 1 + 4 + 4 = 9
-    assert packed[0] == 6
-    decompressed = unpack_compressed_block(packed)
-    assert decompressed == plain
+        fd, tmp = tempfile.mkstemp(prefix="lds-rfb-", suffix=".tmp")
+        import os
 
-    packed_nc = pack_compressed_block(plain, compression_level=0)
-    assert unpack_compressed_block(packed_nc) == plain
+        os.close(fd)
+        try:
+            self.download_file(remote_path, tmp)
+            with open(tmp, "rb") as f:
+                return f.read()
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
-    # 失败响应抛异常
-    class _FailingSock:
-        def __init__(self) -> None:
-            self._sent: list[bytes] = []
-            self._full: bytes = (
-                pack_uint8(RFB_FTP_PREFIX)
-                + pack_uint32le(TIGHTVNC_FTP_EXT_ID)[:3]
-                + pack_uint8(LAST_REQUEST_FAILED)
-                + pack_uint32be(4)
-                + b"\x00\x00\x00\x00"
-            )
-            self._idx: int = 0
-
-        def settimeout(self, _timeout: float) -> None:
-            pass
-
-        def sendall(self, data: bytes) -> None:
-            self._sent.append(data)
-
-        def recv(self, n: int) -> bytes:
-            if self._idx < len(self._full):
-                chunk = self._full[self._idx:self._idx + n]
-                self._idx += len(chunk)
-                return chunk
-            return b""
-
-    fsock = _FailingSock()
-    ftp = FtpSession(fsock)
-    try:
-        ftp.mkdir("/tmp/test")
-    except FtpError as e:
-        print(f"捕获到预期异常: {e}")
-    else:
-        raise AssertionError("期望 FtpError")
-
-    print("所有自检通过 ✓")
+    def md5_check(self, remote_path: str, offset: int = 0, length: int = 65536) -> str:
+        """服务端 MD5 扩展（TightVNC 2.8 服务端默认未实现，用作可选校验）."""
+        raise FtpError("服务端未实现 MD5 校验扩展")

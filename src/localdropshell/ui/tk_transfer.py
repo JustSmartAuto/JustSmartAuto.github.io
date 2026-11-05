@@ -16,6 +16,7 @@ import logging
 import os
 import posixpath
 import queue
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -26,7 +27,7 @@ import tkinter as tk
 import tkinter.ttk as ttk
 
 from localdropshell.settings import DEFAULT_VNC_PORT, format_target, parse_target
-from localdropshell.ui.tk_drop import enable_drop_dnd
+from localdropshell.ui.tk_drop import enable_drag_out, enable_drop_dnd
 
 
 logger = logging.getLogger("localdropshell.ui.tk_transfer")
@@ -56,8 +57,11 @@ def _format_mtime(ts: float) -> str:
 
 
 def _target_fields(target: dict[str, Any] | None) -> dict[str, Any]:
-    """把当前目标转换成请求里要带的 host/port；未连接时返回空 dict."""
-    if not target or not target.get("connected"):
+    """把当前目标转换成请求里要带的 host/port；未连接时返回空 dict.
+
+    也接受已带 host/port 的请求 payload（无 connected 键时视为已连接）。
+    """
+    if not target or target.get("connected") is False:
         return {}
     host = str(target.get("host") or "").strip()
     if not host:
@@ -129,12 +133,16 @@ def _http_worker(base_url: str, req: _HttpRequest) -> None:
                 elif req.kind == "upload":
                     local_path: str = req.payload["local_path"]
                     remote_dir: str = req.payload.get("remote_dir", "/")
+                    remote_name: str = (
+                        req.payload.get("remote_name")
+                        or os.path.basename(local_path)
+                    )
                     file_size = os.path.getsize(local_path)
                     out["data"] = {"size": file_size}
 
                     with open(local_path, "rb") as fh:
                         form = aiohttp.FormData()
-                        form.add_field("path", os.path.basename(local_path))
+                        form.add_field("path", remote_name)
                         form.add_field("dir", remote_dir)
                         host = str(req.payload.get("host") or "")
                         if host:
@@ -314,8 +322,12 @@ def build_transfer_tab(
     local_tree.configure(yscrollcommand=local_scroll.set)
     local_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
-    # 启用拖放
-    enable_drop_dnd(local_tree, lambda paths: _on_local_dropped(local_tree, paths, _item_store["local"]))
+    # 启用拖放：Treeview 和它所在的 Frame 都注册，避免拖到空白处没反应
+    _local_drop = lambda paths: _on_local_dropped(
+        local_tree, paths, _item_store["local"], log
+    )
+    enable_drop_dnd(local_tree, _local_drop)
+    enable_drop_dnd(left_frame, _local_drop)
 
     # --- 中: 按钮区 ---
     mid_frame = tk.Frame(paned, bg=Win95_COLORS["chrome"], width=120)
@@ -373,16 +385,54 @@ def build_transfer_tab(
     remote_tree.configure(yscrollcommand=remote_scroll.set)
     remote_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
-    # 双击 → 在远程端打开
-    remote_tree.bind(
-        "<Double-1>",
-        lambda _e: _open_remote_double_click(base_url, remote_tree, log),
-    )
-    # 右键 → 刷新
+    # 双击 → 目录进入；文件提示可拖出下载
+    def _on_remote_double_click(_event=None) -> None:
+        sel = remote_tree.selection()
+        if not sel:
+            return
+        item = _item_store["remote"].get(sel[0])
+        if not item:
+            return
+        if item.status == "目录":
+            dir_var.set(item.path)
+            _refresh_remote(base_url, remote_tree, _item_store, log, target)
+        else:
+            log(f"ℹ 远程文件 {item.path} — 可直接拖到资源管理器下载")
+
+    remote_tree.bind("<Double-1>", _on_remote_double_click)
+
+    # 右键 → 刷新 / 下载选中
     remote_menu = tk.Menu(root, tearoff=0)
-    remote_menu.add_command(label="刷新列表",
-                            command=lambda: _refresh_remote(base_url, remote_tree, _item_store, log, target))
+    remote_menu.add_command(
+        label="刷新列表",
+        command=lambda: _refresh_remote(base_url, remote_tree, _item_store, log, target),
+    )
+    remote_menu.add_command(
+        label="下载选中到本地",
+        command=lambda: _do_download(
+            base_url, local_tree, remote_tree, _item_store, log, set_progress, target
+        ),
+    )
+    remote_menu.add_command(
+        label="复制远程路径",
+        command=lambda: _copy_remote_path(remote_tree, _item_store["remote"], log),
+    )
     remote_tree.bind("<Button-3>", lambda e: remote_menu.tk_popup(e.x_root, e.y_root))
+
+    # 右侧拖入 = 上传到当前远程目录（保持文件夹层级）
+    _remote_drop = lambda paths: _upload_dropped_to_remote(
+        base_url, remote_tree, _item_store["remote"], log, set_progress, target, paths
+    )
+    enable_drop_dnd(remote_tree, _remote_drop)
+    enable_drop_dnd(right_frame, _remote_drop)
+
+    # 右侧拖出 = 先下载到本地临时目录，再拖给资源管理器
+    enable_drag_out(
+        remote_tree,
+        lambda: _prepare_drag_out(
+            base_url, remote_tree, _item_store["remote"], log, set_progress, target
+        ),
+    )
 
     # ========= 底部: 进度条 + 日志 =========
     bottom = tk.Frame(root, bg=Win95_COLORS["chrome"])
@@ -548,10 +598,18 @@ def build_transfer_tab(
 # 各按钮动作实现
 # ---------------------------------------------------------------------------
 
-def _on_local_dropped(tree: ttk.Treeview, paths: list[str], store: dict[str, FileItem]) -> None:
+def _on_local_dropped(
+    tree: ttk.Treeview,
+    paths: list[str],
+    store: dict[str, FileItem],
+    log: Callable[[str], None] | None = None,
+) -> None:
     """DnD 回调 — 在主线程调用, 直接改 tree/state."""
     import os
     from pathlib import Path
+
+    if log:
+        log(f"ℹ 检测到拖入 {len(paths)} 项，正在解析…")
 
     def _fmt_size(n: int) -> str:
         if n < 1024:
@@ -569,21 +627,10 @@ def _on_local_dropped(tree: ttk.Treeview, paths: list[str], store: dict[str, Fil
         except Exception:
             return ""
 
-    for raw in paths:
-        try:
-            p = Path(raw)
-            if p.is_dir():
-                for f in p.rglob("*"):
-                    if f.is_file():
-                        _insert_one(str(f))
-            elif p.is_file():
-                _insert_one(str(p))
-        except Exception:
-            continue
-
-    def _insert_one(abs_path: str) -> None:
-        if abs_path in store:
-            return
+    def _insert_one(abs_path: str) -> int:
+        # 已有同路径条目则跳过（store 以 tree uid 为键，不能直接用路径做键）
+        if any(item.path == abs_path for item in store.values()):
+            return 0
         try:
             stat = os.stat(abs_path)
             uid = tree.insert(
@@ -593,8 +640,24 @@ def _on_local_dropped(tree: ttk.Treeview, paths: list[str], store: dict[str, Fil
             )
             store[uid] = FileItem(path=abs_path, size=stat.st_size,
                                   mtime=stat.st_mtime, status="就绪")
+            return 1
         except Exception:
-            pass
+            return 0
+
+    added = 0
+    for raw in paths:
+        try:
+            p = Path(raw)
+            if p.is_dir():
+                for f in p.rglob("*"):
+                    if f.is_file():
+                        added += _insert_one(str(f))
+            elif p.is_file():
+                added += _insert_one(str(p))
+        except Exception:
+            continue
+    if log:
+        log(f"{'✅' if added else '⚠'} 已添加 {added} 个本地文件到列表")
 
 
 def _clear_tree(tree: ttk.Treeview, store: dict[str, FileItem]) -> None:
@@ -773,18 +836,182 @@ def _do_batch(
     threading.Thread(target=_worker, daemon=True).start()
 
 
-def _open_remote_double_click(
-    base_url: str,
+def _copy_remote_path(
     tree: ttk.Treeview,
     store: dict[str, FileItem],
     log: Callable[[str], None],
 ) -> None:
-    sel = tree.selection()
-    if not sel:
+    items = [store[uid] for uid in tree.selection() if uid in store]
+    if not items:
+        log("⚠ 请先选择要复制的远程条目")
         return
-    item = store.get(sel[0])
-    if not item:
+    text = "\n".join(item.path for item in items)
+    try:
+        tree.clipboard_clear()
+        tree.clipboard_append(text)
+        log(f"✅ 已复制 {len(items)} 条远程路径")
+    except Exception as exc:
+        log(f"❌ 复制失败: {exc}")
+
+
+def _remote_drag_dir() -> Path:
+    target = Path(tempfile.gettempdir()) / "LocalFileDropShell" / "dragout"
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def _collect_remote_files(
+    base_url: str,
+    remote_dir: str,
+    target: dict[str, Any] | None,
+    log: Callable[[str], None],
+    found: list[tuple[str, str]],
+    prefix: str = "",
+) -> None:
+    """递归列出远程目录内所有文件，追加 (远程路径, 相对路径) 到 found."""
+    payload: dict[str, Any] = {"path": remote_dir}
+    payload.update(_target_fields(target))
+    result = _run_http(base_url, "list_remote", payload)
+    if not result.get("ok"):
+        log(f"⚠ 列出 {remote_dir} 失败: {result.get('error') or result.get('data')}")
         return
-    log(f"ℹ 双击远程条目, 请求远程端打开: {item.path}")
-    # TODO: server 端实现 /exec open <path> 或专用 handler
-    log("⚠ 远程打开 API 待 server.py 实现")
+    data = result.get("data") or {}
+    base = str(data.get("path") or remote_dir)
+    for entry in data.get("entries") or data.get("items") or []:
+        name = str(entry.get("name") or "")
+        if not name:
+            continue
+        rpath = entry.get("path") or posixpath.join(base, name)
+        rel = posixpath.join(prefix, name) if prefix else name
+        if entry.get("is_dir"):
+            _collect_remote_files(base_url, rpath, target, log, found, rel)
+        else:
+            found.append((rpath, rel))
+
+
+def _upload_dropped_to_remote(
+    base_url: str,
+    remote_tree: ttk.Treeview,
+    store: dict[str, FileItem],
+    log: Callable[[str], None],
+    set_progress: Callable[[float, float, str], None],
+    target: dict[str, Any] | None,
+    paths: list[str],
+) -> None:
+    """拖入右侧列表 → 上传到当前远程目录（文件夹层级保持不变）."""
+    if not (target or {}).get("host"):
+        log("⚠ 请先填写远程地址并点击「连接」再拖入文件")
+        return
+    remote_dir = str((target or {}).get("dir") or "/")
+
+    jobs: list[tuple[str, str]] = []
+    for raw in paths:
+        p = Path(raw)
+        try:
+            if p.is_file():
+                jobs.append((str(p), p.name))
+            elif p.is_dir():
+                for f in p.rglob("*"):
+                    if f.is_file():
+                        jobs.append((
+                            str(f),
+                            str(f.relative_to(p.parent)).replace("\\", "/"),
+                        ))
+        except OSError:
+            continue
+    if not jobs:
+        log("⚠ 拖入内容中没有可上传的文件")
+        return
+
+    log(f"ℹ 开始上传 {len(jobs)} 个文件 → {remote_dir}")
+
+    def _worker() -> None:
+        total = len(jobs)
+        ok_count = 0
+        for idx, (local_path, rel) in enumerate(jobs, 1):
+            set_progress(idx, total, f"上传 {rel}")
+            payload: dict[str, Any] = {
+                "local_path": local_path,
+                "remote_dir": remote_dir,
+                "remote_name": rel,
+            }
+            payload.update(_target_fields(target))
+            result = _run_http(base_url, "upload", payload)
+            if result.get("ok"):
+                ok_count += 1
+                log(f"✅ 上传 {rel}")
+            else:
+                log(f"❌ 上传 {rel}: {result.get('error') or result.get('data')}")
+        set_progress(total, total, f"上传完成 ({ok_count}/{total})")
+        _refresh_remote(base_url, remote_tree, store, log, target)
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+
+def _prepare_drag_out(
+    base_url: str,
+    tree: ttk.Treeview,
+    store: dict[str, FileItem],
+    log: Callable[[str], None],
+    set_progress: Callable[[float, float, str], None],
+    target: dict[str, Any] | None,
+) -> list[str]:
+    """把选中的远程条目下载到本地临时目录，返回可拖给资源管理器的路径.
+
+    DragInitCmd 是同步回调，因此这里会阻塞到下载完成（进度条同步刷新）。
+    """
+    items = _get_selected_items(tree, store)
+    if not items:
+        log("⚠ 请先选择要拖出的远程条目")
+        return []
+    if not (target or {}).get("host"):
+        log("⚠ 未连接远程目标，无法下载")
+        return []
+
+    cache = _remote_drag_dir()
+    jobs: list[tuple[str, Path]] = []
+    top_dirs: list[Path] = []
+
+    for item in items:
+        leaf = item.label() or item.path.rsplit("/", 1)[-1] or "remote"
+        if item.status == "目录":
+            found: list[tuple[str, str]] = []
+            _collect_remote_files(base_url, item.path, target, log, found)
+            local_root = cache / leaf
+            top_dirs.append(local_root)
+            for rpath, rel in found:
+                jobs.append((rpath, local_root / Path(rel)))
+        else:
+            jobs.append((item.path, cache / leaf))
+
+    if not jobs:
+        log("⚠ 选中项中没有可下载的文件")
+        return []
+
+    total = len(jobs)
+    saved_list: list[str] = []
+    ok_count = 0
+    for idx, (remote_path, local_target) in enumerate(jobs, 1):
+        name = remote_path.rsplit("/", 1)[-1]
+        set_progress(idx, total, f"拖出下载 {name}")
+        payload: dict[str, Any] = {
+            "remote_path": remote_path,
+            "local_dir": str(local_target.parent),
+        }
+        payload.update(_target_fields(target))
+        result = _run_http(base_url, "download", payload)
+        if result.get("ok"):
+            saved = str((result.get("data") or {}).get("saved_to") or local_target)
+            saved_list.append(saved)
+            ok_count += 1
+        else:
+            log(f"❌ 下载 {remote_path} 失败: {result.get('error') or result.get('data')}")
+
+    set_progress(total, total, f"拖出下载完成 ({ok_count}/{total})")
+    log(f"ℹ 已准备 {ok_count} 个文件供拖出")
+
+    if ok_count == 0:
+        return []
+    if len(items) == 1 and items[0].status == "目录" and top_dirs:
+        return [str(top_dirs[0])]
+    return saved_list

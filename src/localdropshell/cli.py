@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -651,12 +652,36 @@ def run_gui(host: str | None = None, port: int | None = None, folder: str | None
         _echo_safe(f"[tightvnc] 自动安装异常: {exc}")
 
     def _run_server_thread() -> None:
-        asyncio.run(start_server(ServerConfig(host=cfg_host, port=cfg_port)))
+        async def _serve() -> None:
+            runner, _site = await start_server(ServerConfig(host=cfg_host, port=cfg_port))
+            logging.getLogger("localdropshell.cli").info(
+                "GUI 后台服务端已就绪 %s:%s", cfg_host, cfg_port
+            )
+            try:
+                # start_server 只负责启动；必须保持事件循环存活，否则
+                # asyncio.run 结束会立即关闭 loop，服务端随即停止。
+                await asyncio.Future()
+            finally:
+                await runner.cleanup()
+
+        try:
+            asyncio.run(_serve())
+        except Exception:
+            logging.getLogger("localdropshell.cli").exception(
+                "GUI 后台服务端异常退出（Tk 界面将无法访问 HTTP 接口）"
+            )
 
     t = threading.Thread(target=_run_server_thread, daemon=True, name="localdropshell-server")
     t.start()
-    # 给服务端一点时间启动
-    time.sleep(0.5)
+
+    # 等待端口就绪，避免 Tk 首屏请求早于服务端监听
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        try:
+            with socket.create_connection((ui_host, ui_port), timeout=0.3):
+                break
+        except OSError:
+            time.sleep(0.1)
 
     base_url = f"http://{ui_host}:{ui_port}"
 

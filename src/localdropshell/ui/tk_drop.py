@@ -122,3 +122,38 @@ def enable_drop_dnd(
     except Exception as exc:
         # 某些 widget (如部分 Frame) 可能对 drop_target_register 行为不同
         logger.warning("drop_target_register 失败: %s", exc)
+
+
+def enable_drag_out(widget, provider: Callable[[], list[str]]) -> None:
+    """把 widget 注册为拖拽源，可把文件拖到资源管理器.
+
+    provider 在拖拽开始时（主线程）同步调用，返回要拖出的本地路径列表；
+    因此它应当尽量快速返回（例如已缓存的临时文件）。
+    """
+
+    if DND_FILES is None:  # pragma: no cover
+        logger.debug("tkinterdnd2 未安装, 跳过 enable_drag_out")
+        return
+
+    try:
+        widget.drag_source_register(1, DND_FILES)
+    except Exception as exc:
+        logger.warning("drag_source_register 失败: %s", exc)
+        return
+
+    def _on_drag_init(_event):
+        try:
+            paths = provider() or []
+        except Exception as exc:
+            logger.warning("拖出准备失败: %s", exc)
+            paths = []
+        if not paths:
+            return ("", "", "")
+        data = " ".join("{" + str(p).replace("}", "\\}") + "}" for p in paths)
+        return ("copy", DND_FILES, data)
+
+    try:
+        widget.dnd_bind("<<DragInitCmd>>", _on_drag_init)
+        logger.debug("拖出已挂载到 %s", widget)
+    except Exception as exc:
+        logger.warning("绑定 <<DragInitCmd>> 失败: %s", exc)
