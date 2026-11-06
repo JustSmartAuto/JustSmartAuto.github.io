@@ -363,11 +363,12 @@ def _usage_sections(base_url: str) -> list[tuple[str, str]]:
         ),
         (
             "六、收藏夹（收藏夹页）",
-            "1. 收藏项 = 备注名 + 远程地址（ip:端口，端口省略按 5900）+ 文件传输默认路径\n"
+            "1. 收藏项 = 备注名 + 远程地址（ip:端口，端口省略按 5900）+ 文件传输默认路径 + 多个快捷路径\n"
             "2. 持久化到 D:/JustSmart/LocalFileDropShell/favorites.json（自动创建目录；不可写时回退 %APPDATA%/LocalFileDropShell）\n"
             "3. “📁 文件传输”快捷按钮 → 切到文件传输页，自动填入地址并连接、列举默认路径\n"
-            "4. “🖥 远程桌面”快捷按钮 → 切到 VNC 页并回填地址（点“打开 VNC 远程桌面”即连接）\n"
-            "5. “✎ 载入”把该条记录回填到上方表单；“🗑 删除”移除该条收藏",
+            "4. 每条收藏下方的“📂 路径”按钮 → 直接切页并连接到该快捷路径（方便常用目录一键切换）\n"
+            "5. “🖥 远程桌面”快捷按钮 → 切到 VNC 页并回填地址（点“打开 VNC 远程桌面”即连接）\n"
+            "6. “✎ 载入”回填到上方表单；“📝 编辑”弹窗修改备注/地址/默认路径/快捷路径；“🗑 删除”移除该条收藏",
         ),
         (
             "七、常见问题",
@@ -594,10 +595,10 @@ def run_tk_gui(
     build_shell_tab(tab_frames["shell"], base_url)
     vnc_tab = build_vnc_tab(tab_frames["vnc"], base_url)
 
-    def _open_transfer(fav) -> None:
-        """收藏夹 → 文件传输：切页 + 填入地址/端口/默认路径."""
+    def _open_transfer(fav, path: str | None = None) -> None:
+        """收藏夹 → 文件传输：切页 + 填入地址/端口/默认路径（或指定快捷路径）."""
         switch_tab("transfer")
-        transfer_tab["set_target"](fav.host, fav.port, fav.path)
+        transfer_tab["set_target"](fav.host, fav.port, path or fav.path)
 
     def _open_vnc(fav) -> None:
         """收藏夹 → 远程桌面：切页 + 填入地址/端口."""

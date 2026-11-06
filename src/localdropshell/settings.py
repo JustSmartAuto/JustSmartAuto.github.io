@@ -14,7 +14,7 @@ import json
 import logging
 import os
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 logger = logging.getLogger("localdropshell.settings")
@@ -126,17 +126,36 @@ def format_target(host: str, port: int) -> str:
 # 收藏夹数据模型
 # ---------------------------------------------------------------------------
 
+def _normalize_paths(raw: object) -> list[str]:
+    """把配置里的快捷路径规范成去重、去空白的字符串列表."""
+    if isinstance(raw, str):
+        raw = raw.split(";")
+    if not isinstance(raw, list):
+        return []
+    paths: list[str] = []
+    for item in raw:
+        value = str(item or "").strip()
+        if value and value not in paths:
+            paths.append(value)
+    return paths
+
+
 @dataclass
 class Favorite:
-    """一条收藏：备注名 + 远程主机/端口 + 文件传输默认路径."""
+    """一条收藏：备注名 + 远程主机/端口 + 默认路径 + 多个快捷路径."""
 
     name: str
     host: str
     port: int = DEFAULT_VNC_PORT
     path: str = "/"
+    paths: list[str] = field(default_factory=list)
 
     def address(self) -> str:
         return format_target(self.host, self.port)
+
+    def shortcut_paths(self) -> list[str]:
+        """快捷路径（不含默认路径，保持配置顺序）."""
+        return [p for p in self.paths if p and p != self.path]
 
     def to_dict(self) -> dict:
         return {
@@ -144,6 +163,7 @@ class Favorite:
             "host": self.host,
             "port": self.port,
             "path": self.path,
+            "paths": list(self.paths),
         }
 
     @classmethod
@@ -155,7 +175,13 @@ class Favorite:
         except (TypeError, ValueError):
             port = DEFAULT_VNC_PORT
         path = str(data.get("path") or data.get("dir") or "/").strip() or "/"
-        return cls(name=name, host=host, port=port, path=path)
+        return cls(
+            name=name,
+            host=host,
+            port=port,
+            path=path,
+            paths=_normalize_paths(data.get("paths")),
+        )
 
 
 def load_favorites() -> list[Favorite]:

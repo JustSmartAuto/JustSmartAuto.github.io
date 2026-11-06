@@ -10,14 +10,14 @@
 | **rsync 增量同步** | Tk 主界面 / CLI | Adler-32 + MD5 双阶段块级 delta，push / pull 双向，自动回退全量 |
 | **RFB 文件传输** | Tk 主界面 | TightVNC FTP 扩展消息，支持 offset 断点续传、MD5 块校验、目录列表 |
 | **VNC 远程桌面** | pywebview 标签页（VNC） | 自动探测已有 TightVNC / RealVNC / UltraVNC 直接复用；无则可内嵌启动 + noVNC + WebSocket 代理；未安装 TightVNC 时用内嵌 MSI 静默提权安装 |
-| **远程地址 / 收藏夹** | Tk 文件传输页顶栏 + 收藏夹页 | 输入 `ip[:端口]`（省略按 5900）点“连接”直连该远程 VNC；收藏备注名 / ip:port / 文件传输默认路径，持久化到 `D:/JustSmart/LocalFileDropShell/favorites.json`（不可写回退 `%APPDATA%/LocalFileDropShell`） |
+| **远程地址 / 收藏夹** | Tk 文件传输页顶栏 + 收藏夹页 | 输入 `ip[:端口]`（省略按 5900）点“连接”直连该远程 VNC；收藏备注名 / ip:port / 文件传输默认路径 / 多个快捷路径，持久化到 `D:/JustSmart/LocalFileDropShell/favorites.json`（不可写回退 `%APPDATA%/LocalFileDropShell`） |
 | **CLI 交互式 shell** | 纯控制台 | 同进程三角色（`gui` / `server` / `client`），内置 upload / download / rsync / rfb-* 等命令 |
 
 **混合 UI 架构**：
 - **主窗口（Tkinter + tkinterdnd2）**：负责文件/文件夹拖放、传输列表、进度条、日志输出、批量生成——Windows 95 风格（3D 凸起边框、Teal 标题栏、MS Sans Serif）
 - **VNC 标签页（pywebview 内嵌）**：noVNC 前端，通过 WebSocket 代理桥接到本机 VNC Server
 - **Shell CLI GUI 标签页（pywebview 内嵌）**：本地 Web Terminal，通过 `/exec` 路由发送命令，实时回显 stdout/stderr/exit_code
-- **收藏夹标签页（Tk）**：每条收藏带“文件传输”/“远程桌面”快捷按钮，点击切页并自动填入远程地址与默认路径，便于运维批量切换工控机
+- **收藏夹标签页（Tk）**：每条收藏带“文件传输”/“远程桌面”快捷按钮，点击切页并自动填入远程地址与默认路径；另可配置多个快捷路径，每条路径一个按钮，一键切页并直达该远程目录，便于运维批量切换工控机
 - 四个子界面共享同一 **aiohttp 服务端**（默认端口 10022），pywebview 标签页只做"壳"，全部业务逻辑在本地 HTTP
 
 ---
@@ -441,7 +441,7 @@ pywebview VNC 标签页
 | `src/localdropshell/cli.py` | **入口**（三角色解析 + 启动 aiohttp + 分发到 gui / server / client） |
 | `src/localdropshell/ui/tk_main.py` | **Tk 根窗口**：菜单栏 + Notebook 标签页 + 状态栏 |
 | `src/localdropshell/ui/tk_transfer.py` | **文件传输标签页**：远程地址栏（ip[:端口]）/ 远程目录、本地/远程 Treeview、进度条、日志、批量 |
-| `src/localdropshell/ui/tk_favorites.py` | **收藏夹标签页**：备注名 / ip:port / 文件传输默认路径，每条提供“文件传输”“远程桌面”快捷跳转 |
+| `src/localdropshell/ui/tk_favorites.py` | **收藏夹标签页**：备注名 / ip:port / 文件传输默认路径 / 多个快捷路径（每条路径一个直达按钮），提供“文件传输”“远程桌面”“载入”“编辑”“删除”操作 |
 | `src/localdropshell/settings.py` | 配置目录（`D:/JustSmart/LocalFileDropShell` → 回退 `%APPDATA%/LocalFileDropShell`）+ `favorites.json` 原子读写 + `ip[:端口]` 解析 |
 | `src/localdropshell/webview_win.py` | pywebview 独立窗口进程：主线程 `webview.start()`，打包后由 exe `--webview-window <json>` 再启动一次 |
 | `src/localdropshell/ui/tk_drop.py` | **Win32 拖放**：tkinterdnd2 + WM_DROPFILES 关闭 WebView2 内置拖放 |
