@@ -455,7 +455,7 @@ pywebview VNC 标签页
 | `src/localdropshell/fountain.py` | 喷泉码编解码（Wire 帧 + DCF2 容器） |
 | `src/localdropshell/transfer.py` | 传输调度（TightVNC 优先 / HTTP 回退 / 单工判定 / 校验） |
 | `src/localdropshell/server.py` | aiohttp 服务端路由注册（/exec /upload /download /rsync/* /rfb/* /vnc/ /shell/ /websockify /health） |
-| `build_exe.py` | PyInstaller 打包（自动嵌入 `assets/`，含 TightVNC MSI；可选 `--with-vnc-bundle`），产物 `LocalFileDropShell_{时间戳}.exe` |
+| `build_exe.py` | PyInstaller 打包（默认嵌入 `assets/`（含 TightVNC MSI）+ `vnc_bundle/`（noVNC / tvnserver / xterm，缺失时回退同级 `http_shell_cli_vnc/public_fs`）；`--no-vnc-bundle` 可关闭前端内嵌），产物 `LocalFileDropShell_{时间戳}.exe` |
 
 参考工程：
 - **diffimg 图像差分**：pywebview + Tk + Windows 95 风格界面的组织方式（`src/odiffdiff/` 结构、`build_exe.py` venv 重执行 + 依赖探测 + 显式 collect-all）
@@ -473,8 +473,8 @@ uv run local-drop-shell --role gui                              # GUI（Tk 主�
 uv run local-drop-shell --role server --host 0.0.0.0 --port 10022
 uv run local-drop-shell --role client --url http://192.168.1.100:10022
 uv run local-drop-shell --role client --url ... -c "Get-Process"
-uv run python build_exe.py                                      # 普通打包 dist/LocalFileDropShell_{时间戳}.exe
-uv run python build_exe.py --with-vnc-bundle                    # 额外内嵌 TightVNC + noVNC 前端
+uv run python build_exe.py                                      # 默认打包：assets/ + noVNC/tvnserver/xterm 全部内嵌
+uv run python build_exe.py --no-vnc-bundle                      # 不内嵌前端资源（复用现场已装 TightVNC）
 ```
 
 环境变量：
@@ -487,7 +487,16 @@ uv run python build_exe.py --with-vnc-bundle                    # 额外内嵌 T
 | `HTTP_SHELL_VNC_HOST` | `127.0.0.1` | 未在界面填远程地址时，服务端连接的 VNC 主机 |
 | `LOCAL_DROP_CONFIG_DIR` | 空 | 覆盖收藏夹配置目录（调试 / 便携部署用） |
 
-打包产物：单文件 exe（约 10~15 MB，`--with-vnc-bundle` 额外 ~10 MB），零运行时依赖。
+打包产物：单文件 exe（基础 ~19 MB，内嵌 noVNC/tvnserver/xterm 后约 20+ MB），零运行时依赖。前端资源查找顺序：`vnc_bundle/` → 同级 `http_shell_cli_vnc/public_fs/{novnc,tvnc,xterm,shell}`；两者都不存在时构建会报错，需先放置资源或显式加 `--no-vnc-bundle`。
+
+本地离线资源（均已放在 `vnc_bundle/`，工控机断网可直接使用）：
+
+| 目录 | 内容 | 说明 |
+|---|---|---|
+| `vnc_bundle/novnc/` | noVNC 1.4.0 完整发行目录（`vnc.html`、`app/`、`core/`、`vendor/pako` 等全部依赖） | 页面内引用均为相对路径，无 CDN |
+| `vnc_bundle/xterm/` | xterm.js 6.0.0 + addon-fit 0.11.0 + addon-web-links 0.12.0（`xterm.js`/`xterm.css`/`addon-*.js`） | UMD 构建，`<script>` 直接引入，无构建步骤 |
+
+两者均为 MIT 许可，LICENSE 随目录保留。
 
 ---
 

@@ -7,9 +7,12 @@
       使用 pywebview 内嵌浏览器实现
 
 用法：
-    uv run python build_exe.py                        # 普通打包（不内嵌 VNC/noVNC，探测已有直接复用）
-    uv run python build_exe.py --with-vnc-bundle      # 额外内嵌 tvnserver + noVNC 前端（无 TightVNC 环境兜底）
+    uv run python build_exe.py                        # 默认打包：内嵌 assets/ + noVNC/tvnserver/xterm 全部前端资源
+    uv run python build_exe.py --no-vnc-bundle        # 不内嵌 noVNC/tvnserver/xterm（复用机器上已装 TightVNC）
     双击 build_exe.py                                  # 自动初始化 .venv 并打包，结束后停住控制台
+
+前端资源查找顺序：项目 ``vnc_bundle/`` 优先；缺失时回退同级
+``http_shell_cli_vnc/public_fs/{novnc,tvnc,xterm,shell}``。
 
 参考：diffimg/build_exe.py（pywebview/tkinterdnd2/pythonnet 显式 collect-all）、
       http_shell_cli_vnc（单文件 Go 二进制零依赖）。
@@ -31,6 +34,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 ASSETS = ROOT / "assets"
 VENV_PYTHON = (ROOT / ".venv" / "Scripts" / "python.exe").resolve()
+
+# 前端/服务端资源（noVNC 页面、tvnserver、xterm 等）
+BUNDLE_DIR = ROOT / "vnc_bundle"
+LEGACY_BUNDLE_DIR = ROOT.parent / "http_shell_cli_vnc" / "public_fs"
+BUNDLE_PARTS = ("novnc", "tvnc", "xterm", "shell")
 
 
 def ensure_venv() -> None:
@@ -198,6 +206,21 @@ def check_deps() -> None:
         sys.exit(f"缺少依赖：{', '.join(missing)}，请先运行 `uv sync`")
 
 
+def bundle_sources() -> list[tuple[Path, str]]:
+    """返回要内嵌的前端资源：[(源目录, exe 内目标路径)].
+
+    项目根目录有 ``vnc_bundle/`` 时整体内嵌；否则回退同级
+    ``http_shell_cli_vnc/public_fs`` 下的 novnc / tvnc / xterm / shell。
+    """
+    if BUNDLE_DIR.is_dir():
+        return [(BUNDLE_DIR, "vnc_bundle")]
+    return [
+        (LEGACY_BUNDLE_DIR / part, f"vnc_bundle/{part}")
+        for part in BUNDLE_PARTS
+        if (LEGACY_BUNDLE_DIR / part).is_dir()
+    ]
+
+
 def main() -> None:
     reexec_in_venv()
     check_deps()
@@ -205,9 +228,9 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="PyInstaller 打包 LocalFileDropShell")
     parser.add_argument(
-        "--with-vnc-bundle",
+        "--no-vnc-bundle",
         action="store_true",
-        help="额外内嵌 tvnserver + noVNC 前端（默认不内嵌，探测已有 VNC Server 直接复用）",
+        help="不内嵌 noVNC/tvnserver/xterm（默认全部内嵌，复用现场 TightVNC 时才需要）",
     )
     args = parser.parse_args()
 
@@ -252,16 +275,19 @@ def main() -> None:
         "tkinter",
     ]
 
-    if args.with_vnc_bundle:
-        vnc_dir = ROOT / "vnc_bundle"
-        if vnc_dir.exists():
-            cmd += ["--add-data", f"{vnc_dir}{';'}vnc_bundle"]
-        else:
-            print(
-                "警告：--with-vnc-bundle 已指定但 vnc_bundle/ 目录不存在，"
-                "打包将不内嵌 VNC 文件。请先从 http_shell_cli_vnc/public_fs "
-                "拷贝 tvnc/ 与 novnc/ 到项目根目录 vnc_bundle/"
+    if args.no_vnc_bundle:
+        print("⏭ 已指定 --no-vnc-bundle：跳过 noVNC/tvnserver/xterm 内嵌")
+    else:
+        sources = bundle_sources()
+        if not sources:
+            sys.exit(
+                "未找到可内嵌的前端资源：请把 noVNC/tvnserver/xterm 放到 "
+                f"{BUNDLE_DIR}，或保留 {LEGACY_BUNDLE_DIR} 供回退；"
+                "确实不需要内嵌时加 --no-vnc-bundle"
             )
+        for src, dest in sources:
+            cmd += ["--add-data", f"{src}{os.pathsep}{dest}"]
+            print(f"内嵌资源: {src} -> {dest}")
 
     cmd.append(str(ROOT / "src" / "localdropshell" / "cli.py"))
     print(" ".join(cmd))
