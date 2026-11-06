@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 
 DEFAULT_PORT = 10082
-DEFAULT_GATEWAY = "192.168.1.10"
+DEFAULT_GATEWAY = "127.0.0.1"
 
 _ROLES = ("server", "client")
 
@@ -43,16 +43,20 @@ CONFIG_PATH = config_dir() / "config.json"
 
 
 class Config:
-    """代理配置：角色、网关 IP、端口。缺省即服务端口 10082."""
+    """代理配置：角色、网关 IP、端口。
+
+    缺省 = 客户端模式（双击 exe 即代理其它设备上网），网关未配置时用
+    127.0.0.1；端口默认 10082。
+    """
 
     def __init__(
         self,
-        role: str = "server",
+        role: str = "client",
         gateway: str = DEFAULT_GATEWAY,
         port: int = DEFAULT_PORT,
     ) -> None:
         if role not in _ROLES:
-            role = "server"
+            role = "client"
         self.role = role
         self.gateway = gateway
         self.port = int(port)
@@ -70,7 +74,8 @@ class Config:
 
     @classmethod
     def load(cls, path: Path = CONFIG_PATH) -> "Config":
-        cfg = cls()
+        cfg = cls()  # 默认双击即服务：客户端模式 + 127.0.0.1 回退
+        path = Path(path)
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -80,9 +85,13 @@ class Config:
         role = data.get("role")
         if role in _ROLES:
             cfg.role = role
+        else:
+            cfg.role = "client"  # 配置中未写角色 → 客户端
         gateway = data.get("gateway")
         if isinstance(gateway, str) and gateway.strip():
             cfg.gateway = gateway.strip()
+        else:
+            cfg.gateway = DEFAULT_GATEWAY  # 未配置网关 → 127.0.0.1
         try:
             port = int(data.get("port", DEFAULT_PORT))
         except (TypeError, ValueError):
