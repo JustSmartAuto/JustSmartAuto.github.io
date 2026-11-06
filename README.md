@@ -72,11 +72,11 @@
 pip install tkinterdnd2
 
 # 托盘后台（GUI）方式运行——启动即静默到托盘
-python src/internet_proxy/cli.py            # 或安装后运行 internet-proxy
+python main.py            # 或安装后运行 internet-proxy
 
 # 无界面前台运行（调试 / 服务方式）
-python src/internet_proxy/cli.py --role server --headless      # 服务端，监听 10082
-python src/internet_proxy/cli.py --role client --headless      # 客户端，SOCKS5 10082
+python main.py --role server --headless      # 服务端，监听 10082
+python main.py --role client --headless      # 客户端，SOCKS5 10082
 ```
 
 - 服务端（可上网工控机）监听 `0.0.0.0:10082`（TCP 隧道 + UDP 地址头）。

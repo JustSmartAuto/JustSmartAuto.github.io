@@ -4,8 +4,8 @@
     - 主界面（托盘图标、后台日志、设置）使用 tkinter + tkinterdnd2
       （托盘常驻、启动时静默最小化，用户无感知）+ Windows 95 风格
       （assets/02-windows-95.css 设计令牌）
-    - 服务端（可上网工控机）在新线程监听 TCP/UDP 代理端口（默认 10082）
-    - 客户端/服务端同在 app.py 入口，按配置文件中的角色启动
+    - 服务端（可上网工控机）监听 TCP/UDP 代理端口（默认 10082）
+    - 客户端/服务端同在 main.py 入口，按配置文件中的角色启动（默认客户端）
 
 用法：
     uv run python build_exe.py                            # 默认打包：内嵌 assets/（图标、Win95 css）
@@ -267,7 +267,7 @@ def main() -> None:
             "--hidden-import",
             "internet_proxy.config",
         ]
-    cmd.append(str(SRC / "internet_proxy" / "cli.py"))
+    cmd.append(str(ROOT / "main.py"))
     print(" ".join(cmd))
     subprocess.run(cmd, cwd=ROOT, check=True)
     print(f"打包完成: {ROOT / 'dist' / (name + '.exe')}")

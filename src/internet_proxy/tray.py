@@ -29,6 +29,17 @@ TRAY_ID = 1987
 IDI_APPLICATION = 32512
 
 
+class _GUID(ctypes.Structure):
+    """ctypes.wintypes.GUID 在部分 Python/PyInstaller 组合里缺失，自带一份."""
+
+    _fields_ = [
+        ("Data1", ctypes.c_uint32),
+        ("Data2", ctypes.c_uint16),
+        ("Data3", ctypes.c_uint16),
+        ("Data4", ctypes.c_ubyte * 8),
+    ]
+
+
 class NOTIFYICONDATAW(ctypes.Structure):
     _fields_ = [
         ("cbSize", wt.DWORD),
@@ -44,7 +55,7 @@ class NOTIFYICONDATAW(ctypes.Structure):
         ("uTimeout", wt.UINT),
         ("szInfoTitle", wt.WCHAR * 64),
         ("dwInfoFlags", wt.DWORD),
-        ("guidItem", wt.GUID),
+        ("guidItem", _GUID),
         ("hBalloonIcon", wt.HICON),
     ]
 
