@@ -4,7 +4,7 @@
 
 | 能力 | UI 层 | 说明 |
 |---|---|---|
-| **文件传送** | Tk 主界面（左窗格） | TightVNC RFB 通道优先 / aiohttp HTTP 回退 / 单工自动喷泉码；顶部“协议”下拉显式选择（默认 RFB File，LocalSend/FTP/HTTP/RSYNC 占位），选择持久化到 `settings.json` |
+| **文件传送** | Tk 主界面（左窗格） | TightVNC RFB 通道优先 / aiohttp HTTP 回退 / 单工自动喷泉码；顶部“协议”下拉显式选择（默认 RFB File，LocalSend/FTP/HTTP/RSYNC 占位），选择持久化到 `settings.json`；左侧拖入后自动在资源管理器打开所属文件夹，右侧目录支持双击 / 右键“打开”、面包屑与“⬆ 上级”回退 |
 | **拖放上传** | Tk 主界面（右窗格） | tkinterdnd2 + Win32 WM_DROPFILES 原生拖放 |
 | **HTTP Shell** | pywebview 标签页（Shell GUI） | `/exec` 远程命令执行，pwsh → powershell → cmd 自动检测，GBK/UTF-8 自适应，超时 Kill |
 | **rsync 增量同步** | Tk 主界面 / CLI | Adler-32 + MD5 双阶段块级 delta，push / pull 双向，自动回退全量 |
@@ -440,7 +440,7 @@ pywebview VNC 标签页
 | `assets/tightvnc-2.8.87-gpl-setup-64bit.msi` | 内嵌 TightVNC 安装包（未安装时静默提权安装，随 exe 打包） |
 | `src/localdropshell/cli.py` | **入口**（三角色解析 + 启动 aiohttp + 分发到 gui / server / client） |
 | `src/localdropshell/ui/tk_main.py` | **Tk 根窗口**：菜单栏 + Notebook 标签页 + 状态栏 |
-| `src/localdropshell/ui/tk_transfer.py` | **文件传输标签页**：远程地址栏（ip[:端口]）/ 远程目录 / 协议下拉、本地/远程 Treeview、进度条、日志、批量 |
+| `src/localdropshell/ui/tk_transfer.py` | **文件传输标签页**：远程地址栏（ip[:端口]）/ 远程目录 / 协议下拉、远程面包屑导航（⬆ 上级 + 层级跳转）、本地/远程 Treeview、进度条、日志、批量；拖入本地后自动打开所在文件夹 |
 | `src/localdropshell/ui/tk_favorites.py` | **收藏夹标签页**：备注名 / ip:port / 传输协议 / 文件传输默认路径 / 多个快捷路径（每条路径一个直达按钮），提供“文件传输”“远程桌面”“载入”“编辑”“删除”操作 |
 | `src/localdropshell/settings.py` | 配置目录（`D:/JustSmart/LocalFileDropShell` → 回退 `%APPDATA%/LocalFileDropShell`）+ `favorites.json` / `settings.json`（传输协议）原子读写 + `ip[:端口]` 解析 |
 | `src/localdropshell/webview_win.py` | pywebview 独立窗口进程：主线程 `webview.start()`，打包后由 exe `--webview-window <json>` 再启动一次 |

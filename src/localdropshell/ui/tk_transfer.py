@@ -398,9 +398,13 @@ def build_transfer_tab(
     right_frame = tk.Frame(paned, bg=Win95_COLORS["chrome"])
     paned.add(right_frame, minsize=260)
 
-    tk.Label(right_frame, text="🖥 远程文件 (双击打开 / 右键刷新)",
+    tk.Label(right_frame, text="🖥 远程文件 (双击目录打开 / 右键菜单)",
              bg=Win95_COLORS["chrome"], fg=Win95_COLORS["ink"],
              font=Win95_FONT_BOLD).pack(anchor="w", padx=4, pady=(2, 0))
+
+    # 远程目录导航条：返回上级 + 面包屑（点击任意层级直接跳转）
+    crumb_bar = tk.Frame(right_frame, bg=Win95_COLORS["chrome"])
+    crumb_bar.pack(side=tk.TOP, fill=tk.X, padx=4, pady=(2, 2))
 
     remote_tree = ttk.Treeview(
         right_frame,
@@ -419,6 +423,64 @@ def build_transfer_tab(
     remote_tree.configure(yscrollcommand=remote_scroll.set)
     remote_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
+    # ========= 远程目录导航（面包屑 / 返回上级） =========
+    def _update_breadcrumb(path: str) -> None:
+        """按当前远程路径重建面包屑（每段可点击跳转）."""
+        for child in crumb_bar.winfo_children():
+            child.destroy()
+        tk.Button(
+            crumb_bar, text="⬆ 上级", command=_remote_parent, **small_btn_style
+        ).pack(side=tk.LEFT, padx=(0, 6))
+
+        norm = (path or "/").replace("\\", "/")
+        parts = [p for p in norm.split("/") if p]
+        if not parts:
+            tk.Label(crumb_bar, text="/", bg=Win95_COLORS["chrome"],
+                     fg=Win95_COLORS["ink"], font=Win95_FONT).pack(side=tk.LEFT)
+            return
+
+        home = tk.Label(crumb_bar, text="🖥 /", bg=Win95_COLORS["chrome"],
+                        fg="#000080", font=Win95_FONT, cursor="hand2")
+        home.pack(side=tk.LEFT)
+        home.bind("<Button-1>", lambda _e: _remote_go("/"))
+
+        acc = ""
+        for part in parts:
+            if not acc:
+                acc = part if part.endswith(":") else f"/{part}"
+            elif acc.endswith("/"):
+                acc = f"{acc}{part}"
+            else:
+                acc = f"{acc}/{part}"
+            tk.Label(crumb_bar, text="›", bg=Win95_COLORS["chrome"],
+                     fg="#808080", font=Win95_FONT).pack(side=tk.LEFT, padx=2)
+            seg = tk.Label(crumb_bar, text=part, bg=Win95_COLORS["chrome"],
+                           fg="#000080", font=Win95_FONT, cursor="hand2")
+            seg.pack(side=tk.LEFT)
+            seg.bind("<Button-1>", lambda _e, p=acc: _remote_go(p))
+
+    def _remote_go(path: str) -> None:
+        """跳到指定远程目录并刷新列表."""
+        norm = (path or "/").replace("\\", "/")
+        dir_var.set(norm or "/")
+        target["dir"] = norm or "/"
+        _update_breadcrumb(target["dir"])
+        _refresh_remote(base_url, remote_tree, _item_store, log, target)
+
+    def _remote_parent() -> None:
+        cur = str(target.get("dir") or dir_var.get() or "/").replace("\\", "/").rstrip("/")
+        parent = posixpath.dirname(cur)
+        if not parent or parent == ".":
+            parent = "/"
+        _remote_go(parent)
+
+    def _open_selected_remote() -> None:
+        for item in _get_selected_items(remote_tree, _item_store["remote"]):
+            if item.status == "目录":
+                _remote_go(item.path)
+                return
+        log("⚠ 请先选择一个远程目录再执行“打开”")
+
     # 双击 → 目录进入；文件提示可拖出下载
     def _on_remote_double_click(_event=None) -> None:
         sel = remote_tree.selection()
@@ -428,15 +490,16 @@ def build_transfer_tab(
         if not item:
             return
         if item.status == "目录":
-            dir_var.set(item.path)
-            _refresh_remote(base_url, remote_tree, _item_store, log, target)
+            _remote_go(item.path)
         else:
             log(f"ℹ 远程文件 {item.path} — 可直接拖到资源管理器下载")
 
     remote_tree.bind("<Double-1>", _on_remote_double_click)
 
-    # 右键 → 刷新 / 下载选中
+    # 右键 → 打开目录 / 刷新 / 下载选中 / 复制路径
     remote_menu = tk.Menu(root, tearoff=0)
+    remote_menu.add_command(label="打开", command=_open_selected_remote)
+    remote_menu.add_separator()
     remote_menu.add_command(
         label="刷新列表",
         command=lambda: _refresh_remote(base_url, remote_tree, _item_store, log, target),
@@ -451,7 +514,22 @@ def build_transfer_tab(
         label="复制远程路径",
         command=lambda: _copy_remote_path(remote_tree, _item_store["remote"], log),
     )
-    remote_tree.bind("<Button-3>", lambda e: remote_menu.tk_popup(e.x_root, e.y_root))
+
+    def _popup_remote_menu(event) -> None:
+        row = remote_tree.identify_row(event.y)
+        if row:
+            if row not in remote_tree.selection():
+                remote_tree.selection_set(row)
+            remote_tree.focus(row)
+        item = _item_store["remote"].get(row or "")
+        # “打开”只对目录可用
+        remote_menu.entryconfigure(
+            "打开", state=tk.NORMAL if item and item.status == "目录" else tk.DISABLED
+        )
+        remote_menu.tk_popup(event.x_root, event.y_root)
+
+    remote_tree.bind("<Button-3>", _popup_remote_menu)
+    _update_breadcrumb(str(target.get("dir") or "/"))
 
     # 右侧拖入 = 上传到当前远程目录（保持文件夹层级）
     _remote_drop = lambda paths: _upload_dropped_to_remote(
@@ -609,11 +687,10 @@ def build_transfer_tab(
         )
         if protocol != DEFAULT_TRANSFER_PROTOCOL:
             log(f"ℹ {protocol} 为占位协议，当前实际仍走 {DEFAULT_TRANSFER_PROTOCOL} 通道")
-        _refresh_remote(base_url, remote_tree, _item_store, log, target)
+        _remote_go(target["dir"])
 
     def _on_refresh() -> None:
-        target["dir"] = dir_var.get().strip() or "/"
-        _refresh_remote(base_url, remote_tree, _item_store, log, target)
+        _remote_go(dir_var.get().strip() or "/")
 
     def _set_target(
         t_host: str,
@@ -662,6 +739,30 @@ def build_transfer_tab(
 # ---------------------------------------------------------------------------
 # 各按钮动作实现
 # ---------------------------------------------------------------------------
+
+def _open_dropped_in_explorer(
+    paths: list[str],
+    log: Callable[[str], None] | None = None,
+) -> None:
+    """拖入后在资源管理器打开：文件 → 所属文件夹，文件夹 → 文件夹本身（按目录去重）."""
+    opened: set[str] = set()
+    for raw in paths:
+        try:
+            p = Path(raw)
+            folder = p if p.is_dir() else p.parent
+            key = str(folder)
+            if key in opened or not folder.is_dir():
+                continue
+            opened.add(key)
+            os.startfile(key)  # type: ignore[attr-defined]  # 仅 Windows
+            if log:
+                log(f"📂 已打开文件夹: {key}")
+        except AttributeError:
+            return  # 非 Windows 平台无 os.startfile
+        except OSError as exc:
+            if log:
+                log(f"⚠ 打开文件夹失败 {raw!r}: {exc}")
+
 
 def _on_local_dropped(
     tree: ttk.Treeview,
@@ -723,6 +824,7 @@ def _on_local_dropped(
             continue
     if log:
         log(f"{'✅' if added else '⚠'} 已添加 {added} 个本地文件到列表")
+    _open_dropped_in_explorer(paths, log)
 
 
 def _clear_tree(tree: ttk.Treeview, store: dict[str, FileItem]) -> None:
