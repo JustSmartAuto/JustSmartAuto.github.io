@@ -32,33 +32,10 @@ def open_vnc_window(
     """
     if host:
         target_text = format_target(host, int(port or DEFAULT_VNC_PORT))
-        target_url = f"{base_url}/vnc/vnc.html?host={host}&port={int(port or DEFAULT_VNC_PORT)}"
+        target_url = f"{base_url}/vnc/?host={host}&port={int(port or DEFAULT_VNC_PORT)}"
     else:
         target_text = "服务端本机 VNC"
         target_url = f"{base_url}/vnc/"
-
-    html = f"""<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8">
-<title>VNC 远程桌面</title>
-<style>
-body {{ margin:0; background:#000; color:#fff; font-family: Tahoma, sans-serif; padding: 14px; }}
-h3 {{ color:#fff; font-size: 15px; }}
-code {{ background:#222; color:#0f0; padding:1px 5px; border-radius:3px; font-family:Consolas,monospace; }}
-a {{ color:#0f0; }}
-.btn {{ display:inline-block; margin:6px 4px; padding:8px 14px; background:#000080; color:#fff;
-       border:1px solid #0af; cursor:pointer; border-radius:3px; font-family:Tahoma,sans-serif;
-       text-decoration:none; }}
-.btn:hover {{ background:#0000aa; }}
-</style></head><body>
-<h3>🖥 VNC 远程桌面 — LocalFileDropShell</h3>
-<p>目标 VNC = <code>{target_text}</code></p>
-<p>base_url = <code>{base_url}</code></p>
-<p>noVNC 前端入口: <a href="{target_url}">{target_url}</a></p>
-<p>WebSocket 代理: <code>{base_url}/websockify</code></p>
-<hr>
-<p>noVNC.js 前端待集成 (打包时可通过 --with-vnc-bundle 内嵌 tvnserver + noVNC)。</p>
-<p style="color:#888;font-size:11px;">— LocalFileDropShell v0.1.0 —</p>
-</body></html>"""
 
     try:
         proc = launch_window(
@@ -66,7 +43,6 @@ a {{ color:#0f0; }}
             title=f"VNC 远程桌面 — {target_text}",
             width=1040,
             height=720,
-            html=html,
         )
         if proc is None:
             logger.warning("VNC 远程桌面窗口启动失败 (pywebview 不可用)")
@@ -279,9 +255,9 @@ def build_vnc_tab(parent: tk.Frame, base_url: str) -> None:
     tip_frame.pack(anchor="w", padx=12, pady=(6, 10), fill=tk.X)
 
     tips = [
-        "• /vnc/         — 服务端静态 noVNC 入口",
-        "• /websockify    — WebSocket → VNC 代理",
-        "• GET /health    — 含 vnc_detected 字段",
+        "• /vnc/            — 内嵌 noVNC 入口（自动带上 VNC 目标）",
+        "• /websockify      — WebSocket ↔ VNC TCP 双向代理",
+        "• GET /health      — 含 vnc_detected 字段",
         "• 典型 VNC 端口: 5900 (TightVNC) / 5901 (TigerVNC)",
     ]
     for t in tips:

@@ -39,11 +39,11 @@
 │  │  │ 进度条 / 日志 / 批量生成                           │   │   │
 │  │  └────────────────────────────────────────────────────┘   │   │
 │  │  ┌─ Shell CLI GUI (Tk Frame 内嵌 pywebview 子窗口) ───┐   │   │
-│  │  │ webview.create_window("Shell", "http://127.0.0.1:10022/shell") │   │
+│  │  │ webview.create_window("Shell", "http://127.0.0.1:10022/shell/") │   │
 │  │  │ xterm.js / 简化 Web Terminal                         │   │   │
 │  │  └────────────────────────────────────────────────────┘   │   │
 │  │  ┌─ VNC 远程桌面 (Tk Frame 内嵌 pywebview 子窗口) ────┐   │   │
-│  │  │ webview.create_window("VNC", "http://127.0.0.1:10022/vnc/vnc.html") │   │
+│  │  │ webview.create_window("VNC", "http://127.0.0.1:10022/vnc/")      │   │
 │  │  │ noVNC (websockify → 127.0.0.1:5900 / 15900)        │   │   │
 │  │  └────────────────────────────────────────────────────┘   │   │
 │  └────────────────────────────────────────────────────────────┘   │
@@ -207,13 +207,17 @@ multipart/form-data：`file=@local.bin` + `path=/remote/dir/file.bin` + `offset=
 
 ### VNC / Shell 静态页面接口
 
+静态文件全部来自内嵌的 `vnc_bundle/`（打包后为 `_MEIPASS/vnc_bundle`），不访问任何 CDN。
+
 | 路径 | 用途 |
 |---|---|
-| `GET /vnc/` | noVNC 静态文件服务 |
-| `GET /vnc/vnc.html` | noVNC 入口页面（pywebview VNC 标签页加载） |
-| `GET /websockify` | VNC WebSocket 代理（浏览器 ↔ VNC Server） |
-| `GET /shell/` | Shell CLI GUI 入口页面（pywebview Shell 标签页加载） |
-| `GET /shell/index.html` | Web Terminal 页面 |
+| `GET /vnc/?host=&port=` | noVNC 入口：302 到 `vnc.html`，并把 VNC 目标编码进 `path` 查询串，`autoconnect=true` |
+| `GET /vnc/{path}` | noVNC 静态文件（`vnc.html`、`core/*`、`vendor/*` 等），拒绝 `..` 穿越 |
+| `GET /websockify?host=&port=` | WebSocket ↔ VNC TCP 双向代理；缺省目标为服务端探测到的 `127.0.0.1:5900` |
+| `GET /shell/` | 内嵌 xterm.js 控制台页面（`index.html`），命令经 `POST /exec` 执行 |
+| `GET /shell/{path}` | xterm 静态文件（`xterm.js`、`xterm.css`、`addon-*.js`） |
+
+> noVNC 的 `host`/`port` 指的是 websockify（本服务）地址，VNC 目标通过 `path=websockify?host=..&port=..` 传给代理；`/vnc/` 入口会自动按浏览器访问地址填好这两项。
 
 ---
 
@@ -422,9 +426,9 @@ UINT8 compressedData[compressedSize]
 
 ```
 pywebview VNC 标签页
-    ├─ http://127.0.0.1:10022/vnc/vnc.html
-    │   └─ noVNC client
-    └─ WebSocket → ws://127.0.0.1:10022/websockify
+    ├─ http://127.0.0.1:10022/vnc/?host=<目标IP>&port=<目标端口>
+    │   └─ 302 → /vnc/vnc.html（path 内嵌 VNC 目标）
+    └─ WebSocket → ws://127.0.0.1:10022/websockify?host=&port=
                       └─ TCP → 127.0.0.1:5900+ / 15900+ (VNC Server)
 ```
 
@@ -516,7 +520,8 @@ uv run python build_exe.py --no-vnc-bundle                      # 不内嵌前�
 12. **远程目标由 UI 透传到服务端**：文件传输页顶栏的 `ip[:端口]` 解析后，作为 `host`/`port` 字段随 `/rfb/file/list`、`/upload` 请求下发；服务端 `_open_rfb_ftp(app, host, port)` 直连该 VNC，避免为每台工控机再起一个服务端进程
 13. **收藏夹随配置目录走**：优先 `D:/JustSmart/LocalFileDropShell`（与运维其它工具统一归档），目录创建失败则回退 `%APPDATA%/LocalFileDropShell`；`favorites.json` 采用临时文件 + `os.replace` 原子写，避免断电损坏
 14. **传输协议显式选择**：文件传输页顶部“协议”下拉（默认 RFB File，LocalSend / FTP / HTTP / RSYNC 为占位项），选择结果写入 `settings.json` 下次启动自动恢复，避免靠端口号猜测通道；占位协议仅在日志中提示，实际仍走 RFB File 通道
-15. **pywebview 窗口放独立子进程**：pywebview 5.x 的 `webview.start()` 会校验 `threading.current_thread().name == 'MainThread'`，Tk 主界面已占用主线程，因此 VNC / Shell 窗口改由 `sys.executable --webview-window <json>` 再启动一个自身进程（打包后即同一 exe），子进程在主线程正常起 WebView2；PyInstaller 侧按 SvgOverlayPy 的做法 `--collect-all webview/pythonnet/clr_loader` + 显式 `hidden-import webview.platforms.winforms/edgechromium`
+15. **前端资源全离线内嵌**：`vnc_bundle/{novnc,xterm,tvnc}` 随包内嵌（`_MEIPASS/vnc_bundle`），服务端 `/vnc/{path}`、`/shell/{path}` 以 `FileResponse` 提供静态文件（路径 `resolve()` 后校验仍在根目录内，拒绝 `..` 穿越）；`/vnc/` 入口 302 到 `vnc.html` 时把 VNC 目标编码进 noVNC 的 `path` 参数（noVNC 的 `host`/`port` 实际指向 websockify 而非 VNC 服务器）；`/websockify` 用两条协程在 WebSocket 与 VNC TCP 之间双向转发，连接失败以 1011 关闭并记录日志。断网工控机无需访问 CDN
+16. **pywebview 窗口放独立子进程**：pywebview 5.x 的 `webview.start()` 会校验 `threading.current_thread().name == 'MainThread'`，Tk 主界面已占用主线程，因此 VNC / Shell 窗口改由 `sys.executable --webview-window <json>` 再启动一个自身进程（打包后即同一 exe），子进程在主线程正常起 WebView2；PyInstaller 侧按 SvgOverlayPy 的做法 `--collect-all webview/pythonnet/clr_loader` + 显式 `hidden-import webview.platforms.winforms/edgechromium`
 
 ---
 

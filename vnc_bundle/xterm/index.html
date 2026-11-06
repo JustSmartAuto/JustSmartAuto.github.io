@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shell CLI — LocalFileDropShell</title>
+<link rel="stylesheet" href="xterm.css">
+<style>
+  html, body { height: 100%; margin: 0; background: #0c0c0c; }
+  body { display: flex; flex-direction: column; font-family: Tahoma, "Microsoft YaHei", sans-serif; }
+  header {
+    flex: 0 0 auto; padding: 6px 10px; background: #000080; color: #fff;
+    font-size: 13px; display: flex; align-items: center; gap: 10px;
+  }
+  header .hint { color: #9cf; font-size: 11px; }
+  #terminal { flex: 1 1 auto; min-height: 0; padding: 6px 8px; }
+  #terminal .terminal { height: 100%; }
+  .xterm .xterm-viewport { background-color: #0c0c0c !important; }
+</style>
+</head>
+<body>
+<header>
+  <strong>⌨ Shell CLI — LocalFileDropShell</strong>
+  <span class="hint">每条命令独立执行（cd 不保留）；POST /exec</span>
+</header>
+<div id="terminal"></div>
+
+<script src="xterm.js"></script>
+<script src="addon-fit.js"></script>
+<script src="addon-web-links.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  var PROMPT = "PS> ";
+  var term = new Terminal({
+    convertEol: true,
+    cursorBlink: true,
+    fontSize: 14,
+    fontFamily: "Consolas, 'Courier New', monospace",
+    scrollback: 5000,
+    theme: {
+      background: "#0c0c0c",
+      foreground: "#cccccc",
+      cursor: "#ffffff",
+      selectionBackground: "#264f78"
+    }
+  });
+  var fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.loadAddon(new WebLinksAddon.WebLinksAddon());
+  term.open(document.getElementById("terminal"));
+  fit.fit();
+
+  window.addEventListener("resize", function () {
+    try { fit.fit(); } catch (e) { /* 容器未就绪时忽略 */ }
+  });
+
+  var line = "";
+  var busy = false;
+  var history = [];
+  var hIndex = 0;
+
+  function write(text) {
+    term.write(String(text).replace(/\r?\n/g, "\r\n"));
+  }
+
+  function setLine(next) {
+    line = next;
+    term.write("\r\u001b[K" + PROMPT + line);
+  }
+
+  async function run() {
+    var cmd = line.trim();
+    term.write("\r\n");
+    line = "";
+    if (!cmd) {
+      term.write(PROMPT);
+      return;
+    }
+    history.push(cmd);
+    hIndex = history.length;
+    busy = true;
+    try {
+      var resp = await fetch("/exec", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ command: cmd })
+      });
+      var data = await resp.json();
+      if (data.stdout) { write(data.stdout); }
+      if (data.stderr) {
+        term.write("\u001b[31m");
+        write(data.stderr);
+        term.write("\u001b[0m");
+      }
+      term.write("\r\n\x1b[90m[exit " + data.exit_code + "]\x1b[0m");
+    } catch (err) {
+      term.write("\u001b[31m请求失败: " + err + "\u001b[0m");
+    }
+    busy = false;
+    term.write("\r\n" + PROMPT);
+  }
+
+  term.onData(function (data) {
+    if (busy) { return; }
+    if (data === "\r") {
+      run();
+    } else if (data === "\u007f") {
+      if (line.length) {
+        line = line.slice(0, -1);
+        term.write("\b \b");
+      }
+    } else if (data === "\u0003") {
+      term.write("^C\r\n" + PROMPT);
+      line = "";
+    } else if (data === "\u000c") {
+      term.clear();
+      term.write(PROMPT + line);
+    } else if (data === "\u001b[A") {
+      if (hIndex > 0) { hIndex -= 1; setLine(history[hIndex]); }
+    } else if (data === "\u001b[B") {
+      if (hIndex < history.length - 1) {
+        hIndex += 1;
+        setLine(history[hIndex]);
+      } else {
+        hIndex = history.length;
+        setLine("");
+      }
+    } else if (data >= " ") {
+      line += data;
+      term.write(data);
+    }
+  });
+
+  term.write("LocalFileDropShell — Shell CLI\r\n");
+  term.write("\x1b[90m输入命令后回车执行；↑/↓ 翻历史，Ctrl+L 清屏\x1b[0m\r\n");
+  term.write(PROMPT);
+})();
+</script>
+</body>
+</html>

@@ -26,32 +26,12 @@ def open_shell_window(base_url: str) -> None:
     已占用 main thread，因此窗口在独立子进程中打开（见 webview_win.py）。
     """
 
-    html = f"""<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8">
-<title>Shell CLI GUI</title>
-<style>
-body {{ margin:0; background:#000; color:#0f0; font-family: Consolas, 'Courier New', monospace; padding: 14px; }}
-h3 {{ color:#fff; }} pre {{ white-space: pre-wrap; }} code {{ background:#222; padding: 1px 5px; border-radius: 3px; }}
-.btn {{ display:inline-block; margin:6px 4px; padding:6px 12px; background:#000080; color:#fff; border:1px solid #0af;
-       cursor:pointer; font-family: Tahoma, sans-serif; border-radius: 3px; text-decoration:none; }}
-.btn:hover {{ background:#0000aa; }}
-</style></head><body>
-<h3>Shell CLI GUI — LocalFileDropShell</h3>
-<p>base_url = <code>{base_url}</code></p>
-<p>服务端静态入口: <a href="{base_url}/shell/" style="color:#0af">{base_url}/shell/</a></p>
-<p>后端执行端点: <code>POST {base_url}/exec</code></p>
-<hr>
-<p>xterm.js 前端待集成 (可打包内嵌). 当前可通过 CLI 交互或直接调用 HTTP /exec。</p>
-<p style="color:#888;font-size:11px;">— LocalFileDropShell v0.1.0 —</p>
-</body></html>"""
-
     try:
         proc = launch_window(
-            url=f"{base_url}/shell/",  # server.py 里有 /shell/ 静态 handler
+            url=f"{base_url}/shell/",  # server.py 从内嵌 xterm/ 目录提供页面
             title="Shell CLI GUI — LocalFileDropShell",
             width=960,
             height=620,
-            html=html,
         )
         if proc is None:
             logger.warning("Shell CLI GUI 窗口启动失败 (pywebview 不可用)")
@@ -84,8 +64,8 @@ def build_shell_tab(parent: tk.Frame, base_url: str) -> None:
         frame,
         text=(
             "Shell CLI GUI 基于 pywebview 独立浏览器窗口,\n"
-            "加载服务端 /shell/ 静态入口, 底层由 server.py 的\n"
-            "POST /exec 端点代理到 localdropshell.shell.ShellExecutor."
+            "加载服务端 /shell/ 内嵌 xterm.js 控制台, 命令由\n"
+            "POST /exec 端点交给 localdropshell.shell.ShellExecutor."
         ),
         bg=Win95_COLORS["chrome"],
         fg=Win95_COLORS["ink"],

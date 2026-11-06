@@ -22,14 +22,17 @@ import os
 import posixpath
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 import aiohttp.web as web
 import aiohttp.web_runner as web_runner
+from aiohttp import WSMsgType
 
 from .shell import ShellExecutor
 from . import rsync as _rsync
@@ -875,43 +878,169 @@ async def rfb_md5_handler(request: web.Request) -> web.Response:
 
 
 # ---------------------------------------------------------------------------
-# 静态 / 占位
+# 静态资源（noVNC / xterm）与 WebSocket 代理
 # ---------------------------------------------------------------------------
 
-async def vnc_static_handler(request: web.Request) -> web.Response:
-    """GET /vnc/ — noVNC UI 入口 (实际静态由 UI 层提供).
+#: 打包后位于 ``_MEIPASS/vnc_bundle``；开发时位于项目根 ``vnc_bundle/``；
+#: 都没有时回退同级历史工程 ``http_shell_cli_vnc/public_fs``。
+def _bundle_candidates() -> list[Path]:
+    project_root = Path(__file__).resolve().parents[2]
+    candidates: list[Path] = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(Path(meipass) / "vnc_bundle")
+    candidates.append(project_root / "vnc_bundle")
+    candidates.append(project_root.parent / "http_shell_cli_vnc" / "public_fs")
+    return candidates
 
-    支持 ``?host=&port=`` 查询参数，用于收藏夹"远程桌面"快捷跳转。
-    """
-    vnc_result = request.app.get("vnc_result")
-    detected_port = getattr(vnc_result, "port", None) if vnc_result else None
-    query_host = (request.query.get("host") or "").strip()
-    query_port = (request.query.get("port") or "").strip()
-    host = query_host or "127.0.0.1"
+
+def _asset_dir(name: str) -> Path | None:
+    """在候选目录中找 ``noVNC/`` / ``xterm/`` 子目录."""
+    for base in _bundle_candidates():
+        target = base / name
+        if target.is_dir():
+            return target
+    return None
+
+
+def _safe_static_file(base: Path, rel: str) -> Path | None:
+    """把 URL 相对路径解析为 base 下的真实文件，拒绝目录穿越."""
+    rel = rel.replace("\\", "/").strip("/")
+    if not rel or ".." in rel.split("/"):
+        return None
+    target = (base / rel).resolve()
     try:
-        port = int(query_port) if query_port else detected_port
+        target.relative_to(base.resolve())
     except ValueError:
-        port = detected_port
-    payload = {
-        "vnc_detected": bool(port),
-        "host": host,
-        "port": port,
-        "noVNC_url": f"/vnc/vnc.html?host={host}&port={port}" if port else None,
+        return None
+    return target if target.is_file() else None
+
+
+def _vnc_target(request: web.Request) -> tuple[str, int | None]:
+    """解析 VNC 目标：查询参数优先，其次服务端本机探测结果."""
+    host = (request.query.get("host") or "").strip() or "127.0.0.1"
+    detected = _get_vnc_tcp_port(request.app)
+    raw_port = (request.query.get("port") or "").strip()
+    if not raw_port:
+        return host, detected
+    try:
+        port = int(raw_port)
+    except ValueError:
+        return host, detected
+    return host, port if 1 <= port <= 65535 else detected
+
+
+def _vnc_entry_url(request: web.Request) -> str:
+    """构造 noVNC 入口 URL.
+
+    noVNC 的 ``host``/``port`` 是 **websockify**（即本服务）的地址，不是 VNC
+    目标；VNC 目标通过 ``path`` 查询串传给 ``/websockify`` 代理。
+    """
+    target_host, target_port = _vnc_target(request)
+    has_target = bool(request.query.get("host") or request.query.get("port") or target_port)
+    page_host = request.url.host or "127.0.0.1"
+    page_port = request.url.port or (443 if request.url.scheme == "https" else 80)
+    params: dict[str, str] = {
+        "host": page_host,
+        "port": str(page_port),
+        "encrypt": "0",
+        "path": "websockify?" + urlencode(
+            {"host": target_host, "port": target_port or 5900}
+        ),
+        "resize": "scale",
     }
-    return json_ok(payload)
+    if has_target:
+        params["autoconnect"] = "true"
+    return "/vnc/vnc.html?" + urlencode(params)
 
 
-async def shell_static_handler(request: web.Request) -> web.Response:
-    """GET /shell/ — xterm.js UI 入口 (实际静态由 UI 层提供)."""
-    return json_ok({"ok": True, "xterm_url": "/shell/index.html"})
+async def vnc_static_handler(request: web.Request) -> web.StreamResponse:
+    """GET /vnc/{path} — 提供内嵌 noVNC 静态文件."""
+    tail = request.match_info.get("tail", "")
+    if not tail:
+        return web.HTTPFound(_vnc_entry_url(request))
+    base = _asset_dir("novnc")
+    if base is None:
+        return web.Response(
+            status=503,
+            text="noVNC 资源未找到：请准备 vnc_bundle/novnc（或重新打包完整版）",
+        )
+    target = _safe_static_file(base, tail)
+    if target is None:
+        raise web.HTTPNotFound()
+    return web.FileResponse(target)
 
 
-async def websockify_handler(request: web.Request) -> web.Response:
-    """GET /websockify — WebSocket 代理占位, 返回 501."""
-    return web.json_response(
-        {"ok": False, "error": "Not Implemented — 实际 WebSocket 代理在 vnc.py 中实现"},
-        status=501,
-    )
+async def shell_static_handler(request: web.Request) -> web.StreamResponse:
+    """GET /shell/{path} — 提供内嵌 xterm 控制台静态文件."""
+    tail = request.match_info.get("tail", "") or "index.html"
+    base = _asset_dir("xterm")
+    if base is None:
+        return web.Response(
+            status=503,
+            text="xterm 资源未找到：请准备 vnc_bundle/xterm（或重新打包完整版）",
+        )
+    target = _safe_static_file(base, tail)
+    if target is None:
+        raise web.HTTPNotFound()
+    return web.FileResponse(target)
+
+
+async def _pipe_tcp_to_ws(reader: asyncio.StreamReader, ws: web.WebSocketResponse) -> None:
+    """VNC → 浏览器方向转发."""
+    try:
+        while True:
+            data = await reader.read(65536)
+            if not data or ws.closed:
+                break
+            await ws.send_bytes(data)
+    except (ConnectionResetError, RuntimeError):
+        pass
+    finally:
+        if not ws.closed:
+            await ws.close()
+
+
+async def websockify_handler(request: web.Request) -> web.StreamResponse:
+    """GET /websockify?host=&port= — WebSocket ↔ VNC TCP 双向代理."""
+    host, port = _vnc_target(request)
+    ws = web.WebSocketResponse(heartbeat=30, max_msg_size=0)
+    await ws.prepare(request)
+
+    if not port:
+        await ws.close(code=1011, message=b"no VNC target")
+        return ws
+
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port), timeout=8
+        )
+    except (OSError, asyncio.TimeoutError) as exc:
+        logger.warning("websockify 连接 %s:%s 失败: %s", host, port, exc)
+        await ws.close(code=1011, message=f"connect failed: {exc}".encode()[:110])
+        return ws
+
+    logger.info("websockify 已连接 %s:%s", host, port)
+    up_task = asyncio.create_task(_pipe_tcp_to_ws(reader, ws))
+    try:
+        async for msg in ws:
+            if msg.type == WSMsgType.BINARY:
+                writer.write(msg.data)
+                await writer.drain()
+            elif msg.type in (WSMsgType.ERROR, WSMsgType.CLOSE,
+                              WSMsgType.CLOSING, WSMsgType.CLOSED):
+                break
+    except (ConnectionResetError, RuntimeError):
+        pass
+    finally:
+        up_task.cancel()
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except (OSError, RuntimeError):
+            pass
+        logger.info("websockify 断开 %s:%s", host, port)
+    return ws
 
 
 # ---------------------------------------------------------------------------
@@ -962,13 +1091,13 @@ def create_app(config: ServerConfig | None = None) -> web.Application:
     app.router.add_post("/rfb/file/download", rfb_download_handler)
     app.router.add_post("/rfb/file/md5", rfb_md5_handler)
 
-    app.router.add_get("/vnc/", vnc_static_handler)
-    app.router.add_get("/shell/", shell_static_handler)
     app.router.add_get("/websockify", websockify_handler)
-
-    # 尾斜杠兼容: /vnc 和 /vnc/ 都能访问
-    app.router.add_get("/vnc", vnc_static_handler)
-    app.router.add_get("/shell", shell_static_handler)
+    # 无尾斜杠时先重定向，保证页面内相对路径（core/、xterm.js 等）解析正确；
+    # 必须注册在通配路由之前，否则 /shell 会被 /shell/{tail:.*} 抢先命中
+    app.router.add_get("/vnc", lambda req: web.HTTPFound("/vnc/?" + req.query_string))
+    app.router.add_get("/shell", lambda _req: web.HTTPFound("/shell/"))
+    app.router.add_get("/vnc/{tail:.*}", vnc_static_handler)
+    app.router.add_get("/shell/{tail:.*}", shell_static_handler)
 
     return app
 
