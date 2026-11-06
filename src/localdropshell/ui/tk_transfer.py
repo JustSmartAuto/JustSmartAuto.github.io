@@ -331,9 +331,20 @@ def build_transfer_tab(
     left_frame = tk.Frame(paned, bg=Win95_COLORS["chrome"])
     paned.add(left_frame, minsize=260)
 
-    tk.Label(left_frame, text="📁 本地文件 (支持拖放)",
+    local_head = tk.Frame(left_frame, bg=Win95_COLORS["chrome"])
+    local_head.pack(fill=tk.X, padx=4, pady=(2, 0))
+    tk.Label(local_head, text="📁 本地文件",
              bg=Win95_COLORS["chrome"], fg=Win95_COLORS["ink"],
-             font=Win95_FONT_BOLD).pack(anchor="w", padx=4, pady=(2, 0))
+             font=Win95_FONT_BOLD).pack(side=tk.LEFT)
+    tk.Label(local_head, text="路径:", bg=Win95_COLORS["chrome"],
+             fg=Win95_COLORS["ink"], font=Win95_FONT).pack(side=tk.LEFT, padx=(8, 2))
+    local_path_var = tk.StringVar(value=str(Path.home()))
+    local_path_entry = tk.Entry(
+        local_head, textvariable=local_path_var, font=Win95_FONT,
+        bd=2, relief=tk.SUNKEN,
+    )
+    local_path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+    local_path_entry.bind("<Return>", lambda _e: _open_local_path())
 
     local_tree = ttk.Treeview(
         left_frame,
@@ -358,7 +369,7 @@ def build_transfer_tab(
 
     # 启用拖放：Treeview 和它所在的 Frame 都注册，避免拖到空白处没反应
     _local_drop = lambda paths: _on_local_dropped(
-        local_tree, paths, _item_store["local"], log
+        local_tree, paths, _item_store["local"], log, local_path_var.set
     )
     enable_drop_dnd(local_tree, _local_drop)
     enable_drop_dnd(left_frame, _local_drop)
@@ -398,9 +409,19 @@ def build_transfer_tab(
     right_frame = tk.Frame(paned, bg=Win95_COLORS["chrome"])
     paned.add(right_frame, minsize=260)
 
-    tk.Label(right_frame, text="🖥 远程文件 (双击目录打开 / 右键菜单)",
+    remote_head = tk.Frame(right_frame, bg=Win95_COLORS["chrome"])
+    remote_head.pack(fill=tk.X, padx=4, pady=(2, 0))
+    tk.Label(remote_head, text="🖥 远程文件",
              bg=Win95_COLORS["chrome"], fg=Win95_COLORS["ink"],
-             font=Win95_FONT_BOLD).pack(anchor="w", padx=4, pady=(2, 0))
+             font=Win95_FONT_BOLD).pack(side=tk.LEFT)
+    tk.Label(remote_head, text="路径:", bg=Win95_COLORS["chrome"],
+             fg=Win95_COLORS["ink"], font=Win95_FONT).pack(side=tk.LEFT, padx=(8, 2))
+    remote_path_entry = tk.Entry(
+        remote_head, textvariable=dir_var, font=Win95_FONT,
+        bd=2, relief=tk.SUNKEN,
+    )
+    remote_path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+    remote_path_entry.bind("<Return>", lambda _e: _on_refresh())
 
     # 远程目录导航条：返回上级 + 面包屑（点击任意层级直接跳转）
     crumb_bar = tk.Frame(right_frame, bg=Win95_COLORS["chrome"])
@@ -651,6 +672,28 @@ def build_transfer_tab(
     set_progress = _set_progress
     add_paths = _add_paths
 
+    # ========= 本地路径栏动作 =========
+    def _open_local_path() -> None:
+        """路径框回车：在资源管理器打开该路径（文件则打开其所属文件夹）."""
+        raw = local_path_var.get().strip().strip('"')
+        if not raw:
+            return
+        p = Path(raw).expanduser()
+        if not p.exists():
+            log(f"⚠ 本地路径不存在: {raw}")
+            return
+        folder = p if p.is_dir() else p.parent
+        try:
+            os.startfile(str(folder))  # type: ignore[attr-defined]
+        except AttributeError:
+            log("⚠ 当前平台不支持自动打开文件夹")
+            return
+        except OSError as exc:
+            log(f"⚠ 打开本地文件夹失败: {exc}")
+            return
+        local_path_var.set(str(folder))
+        log(f"📂 已打开本地路径: {folder}")
+
     # ========= 远程地址栏动作 =========
     def _on_protocol_change(value: str) -> None:
         """协议下拉切换：写入配置文件并提示占位协议."""
@@ -743,9 +786,12 @@ def build_transfer_tab(
 def _open_dropped_in_explorer(
     paths: list[str],
     log: Callable[[str], None] | None = None,
-) -> None:
-    """拖入后在资源管理器打开：文件 → 所属文件夹，文件夹 → 文件夹本身（按目录去重）."""
-    opened: set[str] = set()
+) -> list[str]:
+    """拖入后在资源管理器打开：文件 → 所属文件夹，文件夹 → 文件夹本身（按目录去重）.
+
+    返回实际打开过的目录列表（用于回填本地路径框）.
+    """
+    opened: list[str] = []
     for raw in paths:
         try:
             p = Path(raw)
@@ -753,15 +799,16 @@ def _open_dropped_in_explorer(
             key = str(folder)
             if key in opened or not folder.is_dir():
                 continue
-            opened.add(key)
             os.startfile(key)  # type: ignore[attr-defined]  # 仅 Windows
+            opened.append(key)
             if log:
                 log(f"📂 已打开文件夹: {key}")
         except AttributeError:
-            return  # 非 Windows 平台无 os.startfile
+            return opened  # 非 Windows 平台无 os.startfile
         except OSError as exc:
             if log:
                 log(f"⚠ 打开文件夹失败 {raw!r}: {exc}")
+    return opened
 
 
 def _on_local_dropped(
@@ -769,6 +816,7 @@ def _on_local_dropped(
     paths: list[str],
     store: dict[str, FileItem],
     log: Callable[[str], None] | None = None,
+    on_open: Callable[[str], None] | None = None,
 ) -> None:
     """DnD 回调 — 在主线程调用, 直接改 tree/state."""
     import os
@@ -824,7 +872,9 @@ def _on_local_dropped(
             continue
     if log:
         log(f"{'✅' if added else '⚠'} 已添加 {added} 个本地文件到列表")
-    _open_dropped_in_explorer(paths, log)
+    opened = _open_dropped_in_explorer(paths, log)
+    if on_open and opened:
+        on_open(opened[0])
 
 
 def _clear_tree(tree: ttk.Treeview, store: dict[str, FileItem]) -> None:
