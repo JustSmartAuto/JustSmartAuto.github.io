@@ -23,7 +23,12 @@ logger = logging.getLogger("localdropshell.settings")
 APP_NAME = "LocalFileDropShell"
 PRIMARY_CONFIG_DIR = Path("D:/JustSmart/LocalFileDropShell")
 FAVORITES_FILE = "favorites.json"
+SETTINGS_FILE = "settings.json"
 DEFAULT_VNC_PORT = 5900
+
+# 文件传输协议（当前仅 RFB File 可用，其余为占位项）
+TRANSFER_PROTOCOLS = ("RFB File", "LocalSend", "FTP", "HTTP", "RSYNC")
+DEFAULT_TRANSFER_PROTOCOL = "RFB File"
 
 _cached_dir: Path | None = None
 
@@ -70,6 +75,58 @@ def config_dir() -> Path:
 
 def favorites_path() -> Path:
     return config_dir() / FAVORITES_FILE
+
+
+# ---------------------------------------------------------------------------
+# 界面设置（协议等）
+# ---------------------------------------------------------------------------
+
+def settings_path() -> Path:
+    return config_dir() / SETTINGS_FILE
+
+
+def load_settings() -> dict:
+    """读取 ``settings.json``；缺失 / 损坏时返回空 dict."""
+    path = settings_path()
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        logger.warning("读取配置文件失败 %s: %s", path, exc)
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def save_settings(data: dict) -> Path:
+    """原子写入 ``settings.json``，返回写入路径."""
+    path = settings_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".settings-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False, indent=2)
+        os.replace(tmp_name, path)
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+    return path
+
+
+def load_transfer_protocol() -> str:
+    """读取已保存的传输协议；非法值回退到默认 RFB File."""
+    value = str(load_settings().get("transfer_protocol") or "").strip()
+    return value if value in TRANSFER_PROTOCOLS else DEFAULT_TRANSFER_PROTOCOL
+
+
+def save_transfer_protocol(protocol: str) -> Path:
+    value = protocol if protocol in TRANSFER_PROTOCOLS else DEFAULT_TRANSFER_PROTOCOL
+    data = load_settings()
+    data["transfer_protocol"] = value
+    return save_settings(data)
 
 
 # ---------------------------------------------------------------------------
@@ -142,13 +199,14 @@ def _normalize_paths(raw: object) -> list[str]:
 
 @dataclass
 class Favorite:
-    """一条收藏：备注名 + 远程主机/端口 + 默认路径 + 多个快捷路径."""
+    """一条收藏：备注名 + 远程主机/端口 + 默认路径 + 多个快捷路径 + 传输协议."""
 
     name: str
     host: str
     port: int = DEFAULT_VNC_PORT
     path: str = "/"
     paths: list[str] = field(default_factory=list)
+    protocol: str = DEFAULT_TRANSFER_PROTOCOL
 
     def address(self) -> str:
         return format_target(self.host, self.port)
@@ -164,6 +222,7 @@ class Favorite:
             "port": self.port,
             "path": self.path,
             "paths": list(self.paths),
+            "protocol": self.protocol,
         }
 
     @classmethod
@@ -175,12 +234,16 @@ class Favorite:
         except (TypeError, ValueError):
             port = DEFAULT_VNC_PORT
         path = str(data.get("path") or data.get("dir") or "/").strip() or "/"
+        protocol = str(data.get("protocol") or "").strip()
+        if protocol not in TRANSFER_PROTOCOLS:
+            protocol = DEFAULT_TRANSFER_PROTOCOL
         return cls(
             name=name,
             host=host,
             port=port,
             path=path,
             paths=_normalize_paths(data.get("paths")),
+            protocol=protocol,
         )
 
 

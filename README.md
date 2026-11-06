@@ -4,13 +4,13 @@
 
 | 能力 | UI 层 | 说明 |
 |---|---|---|
-| **文件传送** | Tk 主界面（左窗格） | TightVNC RFB 通道优先 / aiohttp HTTP 回退 / 单工自动喷泉码 |
+| **文件传送** | Tk 主界面（左窗格） | TightVNC RFB 通道优先 / aiohttp HTTP 回退 / 单工自动喷泉码；顶部“协议”下拉显式选择（默认 RFB File，LocalSend/FTP/HTTP/RSYNC 占位），选择持久化到 `settings.json` |
 | **拖放上传** | Tk 主界面（右窗格） | tkinterdnd2 + Win32 WM_DROPFILES 原生拖放 |
 | **HTTP Shell** | pywebview 标签页（Shell GUI） | `/exec` 远程命令执行，pwsh → powershell → cmd 自动检测，GBK/UTF-8 自适应，超时 Kill |
 | **rsync 增量同步** | Tk 主界面 / CLI | Adler-32 + MD5 双阶段块级 delta，push / pull 双向，自动回退全量 |
 | **RFB 文件传输** | Tk 主界面 | TightVNC FTP 扩展消息，支持 offset 断点续传、MD5 块校验、目录列表 |
 | **VNC 远程桌面** | pywebview 标签页（VNC） | 自动探测已有 TightVNC / RealVNC / UltraVNC 直接复用；无则可内嵌启动 + noVNC + WebSocket 代理；未安装 TightVNC 时用内嵌 MSI 静默提权安装 |
-| **远程地址 / 收藏夹** | Tk 文件传输页顶栏 + 收藏夹页 | 输入 `ip[:端口]`（省略按 5900）点“连接”直连该远程 VNC；收藏备注名 / ip:port / 文件传输默认路径 / 多个快捷路径，持久化到 `D:/JustSmart/LocalFileDropShell/favorites.json`（不可写回退 `%APPDATA%/LocalFileDropShell`） |
+| **远程地址 / 收藏夹** | Tk 文件传输页顶栏 + 收藏夹页 | 输入 `ip[:端口]`（省略按 5900）点“连接”直连该远程 VNC；收藏备注名 / ip:port / 传输协议 / 文件传输默认路径 / 多个快捷路径，持久化到 `D:/JustSmart/LocalFileDropShell/favorites.json`（不可写回退 `%APPDATA%/LocalFileDropShell`） |
 | **CLI 交互式 shell** | 纯控制台 | 同进程三角色（`gui` / `server` / `client`），内置 upload / download / rsync / rfb-* 等命令 |
 
 **混合 UI 架构**：
@@ -440,9 +440,9 @@ pywebview VNC 标签页
 | `assets/tightvnc-2.8.87-gpl-setup-64bit.msi` | 内嵌 TightVNC 安装包（未安装时静默提权安装，随 exe 打包） |
 | `src/localdropshell/cli.py` | **入口**（三角色解析 + 启动 aiohttp + 分发到 gui / server / client） |
 | `src/localdropshell/ui/tk_main.py` | **Tk 根窗口**：菜单栏 + Notebook 标签页 + 状态栏 |
-| `src/localdropshell/ui/tk_transfer.py` | **文件传输标签页**：远程地址栏（ip[:端口]）/ 远程目录、本地/远程 Treeview、进度条、日志、批量 |
-| `src/localdropshell/ui/tk_favorites.py` | **收藏夹标签页**：备注名 / ip:port / 文件传输默认路径 / 多个快捷路径（每条路径一个直达按钮），提供“文件传输”“远程桌面”“载入”“编辑”“删除”操作 |
-| `src/localdropshell/settings.py` | 配置目录（`D:/JustSmart/LocalFileDropShell` → 回退 `%APPDATA%/LocalFileDropShell`）+ `favorites.json` 原子读写 + `ip[:端口]` 解析 |
+| `src/localdropshell/ui/tk_transfer.py` | **文件传输标签页**：远程地址栏（ip[:端口]）/ 远程目录 / 协议下拉、本地/远程 Treeview、进度条、日志、批量 |
+| `src/localdropshell/ui/tk_favorites.py` | **收藏夹标签页**：备注名 / ip:port / 传输协议 / 文件传输默认路径 / 多个快捷路径（每条路径一个直达按钮），提供“文件传输”“远程桌面”“载入”“编辑”“删除”操作 |
+| `src/localdropshell/settings.py` | 配置目录（`D:/JustSmart/LocalFileDropShell` → 回退 `%APPDATA%/LocalFileDropShell`）+ `favorites.json` / `settings.json`（传输协议）原子读写 + `ip[:端口]` 解析 |
 | `src/localdropshell/webview_win.py` | pywebview 独立窗口进程：主线程 `webview.start()`，打包后由 exe `--webview-window <json>` 再启动一次 |
 | `src/localdropshell/ui/tk_drop.py` | **Win32 拖放**：tkinterdnd2 + WM_DROPFILES 关闭 WebView2 内置拖放 |
 | `src/localdropshell/ui/web_shell.py` | **Shell CLI GUI pywebview 子窗口**：xterm.js Web Terminal |
@@ -506,7 +506,8 @@ uv run python build_exe.py --with-vnc-bundle                    # 额外内嵌 T
 11. **TightVNC 缺失自动安装**：`assets/tightvnc-2.8.87-gpl-setup-64bit.msi` 随 exe 内嵌（PyInstaller `--add-data`）；启动 gui/server 时若「安装目录 + 卸载注册表项」都查不到，则 `ShellExecuteExW(lpVerb="runas")` 提权执行 `msiexec /i <msi> /qn /norestart`，等待退出码后复查安装结果，失败/取消 UAC 只记录日志不阻塞启动（参考 `silent安装器/mosquitto_installer` 的内嵌安装器做法）
 12. **远程目标由 UI 透传到服务端**：文件传输页顶栏的 `ip[:端口]` 解析后，作为 `host`/`port` 字段随 `/rfb/file/list`、`/upload` 请求下发；服务端 `_open_rfb_ftp(app, host, port)` 直连该 VNC，避免为每台工控机再起一个服务端进程
 13. **收藏夹随配置目录走**：优先 `D:/JustSmart/LocalFileDropShell`（与运维其它工具统一归档），目录创建失败则回退 `%APPDATA%/LocalFileDropShell`；`favorites.json` 采用临时文件 + `os.replace` 原子写，避免断电损坏
-14. **pywebview 窗口放独立子进程**：pywebview 5.x 的 `webview.start()` 会校验 `threading.current_thread().name == 'MainThread'`，Tk 主界面已占用主线程，因此 VNC / Shell 窗口改由 `sys.executable --webview-window <json>` 再启动一个自身进程（打包后即同一 exe），子进程在主线程正常起 WebView2；PyInstaller 侧按 SvgOverlayPy 的做法 `--collect-all webview/pythonnet/clr_loader` + 显式 `hidden-import webview.platforms.winforms/edgechromium`
+14. **传输协议显式选择**：文件传输页顶部“协议”下拉（默认 RFB File，LocalSend / FTP / HTTP / RSYNC 为占位项），选择结果写入 `settings.json` 下次启动自动恢复，避免靠端口号猜测通道；占位协议仅在日志中提示，实际仍走 RFB File 通道
+15. **pywebview 窗口放独立子进程**：pywebview 5.x 的 `webview.start()` 会校验 `threading.current_thread().name == 'MainThread'`，Tk 主界面已占用主线程，因此 VNC / Shell 窗口改由 `sys.executable --webview-window <json>` 再启动一个自身进程（打包后即同一 exe），子进程在主线程正常起 WebView2；PyInstaller 侧按 SvgOverlayPy 的做法 `--collect-all webview/pythonnet/clr_loader` + 显式 `hidden-import webview.platforms.winforms/edgechromium`
 
 ---
 

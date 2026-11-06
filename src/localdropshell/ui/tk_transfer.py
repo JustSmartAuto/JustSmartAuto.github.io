@@ -26,7 +26,15 @@ from typing import Any, Callable
 import tkinter as tk
 import tkinter.ttk as ttk
 
-from localdropshell.settings import DEFAULT_VNC_PORT, format_target, parse_target
+from localdropshell.settings import (
+    DEFAULT_TRANSFER_PROTOCOL,
+    DEFAULT_VNC_PORT,
+    TRANSFER_PROTOCOLS,
+    format_target,
+    load_transfer_protocol,
+    parse_target,
+    save_transfer_protocol,
+)
 from localdropshell.ui.tk_drop import enable_drag_out, enable_drop_dnd
 
 
@@ -229,10 +237,12 @@ def build_transfer_tab(
 
     # ========= 顶部: 远程地址栏 =========
     initial_host = "127.0.0.1"
+    protocol_var = tk.StringVar(value=load_transfer_protocol())
     target: dict[str, Any] = {
         "host": initial_host,
         "port": DEFAULT_VNC_PORT,
         "dir": "/",
+        "protocol": protocol_var.get(),
         "connected": False,  # False 表示沿用服务端本机探测到的 VNC Server
     }
 
@@ -254,6 +264,30 @@ def build_transfer_tab(
     dir_entry = tk.Entry(addr_bar, textvariable=dir_var, width=16, font=Win95_FONT,
                          bd=2, relief=tk.SUNKEN)
     dir_entry.pack(side=tk.LEFT, padx=(0, 6))
+
+    tk.Label(addr_bar, text="协议:", bg=Win95_COLORS["chrome"],
+             fg=Win95_COLORS["ink"], font=Win95_FONT_BOLD).pack(side=tk.LEFT, padx=(6, 4))
+
+    protocol_menu = tk.OptionMenu(
+        addr_bar,
+        protocol_var,
+        *TRANSFER_PROTOCOLS,
+        command=lambda value: _on_protocol_change(value),
+    )
+    protocol_menu.configure(
+        font=Win95_FONT,
+        bg=Win95_COLORS["chrome"],
+        fg=Win95_COLORS["ink"],
+        activebackground=Win95_COLORS["chrome_light"],
+        activeforeground=Win95_COLORS["ink"],
+        bd=2,
+        relief=tk.RAISED,
+        highlightthickness=0,
+        padx=6,
+        pady=1,
+    )
+    protocol_menu["menu"].configure(font=Win95_FONT)
+    protocol_menu.pack(side=tk.LEFT, padx=(0, 6))
 
     small_btn_style = {
         "font": Win95_FONT,
@@ -540,6 +574,17 @@ def build_transfer_tab(
     add_paths = _add_paths
 
     # ========= 远程地址栏动作 =========
+    def _on_protocol_change(value: str) -> None:
+        """协议下拉切换：写入配置文件并提示占位协议."""
+        target["protocol"] = value
+        try:
+            save_transfer_protocol(value)
+            log(f"ℹ 传输协议已切换为 {value}（已写入 settings.json）")
+        except OSError as exc:
+            log(f"⚠ 协议设置保存失败: {exc}")
+        if value != DEFAULT_TRANSFER_PROTOCOL:
+            log(f"ℹ {value} 为占位协议，当前实际仍走 {DEFAULT_TRANSFER_PROTOCOL} 通道")
+
     def _on_connect() -> None:
         try:
             t_host, t_port = parse_target(addr_var.get())
@@ -550,24 +595,44 @@ def build_transfer_tab(
         target["host"] = t_host
         target["port"] = t_port
         target["dir"] = dir_var.get().strip() or "/"
+        target["protocol"] = protocol_var.get()
         target["connected"] = True
+        protocol = target["protocol"]
         addr_var.set(format_target(t_host, t_port))
         status_lbl.configure(
-            text=f"当前目标: {format_target(t_host, t_port)}  目录 {target['dir']}",
+            text=f"当前目标: {format_target(t_host, t_port)}  协议 {protocol}  目录 {target['dir']}",
             fg="#000080",
         )
-        log(f"ℹ 已连接远程目标 {format_target(t_host, t_port)}，目录 {target['dir']}")
+        log(
+            f"ℹ 已连接远程目标 {format_target(t_host, t_port)}，"
+            f"协议 {protocol}，目录 {target['dir']}"
+        )
+        if protocol != DEFAULT_TRANSFER_PROTOCOL:
+            log(f"ℹ {protocol} 为占位协议，当前实际仍走 {DEFAULT_TRANSFER_PROTOCOL} 通道")
         _refresh_remote(base_url, remote_tree, _item_store, log, target)
 
     def _on_refresh() -> None:
         target["dir"] = dir_var.get().strip() or "/"
         _refresh_remote(base_url, remote_tree, _item_store, log, target)
 
-    def _set_target(t_host: str, t_port: int | None = None, t_path: str | None = None) -> None:
-        """供收藏夹快捷按钮调用：填入地址/目录并立即连接."""
+    def _set_target(
+        t_host: str,
+        t_port: int | None = None,
+        t_path: str | None = None,
+        t_protocol: str | None = None,
+    ) -> None:
+        """供收藏夹快捷按钮调用：填入地址/目录/协议并立即连接."""
         addr_var.set(format_target(t_host, int(t_port or DEFAULT_VNC_PORT)))
         if t_path:
             dir_var.set(t_path)
+        if t_protocol:
+            protocol_var.set(
+                t_protocol if t_protocol in TRANSFER_PROTOCOLS else DEFAULT_TRANSFER_PROTOCOL
+            )
+            try:
+                save_transfer_protocol(protocol_var.get())
+            except OSError as exc:
+                log(f"⚠ 协议设置保存失败: {exc}")
         _on_connect()
 
     connect_btn.configure(command=_on_connect)

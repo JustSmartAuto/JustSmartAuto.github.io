@@ -17,6 +17,8 @@ from tkinter import messagebox
 from typing import Callable
 
 from localdropshell.settings import (
+    DEFAULT_TRANSFER_PROTOCOL,
+    TRANSFER_PROTOCOLS,
     Favorite,
     favorites_path,
     format_target,
@@ -42,6 +44,25 @@ def _btn_style() -> dict:
         "padx": 8,
         "pady": 2,
     }
+
+
+def _protocol_menu(parent: tk.Misc, var: tk.StringVar) -> tk.OptionMenu:
+    """Win95 风格的传输协议下拉（RFB File / LocalSend / FTP / HTTP / RSYNC）."""
+    menu = tk.OptionMenu(parent, var, *TRANSFER_PROTOCOLS)
+    menu.configure(
+        font=Win95_FONT,
+        bg=Win95_COLORS["chrome"],
+        fg=Win95_COLORS["ink"],
+        activebackground=Win95_COLORS["chrome_light"],
+        activeforeground=Win95_COLORS["ink"],
+        bd=2,
+        relief=tk.RAISED,
+        highlightthickness=0,
+        padx=6,
+        pady=1,
+    )
+    menu["menu"].configure(font=Win95_FONT)
+    return menu
 
 
 def _build_path_editor(
@@ -153,6 +174,7 @@ def build_favorites_tab(
     name_var = tk.StringVar()
     addr_var = tk.StringVar()
     path_var = tk.StringVar(value="/")
+    protocol_var = tk.StringVar(value=DEFAULT_TRANSFER_PROTOCOL)
 
     tk.Label(form, text="备注名:", bg=Win95_COLORS["chrome"],
              font=Win95_FONT).grid(row=0, column=0, sticky="w", padx=(0, 2))
@@ -170,12 +192,18 @@ def build_favorites_tab(
     tk.Entry(form, textvariable=path_var, width=18, font=Win95_FONT,
              bd=2, relief=tk.SUNKEN).grid(row=0, column=5, sticky="w", padx=(0, 10))
 
+    tk.Label(form, text="协议:", bg=Win95_COLORS["chrome"],
+             font=Win95_FONT).grid(row=1, column=0, sticky="w", padx=(0, 2), pady=(6, 0))
+    _protocol_menu(form, protocol_var).grid(
+        row=1, column=1, sticky="w", pady=(6, 0)
+    )
+
     tk.Label(form, text="快捷路径:", bg=Win95_COLORS["chrome"],
-             font=Win95_FONT).grid(row=1, column=0, sticky="nw", padx=(0, 2), pady=(6, 0))
+             font=Win95_FONT).grid(row=1, column=2, sticky="nw", padx=(0, 2), pady=(6, 0))
     path_editor, get_shortcut_paths, set_shortcut_paths = _build_path_editor(
         form, list_height=2
     )
-    path_editor.grid(row=1, column=1, columnspan=6, sticky="we", pady=(6, 0))
+    path_editor.grid(row=1, column=3, columnspan=4, sticky="we", pady=(6, 0))
 
     status_lbl = tk.Label(
         form,
@@ -267,6 +295,7 @@ def build_favorites_tab(
             port=port,
             path=path,
             paths=get_shortcut_paths(),
+            protocol=protocol_var.get(),
         )
 
         items = [f for f in favorites if not (f.host == host and f.port == port)]
@@ -277,6 +306,7 @@ def build_favorites_tab(
         name_var.set("")
         addr_var.set("")
         path_var.set("/")
+        protocol_var.set(DEFAULT_TRANSFER_PROTOCOL)
         set_shortcut_paths([])
         _set_status(f"✅ 已保存 {fav.name} ({format_target(host, port)})")
         _render()
@@ -297,11 +327,12 @@ def build_favorites_tab(
         name_var.set(fav.name)
         addr_var.set(fav.address())
         path_var.set(fav.path)
+        protocol_var.set(fav.protocol)
         set_shortcut_paths(fav.shortcut_paths())
         _set_status(f"已载入 {fav.name}，确认后点“保存收藏”覆盖同地址记录")
 
     def _edit(fav: Favorite) -> None:
-        """弹出编辑对话框，直接修改该条收藏（改名 / 改地址 / 默认路径 / 快捷路径）."""
+        """弹出编辑对话框，直接修改该条收藏（改名 / 改地址 / 默认路径 / 快捷路径 / 协议）."""
         win = tk.Toplevel(root)
         win.title("编辑收藏")
         win.configure(bg=Win95_COLORS["chrome"])
@@ -326,16 +357,22 @@ def build_favorites_tab(
             entry.grid(row=row, column=1, sticky="w", pady=3, padx=(4, 0))
             entries.append(entry)
 
+        protocol_e = tk.StringVar(value=fav.protocol)
+        tk.Label(body, text="协议:", bg=Win95_COLORS["chrome"],
+                 font=Win95_FONT).grid(row=3, column=0, sticky="e",
+                                       pady=3, padx=(0, 4))
+        _protocol_menu(body, protocol_e).grid(row=3, column=1, sticky="w", pady=3)
+
         tk.Label(body, text="快捷路径:", bg=Win95_COLORS["chrome"],
-                 font=Win95_FONT).grid(row=3, column=0, sticky="ne",
+                 font=Win95_FONT).grid(row=4, column=0, sticky="ne",
                                        pady=3, padx=(0, 4))
         path_editor, get_edit_paths, _set_edit_paths = _build_path_editor(body)
-        path_editor.grid(row=3, column=1, sticky="we", pady=3)
+        path_editor.grid(row=4, column=1, sticky="we", pady=3)
         _set_edit_paths(fav.shortcut_paths())
 
         err_lbl = tk.Label(body, text="", bg=Win95_COLORS["chrome"],
                            fg="#c00000", font=Win95_FONT, anchor="w")
-        err_lbl.grid(row=4, column=0, columnspan=2, sticky="we", pady=(4, 0))
+        err_lbl.grid(row=5, column=0, columnspan=2, sticky="we", pady=(4, 0))
 
         def _commit() -> None:
             try:
@@ -355,6 +392,7 @@ def build_favorites_tab(
                 port=port,
                 path=path_e.get().strip() or "/",
                 paths=get_edit_paths(),
+                protocol=protocol_e.get(),
             )
             items: list[Favorite] = []
             replaced = False
@@ -373,7 +411,7 @@ def build_favorites_tab(
                 _render()
 
         btns = tk.Frame(body, bg=Win95_COLORS["chrome"])
-        btns.grid(row=5, column=0, columnspan=2, sticky="e", pady=(6, 0))
+        btns.grid(row=6, column=0, columnspan=2, sticky="e", pady=(6, 0))
         tk.Button(btns, text="保存修改", command=_commit,
                   **_btn_style()).pack(side=tk.LEFT, padx=2)
         tk.Button(btns, text="取消", command=win.destroy,
@@ -436,7 +474,7 @@ def build_favorites_tab(
             ).pack(fill=tk.X)
             tk.Label(
                 text_box,
-                text=f"地址: {fav.address()}    默认路径: {fav.path}",
+                text=f"地址: {fav.address()}    默认路径: {fav.path}    协议: {fav.protocol}",
                 bg="#ffffff",
                 fg="#000080",
                 font=Win95_FONT,
