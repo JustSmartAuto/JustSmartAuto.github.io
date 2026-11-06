@@ -18,7 +18,10 @@
 - **托盘后台运行**：基于 Tkinter + tkinterdnd2（`TkDND2` 扩展）创建系统托盘图标，
   代理在工作期间常驻后台，不弹出多余的窗口干扰生产现场。
 - **配置持久化**：将可上网工控机（网关）的 IP 与代理端口写入本地配置文件，
-  下次启动自动读取，无需重复输入。
+  下次启动自动读取，无需重复输入。配置目录默认
+  `D:/JustSmart/InternetProxyPy`（不存在时自动创建）；该分区/路径不可用时
+  回退到 `%APPDATA%/InternetProxyPy`。注意目录显示为
+  `D:\JustSmart\InternetProxyPy`（Windows 反斜杠）。
 - **Windows 95 风格界面**：后台日志输出与设置界面采用
   [02-windows-95.css](assets/02-windows-95.css) 的设计令牌（`--bg`、`--chrome`、
   `--title` 等），经典灰石窗口风格。
@@ -42,8 +45,10 @@
   （默认 **10082**），将收到的请求转发到真实外网，并把应答原路返回。
 - **客户端（其余工控机）**：解析配置中的网关 IP 与端口，把本机需要外联的 TCP
   连接 / UDP 报文封装后发送给服务端处理。
-- **配置文件**：首次运行写入网关 IP 与代理端口，后续直接复用；改动设置文件随即
-  生效，代理的角色（服务端 / 客户端）也持久化在同一配置文件中。
+- **配置文件**：目录解析顺序──默认 `D:/JustSmart/InternetProxyPy`（自动创建）
+  → 失败时回退 %APPDATA%/InternetProxyPy。首次运行写入网关 IP 与代理端口
+  （默认 **10082**），后续直接复用；改动设置文件随即生效，代理的角色
+  （服务端 / 客户端）也持久化在同一配置文件中。
 
 ## 界面
 
@@ -79,8 +84,14 @@ InternetProxyPy/
 │   ├── cat.ico                 # 托盘 / 窗口图标
 │   ├── cat.jpg / clash.jpg     # 图标源图（圆角裁切生成 ico）
 │   └── 02-windows-95.css       # Win95 设计令牌（界面风格来源）
+├── build_exe.py                # PyInstaller 单文件打包
+├── pyproject.toml              # 依赖（tkinterdnd2）与入口脚本
 ├── README.md
 └── index.html                  # 项目主页（GitHub Pages，internet-proxy 分支）
+
+配置目录（运行时）:
+D:/JustSmart/InternetProxyPy/          # 默认，自动创建
+%APPDATA%/InternetProxyPy/            # 上述路径不可用时的回退
 ```
 
 ## 许可证

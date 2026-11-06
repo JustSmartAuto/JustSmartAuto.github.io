@@ -165,7 +165,7 @@
             <li><strong>默认端口 10082</strong> —— SOCKS5 等代理端口默认高端口 <code>10082</code>。</li>
             <li><strong>免认证</strong> —— 封闭局域网内连接即用，不设账号密码。</li>
             <li><strong>静默启动 + 托盘后台运行</strong> —— 启动时立即静默最小化到托盘，用户无感知；Tkinter + TkDND2 创建托盘图标，代理常驻后台。</li>
-            <li><strong>配置持久化</strong> —— 网关工控机 IP 与代理端口写入配置文件，重启自动生效。</li>
+            <li><strong>配置持久化</strong> —— 网关工控机 IP 与代理端口写入配置文件，重启自动生效。目录默认 <code>D:/JustSmart/InternetProxyPy</code>（自动创建），不可用时回退 <code>%APPDATA%/InternetProxyPy</code>。</li>
             <li><strong>Windows 95 风格界面</strong> —— 日志输出与设置界面采用 Win95 设计令牌（02-windows-95.css）。</li>
             <li><strong>图标</strong> —— 托盘与窗口使用圆角处理的 cat.ico。</li>
           </ul>
@@ -205,6 +205,7 @@ python client.py   # 首次运行后在设置里填写网关 IP + 端口(默认 
         <span>服务端：0.0.0.0:10082 (TCP/UDP/SOCKS5)</span>
         <span>客户端：网关 192.168.1.10:10082</span>
         <span>托盘：静默启动 · cat.ico</span>
+        <span>配置：D:/JustSmart/InternetProxyPy → %APPDATA%</span>
       </div>
     </div>
 
