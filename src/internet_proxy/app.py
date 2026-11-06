@@ -1,0 +1,111 @@
+"""进程装配：配置 → 代理线程（服务端或客户端）→ 托盘 + Win95 界面。
+
+启动即静默：托盘先行的同时窗口全程 withdraw，用户无感知；代理在后台线程
+常驻运行，退出仅能通过托盘菜单完成。
+"""
+
+from __future__ import annotations
+
+import logging
+import threading
+
+from .client import Client
+from .config import Config
+from .server import serve
+
+log = logging.getLogger("internet_proxy.app")
+
+
+class Controller:
+    """代理线程生命周期管理：按角色启动 / 停止 / 热切换."""
+
+    def __init__(self, cfg: Config, on_log=None) -> None:
+        self.cfg = cfg
+        self.on_log = on_log or (lambda text: None)
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+        self.start()
+
+    def start(self) -> None:
+        cfg, stop = self.cfg, threading.Event()
+        self._stop = stop
+
+        def run() -> None:
+            if cfg.role == "server":
+                self.on_log(f"[server] listening TCP/UDP 0.0.0.0:{cfg.port}")
+                try:
+                    serve(port=cfg.port)
+                except OSError as exc:
+                    self.on_log(f"[server] 启动失败: {exc}")
+            else:
+                client = Client(cfg)
+                self.on_log(f"[client] SOCKS5 0.0.0.0:{cfg.port} → {cfg.gateway}:{cfg.port}")
+                try:
+                    client.start()
+                except OSError as exc:
+                    self.on_log(f"[client] 启动失败: {exc}")
+
+        self._thread = threading.Thread(target=run, name="proxy-engine", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread and self._thread.is_alive():
+            # 服务端 serve() 是阻塞 accept；转换为终止 socket 才能退出
+            log.debug("代理线程待重载重置（daemon 线程可直接丢弃）")
+        self._thread = None
+
+    def reload(self, cfg: Config) -> None:
+        """保存配置后热切换：重建代理引擎线程."""
+        self.stop()
+        self.cfg = cfg
+        self.start()
+
+
+def run_gui(cfg: Config) -> None:  # pragma: no cover - GUI 入口
+    """托盘 + 界面 + 代理引擎 三件套；阻塞到 Tk mainloop 结束."""
+    from .config import CONFIG_PATH
+    from .tray import TrayIcon
+    from .ui import Win95UI
+
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
+    )
+    log.info("配置文件: %s", CONFIG_PATH)
+
+    ui_holder: dict[str, Win95UI] = {}
+    tray_holder: dict[str, TrayIcon] = {}
+
+    def exit_app() -> None:
+        controller.stop()
+        tray = tray_holder.get("tray")
+        if tray:
+            tray.stop()
+        ui = ui_holder.get("ui")
+        if ui:
+            ui.root.withdraw()
+            ui.root.quit()
+
+    def show() -> None:
+        ui_holder["ui"].show()
+
+    def build() -> None:
+        ui = Win95UI(cfg, controller)
+        ui_holder["ui"] = ui
+        controller.on_log = lambda text: (ui.append_log(text), log.info(text))
+        tray = TrayIcon(
+            tk=ui.root,
+            cfg=cfg,
+            on_show=show,
+            on_toggle=lambda: controller.reload(Config.load()),
+            on_exit=exit_app,
+        )
+        tray_holder["tray"] = tray
+        tray.start()
+
+    controller = Controller(cfg, on_log=lambda text: log.info(text))
+    build()
+    ui_holder["ui"].run()
+
+    # mainloop 结束（托盘退出）后的收尾
+    controller.stop()

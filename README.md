@@ -63,15 +63,22 @@
 ## 快速开始
 
 ```bash
-# 依赖（Python 3.x）
-pip install tk tkinterdnd2
+# 依赖（Python 3.x）；tkinter 为标准库
+pip install tkinterdnd2
 
-# 在接有互联网的工控机上（服务端，先启动，记下它的局域网 IP）
-python server.py               # 或统一入口按角色选择
+# 托盘后台（GUI）方式运行——启动即静默到托盘
+python src/internet_proxy/cli.py            # 或安装后运行 internet-proxy
 
-# 在其余工控机上（客户端）
-python client.py               # 首次运行后在设置里填写网关 IP + 端口
+# 无界面前台运行（调试 / 服务方式）
+python src/internet_proxy/cli.py --role server --headless      # 服务端，监听 10082
+python src/internet_proxy/cli.py --role client --headless      # 客户端，SOCKS5 10082
 ```
+
+- 服务端（可上网工控机）监听 `0.0.0.0:10082`（TCP 隧道 + UDP 地址头）。
+- 客户端在本机提供标准 **SOCKS5（10082）**：应用把代理指向客户端 IP:10082，
+  其 CONNECT 经 TCP 隧道送网关，UDP 报文以地址头前缀经网关 UDP 通道转发。
+- 配置文件持久化在 `D:/JustSmart/InternetProxyPy/config.json`
+  （回退规则见特性一节）。
 
 把局域网内其它设备的默认网关 / DNS 指向运行客户端的机器（或在客户端机器上开启
 本地转发），即可让它们共享服务端那张唯一的外网网卡。
