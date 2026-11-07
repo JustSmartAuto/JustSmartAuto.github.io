@@ -17,6 +17,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import colorchooser, filedialog, messagebox, ttk
@@ -24,6 +25,7 @@ from tkinter import colorchooser, filedialog, messagebox, ttk
 from PIL import Image, ImageTk
 
 from . import __version__, theme
+from .batch import collect_images, make_heatmap, train_template
 from .odiff import DiffOptions, DiffResult, run_diff
 
 # —— tkinterdnd2（可选：DLL 位数不匹配时静默降级，无拖拽但功能正常）——
@@ -115,6 +117,15 @@ def _safe_basename(path: Path) -> str:
     return name
 
 
+def _batch_filename(prefix: str, folder: Path, stamp: str) -> str:
+    """批量分析输出文件名：prefix_文件夹名_时间戳.png。"""
+    name = folder.name or "images"
+    for bad in '<>:"/\\|?*':
+        name = name.replace(bad, "_")
+    name = name.strip().strip(".") or "images"
+    return f"{prefix}_{name[:60]}_{stamp}.png"
+
+
 def _make_diff_filename(base: Path, compare: Path) -> str:
     """生成 Diff 输出文件名，考虑总长度（base + '_diff_' + compare + '.jpg'）。
 
@@ -155,6 +166,9 @@ class ImageDiffPyApp(TkinterDnD.Tk if _DND_OK else tk.Tk):
         self.base_path: Path | None = None
         self.compare_path: Path | None = None
         self.diff_result_path: Path | None = None
+        self.folder_path: Path | None = None
+        self._folder_images: list[Path] = []
+        self._template_path: Path | None = None
         self._result_dir: Path = result_dir()
         self._base_img: Image.Image | None = None
         self._compare_img: Image.Image | None = None
@@ -200,6 +214,7 @@ class ImageDiffPyApp(TkinterDnD.Tk if _DND_OK else tk.Tk):
         file_menu = tk.Menu(menubar, tearoff=0)
         file_menu.add_command(label="选择 Base 图像...", command=self._on_pick_base, accelerator="Ctrl+1")
         file_menu.add_command(label="选择 Compare 图像...", command=self._on_pick_compare, accelerator="Ctrl+2")
+        file_menu.add_command(label="选择图片文件夹...", command=self._on_pick_folder, accelerator="Ctrl+3")
         file_menu.add_separator()
         file_menu.add_command(label="保存 Diff 结果为...", command=self._on_save_diff)
         file_menu.add_separator()
@@ -213,6 +228,7 @@ class ImageDiffPyApp(TkinterDnD.Tk if _DND_OK else tk.Tk):
         self.config(menu=menubar)
         self.bind("<Control-1>", lambda _e: self._on_pick_base())
         self.bind("<Control-2>", lambda _e: self._on_pick_compare())
+        self.bind("<Control-3>", lambda _e: self._on_pick_folder())
 
     def _build_titlebar(self) -> None:
         bar, self.status_tag = theme.titlebar(
@@ -243,6 +259,21 @@ class ImageDiffPyApp(TkinterDnD.Tk if _DND_OK else tk.Tk):
         self.ent_compare = theme.field(row1)
         self.ent_compare.pack(side="left", fill="x", expand=True, padx=(6, 0), ipady=2)
         self.ent_compare.config(state="readonly")
+
+        # 文件夹入口：选择或直接拖入文件夹
+        row_folder = tk.Frame(tb, bg=theme.CHROME)
+        row_folder.pack(fill="x", padx=8, pady=(0, 4))
+
+        theme.win95_button(row_folder, "选择图片文件夹...", width=18,
+                           command=self._on_pick_folder).pack(side="left")
+        self.ent_folder = theme.field(row_folder)
+        self.ent_folder.pack(side="left", fill="x", expand=True, padx=(6, 6), ipady=2)
+        self.ent_folder.config(state="readonly")
+
+        self.lbl_folder_count = tk.Label(
+            row_folder, text="未选择（也可拖入文件夹）",
+            bg=theme.CHROME, font=theme.FONT)
+        self.lbl_folder_count.pack(side="left")
 
         # 第二行：参数
         row2 = tk.Frame(tb, bg=theme.CHROME)
@@ -283,6 +314,18 @@ class ImageDiffPyApp(TkinterDnD.Tk if _DND_OK else tk.Tk):
         self.btn_run = theme.win95_button(row2, "▶ 开始 Diff", width=14,
                                           command=self._on_run_diff)
         self.btn_run.pack(side="right")
+
+        # 第三行：批量分析（选择文件夹后才显示）
+        self.batch_bar = tk.Frame(tb, bg=theme.CHROME)
+        self.btn_pat = theme.win95_button(
+            self.batch_bar, "图案检验", width=14, command=self._on_pat_inspect)
+        self.btn_pat.pack(side="left")
+        self.btn_heat = theme.win95_button(
+            self.batch_bar, "热力图", width=12, command=self._on_heatmap)
+        self.btn_heat.pack(side="left", padx=(6, 12))
+        self.lbl_batch = tk.Label(
+            self.batch_bar, text="", bg=theme.CHROME, font=theme.FONT, anchor="w")
+        self.lbl_batch.pack(side="left", fill="x", expand=True)
 
     # —— 三栏图像区 ——————————————————————————————————————————
 
@@ -351,7 +394,14 @@ class ImageDiffPyApp(TkinterDnD.Tk if _DND_OK else tk.Tk):
             paths = self.tk.splitlist(raw)
         except Exception:  # noqa: BLE001
             paths = raw.split()
-        paths = [p for p in paths if Path(p).suffix.lower() in SUPPORTED_EXTS]
+        # 拖入文件夹 → 作为批量分析目录
+        candidates = [Path(p) for p in paths]
+        for candidate in candidates:
+            if candidate.is_dir():
+                self._set_folder(candidate)
+                return
+
+        paths = [p for p in candidates if p.suffix.lower() in SUPPORTED_EXTS]
         if not paths:
             return
 
@@ -465,6 +515,136 @@ class ImageDiffPyApp(TkinterDnD.Tk if _DND_OK else tk.Tk):
         ch = max(100, canvas.winfo_height() - 20)
         iw, ih = img.size
         return min(cw / iw, ch / ih) * 0.85
+
+    # —— 文件夹批量分析 ————————————————————————————————————
+
+    def _on_pick_folder(self) -> None:
+        folder = filedialog.askdirectory(parent=self, title="选择图片文件夹")
+        if folder:
+            self._set_folder(Path(folder))
+
+    def _set_folder(self, folder: Path) -> None:
+        if not folder.is_dir():
+            messagebox.showerror("打开失败", f"文件夹不存在:\n{folder}", parent=self)
+            return
+        images = collect_images(folder)
+        if not images:
+            messagebox.showinfo(
+                "提示",
+                "该文件夹内没有支持的图片（PNG / JPG / BMP / TIFF / WebP）。",
+                parent=self)
+            return
+
+        self.folder_path = folder
+        self._folder_images = images
+        self._template_path = None
+
+        self.ent_folder.config(state="normal")
+        self.ent_folder.delete(0, tk.END)
+        self.ent_folder.insert(0, str(folder))
+        self.ent_folder.config(state="readonly")
+        self.lbl_folder_count.config(text=f"{len(images)} 张图片")
+        self.lbl_batch.config(text=f"文件夹: {folder.name}（{len(images)} 张）")
+
+        if not self.batch_bar.winfo_manager():
+            self.batch_bar.pack(fill="x", padx=8, pady=(0, 8))
+
+        self.status_tag.config(text="文件夹就绪")
+        self.sb_left.config(text=f"图片文件夹: {folder}")
+        self.sb_mid.config(text=f"{len(images)} 张可分析")
+
+    def _on_pat_inspect(self) -> None:
+        self._run_batch("template")
+
+    def _on_heatmap(self) -> None:
+        self._run_batch("heatmap")
+
+    def _run_batch(self, kind: str) -> None:
+        if not self._folder_images:
+            messagebox.showinfo(
+                "提示", "请先选择图片文件夹（或把文件夹拖入窗口）", parent=self)
+            return
+        if len(self._folder_images) < 2:
+            messagebox.showinfo("提示", "至少需要 2 张图片才能分析", parent=self)
+            return
+
+        folder = self.folder_path or self._folder_images[0].parent
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        label = "图案检验" if kind == "template" else "热力图"
+        self._set_batch_busy(True)
+        self.status_tag.config(text=f"● {label}")
+        self.update_idletasks()
+
+        try:
+            if kind == "template":
+                out = self._result_dir / _batch_filename("template", folder, stamp)
+                result = train_template(
+                    self._folder_images, out, progress=self._batch_progress)
+                self._template_path = result.path
+                summary = (
+                    f"模板: {result.image_count} 张 | 平均缺陷率 "
+                    f"{result.mean_defect_ratio * 100:.2f}% | 最大 "
+                    f"{result.max_defect_ratio * 100:.2f}% | σ均值 {result.mean_std:.1f}"
+                )
+                self._show_batch_result(result.path, summary)
+                self.status_tag.config(text="模板完成")
+            else:
+                # 热力图以模板为基准；没有模板时先训练一张
+                if self._template_path is None or not self._template_path.is_file():
+                    template_out = self._result_dir / _batch_filename(
+                        "template", folder, stamp)
+                    template = train_template(
+                        self._folder_images, template_out,
+                        progress=self._batch_progress)
+                    self._template_path = template.path
+                out = self._result_dir / _batch_filename("heatmap", folder, stamp)
+                result = make_heatmap(
+                    self._folder_images, self._template_path, out,
+                    threshold=float(self.var_threshold.get()),
+                    antialiasing=bool(self.var_aa.get()),
+                    progress=self._batch_progress)
+                summary = (
+                    f"热力图: {result.image_count} 张 | 最大概率 "
+                    f"{result.max_probability * 100:.1f}% | 有差异像素 "
+                    f"{result.active_ratio * 100:.2f}% | ≥50% 像素 "
+                    f"{result.strong_ratio * 100:.2f}%"
+                )
+                self._show_batch_result(result.path, summary)
+                self.status_tag.config(text="热力图完成")
+        except Exception as exc:  # noqa: BLE001
+            self.status_tag.config(text="出错")
+            self.sb_mid.config(text=f"{label}失败")
+            messagebox.showerror(f"{label}失败", str(exc), parent=self)
+        finally:
+            self._set_batch_busy(False)
+
+    def _set_batch_busy(self, busy: bool) -> None:
+        state = "disabled" if busy else "normal"
+        for btn in (self.btn_pat, self.btn_heat, self.btn_run):
+            btn.config(state=state)
+        text = "⏳ 分析中..." if busy else None
+        self.btn_pat.config(text=text or "图案检验")
+        self.btn_heat.config(text=text or "热力图")
+
+    def _batch_progress(self, phase: str, index: int, total: int, path: Path) -> None:
+        phase_name = {"train": "模板训练", "inspect": "缺陷统计", "diff": "差异统计"}.get(
+            phase, phase)
+        self.sb_mid.config(text=f"{phase_name} {index + 1}/{total}")
+        self.status_tag.config(text=f"● {phase_name} {index + 1}/{total}")
+        self.update_idletasks()
+
+    def _show_batch_result(self, path: Path, summary: str) -> None:
+        try:
+            img = Image.open(path)
+            img.load()
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"无法读取结果图 {path.name}: {exc}") from exc
+        self.diff_result_path = path
+        self._img_2 = img
+        self._scale_2 = self._fit_scale(2, img)
+        self._show_image(2, img, self._scale_2)
+        self.sb_mid.config(text=summary)
+        self.sb_left.config(text=f"已保存: {path}")
 
     # —— 参数交互 ————————————————————————————————————————————
 
@@ -634,8 +814,10 @@ class ImageDiffPyApp(TkinterDnD.Tk if _DND_OK else tk.Tk):
             "快捷键:\n"
             "  Ctrl+1  选 Base 图像\n"
             "  Ctrl+2  选 Compare 图像\n"
+            "  Ctrl+3  选择图片文件夹\n"
             "  Ctrl+滚轮  缩放当前面板\n"
-            "  左键拖拽  平移图像",
+            "  左键拖拽  平移图像\n\n"
+            "文件夹：拖入或选择后可运行「图案检验」「热力图」",
             parent=self)
 
     # —— 运行 ————————————————————————————————————————————————

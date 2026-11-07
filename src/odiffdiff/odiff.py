@@ -241,12 +241,20 @@ def run_diff(
             stage = None  # 暂存失败则按原路径直接调用
 
     if stage is not None:
-        # 用相对路径 + cwd 调用，argv 里完全不出现中文
+        # 用相对路径 + cwd 调用，argv 里完全不出现中文；
+        # 未暂存的 ASCII 输入（如纯 ASCII 的 PNG 模板）必须用绝对路径，
+        # 否则会被误当成暂存目录内的文件名。
+        def _arg(p: Path) -> str:
+            try:
+                return p.relative_to(stage.dir).as_posix()
+            except ValueError:
+                return str(p)
+
         cmd = [
             str(exe),
-            stage.base.name,
-            stage.compare.name,
-            stage.out.name,
+            _arg(stage.base),
+            _arg(stage.compare),
+            _arg(stage.out),
             *opts.build_args(),
             "--parsable-stdout",
         ]
