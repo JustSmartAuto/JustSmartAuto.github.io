@@ -21,7 +21,7 @@ from tkinter import ttk
 
 from tkinterdnd2 import TkinterDnD
 
-from . import autostart, installer
+from . import autostart, discovery, installer
 from .config import CONFIG_PATH, Config
 from .vmess import normalize_uuid
 
@@ -234,9 +234,13 @@ class Win95UI:
 
         tk.Label(
             proxy,
-            text="服务端 UUID 见「安装器」页；启用后网关 IP 不再参与转发。",
+            text="只填服务端 IP 即可：保存时自动从服务端发现页取回 UUID 等参数。",
             bg=CHROME, fg=CHROME_DARK, font=FONT, justify="left",
-        ).grid(row=5, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        tk.Button(
+            proxy, text="从服务端获取配置", bg=CHROME, font=FONT,
+            command=self._fetch_v2ray,
+        ).grid(row=5, column=3, sticky="e", pady=(4, 0))
 
     def _build_installer_tab(self, parent: tk.Frame) -> None:
         # —— 安装器：nginx / v2ray 状态与操作 ——
@@ -399,6 +403,41 @@ class Win95UI:
             self.log.configure(state="disabled")
         self.root.after(0, write)
 
+    def _apply_fetched(self, data: dict | None, host: str) -> bool:
+        """把发现页返回的配置填进设置表单；失败返回 False."""
+        if not data:
+            self.append_log(
+                f"获取配置失败: 无法访问 http://{host}:{discovery.DISCOVERY_PORT}/"
+                "（确认服务端已运行本软件、角色为服务端、已安装 v2ray，且 18081 已放行）"
+            )
+            return False
+        vmess = data["vmess"]
+        self.v2ray_enabled.set(True)
+        self.v2ray_port.set(str(vmess.get("port") or self.v2ray_port.get()))
+        self.v2ray_uuid.set(str(vmess["uuid"]))
+        self.v2ray_network.set("WS" if vmess.get("network") == "ws" else "TCP")
+        self.v2ray_path.set(str(vmess.get("path") or "/vmess"))
+        self.v2ray_tls.set(bool(vmess.get("tls")))
+        self.append_log(
+            f"已获取服务端配置: VMess {host}:{self.v2ray_port.get()} "
+            f"UUID {self.v2ray_uuid.get()}（保存后生效）"
+        )
+        return True
+
+    def _fetch_v2ray(self) -> None:
+        """「从服务端获取配置」按钮：后台请求发现页，避免卡住界面."""
+        host = self.v2ray_server.get().strip()
+        if not host:
+            self.append_log("请先填写 v2ray 服务端 IP")
+            return
+        self.append_log(f"正在从 http://{host}:{discovery.DISCOVERY_PORT}/ 获取配置 ...")
+
+        def work() -> None:
+            data = discovery.fetch(host)
+            self.root.after(0, lambda: self._apply_fetched(data, host))
+
+        threading.Thread(target=work, name="v2ray-discover", daemon=True).start()
+
     def _save(self) -> None:
         role = "server" if self.role.get() == "服务端" else "client"
         try:
@@ -409,6 +448,28 @@ class Win95UI:
         if not (PORT_MIN <= port <= PORT_MAX):
             self.append_log(f"保存失败: 端口须在 {PORT_MIN}-{PORT_MAX} 之间（高端口）")
             return
+        server = self.v2ray_server.get().strip()
+        uid = self.v2ray_uuid.get().strip()
+        if self.v2ray_enabled.get():
+            if not server:
+                self.append_log("保存失败: 启用 VMess 时需填写 v2ray 服务端地址")
+                return
+            if normalize_uuid(uid) is None:
+                # 客户端只填 IP：自动从服务端发现页补全 UUID 等参数
+                self.append_log(
+                    f"正在从 http://{server}:{discovery.DISCOVERY_PORT}/ 获取服务端配置 ..."
+                )
+                if self._apply_fetched(discovery.fetch(server), server):
+                    uid = self.v2ray_uuid.get().strip()
+            normalized = normalize_uuid(uid)
+            if normalized is None:
+                self.append_log(
+                    "保存失败: UUID 无效，且未能从服务端获取配置"
+                    "（确认服务端已运行且为服务端角色，或点「从服务端获取配置」重试）"
+                )
+                return
+            uid = normalized
+
         try:
             v2ray_port = int(self.v2ray_port.get())
         except ValueError:
@@ -417,18 +478,6 @@ class Win95UI:
         if not (1 <= v2ray_port <= 65535):
             self.append_log("保存失败: v2ray 端口必须是 1-65535 的整数")
             return
-
-        server = self.v2ray_server.get().strip()
-        uid = self.v2ray_uuid.get().strip()
-        if self.v2ray_enabled.get():
-            if not server:
-                self.append_log("保存失败: 启用 VMess 时需填写 v2ray 服务端地址")
-                return
-            normalized = normalize_uuid(uid)
-            if normalized is None:
-                self.append_log("保存失败: VMess UUID 无效（形如 8 位-4 位-4 位-4 位-12 位）")
-                return
-            uid = normalized
 
         path = self.v2ray_path.get().strip() or "/vmess"
         if not path.startswith("/"):

@@ -43,11 +43,17 @@ class Controller:
             self._set_running(True)
             try:
                 if cfg.role == "server":
+                    from .discovery import DiscoveryServer
+
                     self.on_log(f"[server] listening TCP/UDP 0.0.0.0:{cfg.port}")
+                    discovery = DiscoveryServer()
+                    discovery.start(self.on_log)
                     try:
                         serve(port=cfg.port, stop=stop)
                     except OSError as exc:
                         self.on_log(f"[server] 启动失败: {exc}")
+                    finally:
+                        discovery.stop()
                     return
 
                 tun = None

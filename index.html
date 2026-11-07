@@ -173,6 +173,7 @@
             <li><strong>静默启动 + 托盘后台运行</strong> —— 启动时立即静默最小化到托盘，用户无感知；Tkinter + TkDND2 创建托盘图标，代理常驻后台。</li>
             <li><strong>开机自启（可选）</strong> —— 设置页勾选后注册计划任务（最高权限，登录不弹 UAC），写入 <code>config.json</code> 的 <code>autostart</code>；登录后随程序自动拉起已安装的 nginx / v2ray 服务。非管理员环境下退回注册表启动项。</li>
             <li><strong>客户端 VMess 上行（可选）</strong> —— 客户端可改由内嵌 v2ray 以 VMess（TCP / WS，可加 TLS）连接 v2ray 服务端，复用成熟加密与传输；本机 SOCKS5 与透明代理端口不变。</li>
+            <li><strong>服务端发现页</strong> —— 服务端角色启动后提供只读网页 <code>http://&lt;服务端IP&gt;:18081/</code>（人类可读）与 <code>/v2ray.json</code>（机器可读）；客户端只填服务端 IP、选好模式，保存时自动取回 UUID、端口、传输等参数，无需手抄。</li>
             <li><strong>单实例保护</strong> —— 同一角色重复启动会提示并退出，避免多实例抢网卡、耗尽系统套接字。</li>
             <li><strong>配置持久化</strong> —— 网关工控机 IP 与代理端口写入配置文件，重启自动生效。目录默认 <code>D:/JustSmart/InternetProxyPy</code>（自动创建），不可用时回退 <code>%APPDATA%/InternetProxyPy</code>。</li>
             <li><strong>Windows 95 风格界面</strong> —— 日志 / 设置 / 安装器三个标签页，采用 Win95 设计令牌（02-windows-95.css）。</li>
@@ -235,27 +236,114 @@ python main.py --role client --headless      # 客户端，SOCKS5 10082</pre>
         </div>
 
         <div class="fieldset">
-          <legend>客户端 VMess 上行（连接 v2ray 服务端）</legend>
+          <legend>v2ray 模式教程（VMess 服务端 / 客户端）</legend>
           <p>
-            设置页新增「通过 v2ray 服务端（VMess）代理互联网」。启用后客户端不再走自研隧道，
-            而是由内嵌 v2ray 提供本机 SOCKS5 入站、经 VMess 出站连到服务端：
+            软件内置两条代理通道，按现场二选一：<strong>内置隧道</strong>（自研 TCP/UDP、免认证，默认）
+            与 <strong>v2ray 模式</strong>（内嵌 v2ray 以 VMess 连接服务端，复用成熟的加密与传输伪装）。
           </p>
-          <div class="diagram">
-应用 / tun2socks / 局域网设备 ──▶ 本机 SOCKS5 0.0.0.0:10082
-    ──▶ VMess（TCP 或 WS，可加 TLS）──▶ v2ray 服务端 ──▶ 互联网</div>
           <table>
-            <tr><th>配置项</th><th>说明</th></tr>
-            <tr><td>服务端 / 端口</td><td>v2ray 服务端地址与 VMess 入站端口，本软件安装器默认 <code>11081</code></td></tr>
-            <tr><td>UUID</td><td>与服务端 <code>clients[].id</code> 一致；可在「安装器」页「复制 UUID」</td></tr>
-            <tr><td>传输 / WS 路径</td><td><code>TCP</code>（默认）或 <code>WS</code>，WS 路径默认 <code>/vmess</code></td></tr>
-            <tr><td>TLS</td><td>WS 常配 TLS，勾选后 SNI 取服务端地址</td></tr>
+            <tr><th>通道</th><th>客户端 → 服务端</th><th>适用</th></tr>
+            <tr><td>内置隧道（默认）</td><td>自研 TCP/UDP 协议，免认证</td><td>封闭局域网、追求零配置</td></tr>
+            <tr><td><strong>v2ray 模式</strong></td><td>内嵌 v2ray 以 <strong>VMess</strong> 连接 v2ray 服务端</td><td>需要成熟加密 / 传输伪装（WS、TLS）</td></tr>
           </table>
-          <ul>
-            <li>启用后网关 IP 不再参与转发；规则模式私网直连，全局模式全部走 VMess；</li>
-            <li>客户端配置由程序每次启动生成到 <code>v2ray/client.json</code>；</li>
-            <li>v2ray 未安装、地址/UUID 缺失或核心启动失败时，自动回退内置隧道并写日志；</li>
-            <li>透明代理为服务端 IP 添加 /32 直连路由，避免 VMess 连接被自己的虚拟网卡捕获。</li>
-          </ul>
+          <div class="diagram">
+工控机 B（客户端，v2ray 模式）                    工控机 A（服务端 + v2ray 服务端）
+浏览器 / PLC 软件 ─┐
+                  ├─▶ 本机 SOCKS5 0.0.0.0:10082
+tun2socks（透明代理）┘        │
+                              └── VMess(TCP/WS/TLS) ──▶ 0.0.0.0:11081 ──▶ freedom ──▶ 互联网
+局域网其它设备 ──▶ B:10082（SOCKS5，免认证）</div>
+          <p>
+            启用后客户端<strong>不再连接本软件的 10082 服务端</strong>，网关 IP 字段不参与转发；
+            本机 SOCKS5 仍为 10082，透明代理与局域网其它设备的使用方式完全不变。
+          </p>
+          <p>
+            配好服务端后，客户端<strong>只填服务端 IP、选好代理模式即可</strong>：服务端会提供一个只读
+            发现页 <code>http://&lt;服务端IP&gt;:18081/</code>，客户端保存时自动取回 UUID、端口、传输等参数，
+            不用再手工抄写 UUID。
+          </p>
+
+          <h2>一、服务端（连了互联网的那台工控机）</h2>
+          <ol>
+            <li><strong>选角色</strong>：设置页角色选「服务端」，端口保持 <code>10082</code>，点「保存」。服务端本身不需要开透明代理。</li>
+            <li><strong>安装 v2ray</strong>：打开「安装器」页。首次启动会自动弹 UAC 静默安装 nginx / v2ray；当时取消了 UAC 就点「一键安装/修复」（需管理员权限）。</li>
+            <li><strong>确认服务已启动</strong>：状态应显示 <code>nginx 已安装 运行中</code>、<code>v2ray 已安装 运行中</code>、<code>VMess 11081 运行中</code>；未运行点「启动服务」。</li>
+            <li><strong>确认发现页可用</strong>：服务端角色启动后会在 <code>0.0.0.0:18081</code> 起一个只读网页，在任意一台局域网机器上打开：
+              <ul>
+                <li><code>http://&lt;服务端IP&gt;:18081/</code> —— 人类可读，列出 VMess 参数与客户端操作步骤；</li>
+                <li><code>http://&lt;服务端IP&gt;:18081/v2ray.json</code> —— 机器可读，供客户端自动取参。</li>
+              </ul>
+              页面里的 UUID 与 <code>installer.json</code> 的 <code>vmess_uuid</code> 一致（也可在「安装器」页「复制 UUID」，但客户端已无需手抄）。
+            </li>
+            <li><strong>核对防火墙与监听</strong>：安装时已自动放行端口，发现页端口 18081 在服务端角色启动时按需放行，可复核：</li>
+          </ol>
+          <pre>netsh advfirewall firewall show rule name=InternetProxyPy-v2ray-VMess
+netsh advfirewall firewall show rule name=InternetProxyPy-discovery
+netstat -ano | findstr ":11081 :18081"    # 出现 LISTENING 即 VMess 入站与发现页就绪</pre>
+          <table>
+            <tr><th>端口</th><th>协议</th><th>用途</th></tr>
+            <tr><td><code>10082</code></td><td>TCP/UDP</td><td>内置隧道服务端（v2ray 模式可不使用）</td></tr>
+            <tr><td><code>11080</code></td><td>TCP/UDP</td><td>v2ray SOCKS5（<code>justsmart</code> / <code>justsmart</code>），浏览器等可直连</td></tr>
+            <tr><td><code>11081</code></td><td>TCP</td><td>v2ray <strong>VMess 入站</strong>，供本软件客户端连接</td></tr>
+            <tr><td><code>18081</code></td><td>TCP</td><td>服务端<strong>发现页</strong> <code>/</code> 与 <code>/v2ray.json</code>（服务端角色运行时开启）</td></tr>
+            <tr><td><code>18080</code></td><td>TCP</td><td>nginx 静态站点，<code>/status</code> 健康检查</td></tr>
+          </table>
+          <p>
+            用第三方 v2ray 服务端时：加一个 vmess 入站，<code>clients[].id</code> 填 UUID、
+            <code>alterId</code> 为 <code>0</code>、<code>security</code> 用 <code>auto</code>，端口与客户端一致即可；
+            这种情况没有发现页，客户端需手工填写 UUID 等参数。
+          </p>
+
+          <h2>二、客户端（没有外网的其它工控机）</h2>
+          <ol>
+            <li><strong>启用</strong>：设置页勾选「通过 v2ray 服务端（VMess）代理互联网」。</li>
+            <li><strong>只填服务端 IP，选好模式</strong>：「服务端」填服务端 IP（或域名）；「代理模式」选
+              <strong>规则代理</strong>（局域网设备直连，推荐）或 <strong>全局代理</strong>（全部走 VMess）。
+              UUID、端口、传输等保持空白即可。</li>
+            <li><strong>保存即自动取参</strong>：点「保存」时程序访问 <code>http://&lt;IP&gt;:18081/v2ray.json</code>，
+              自动填入 VMess 端口、UUID、传输、WS 路径、TLS，然后重启代理引擎。日志页出现：</li>
+          </ol>
+          <pre>正在从 http://192.168.1.10:18081/ 获取服务端配置 ...
+已获取服务端配置: VMess 192.168.1.10:11081 UUID 3f2b6c1e-…（保存后生效）
+VMess 上行: 192.168.1.10:11081（TCP）→ 本机 SOCKS5 0.0.0.0:10082
+[tun] 系统透明代理已接管（虚拟网卡）</pre>
+          <p>也可先点「<strong>从服务端获取配置</strong>」按钮，确认参数无误后再保存。</p>
+          <table>
+            <tr><th>字段</th><th>来源（自动获取的值，可手动覆盖）</th><th>默认</th></tr>
+            <tr><td>服务端</td><td>你填写的 IP / 域名</td><td><code>192.168.1.10</code></td></tr>
+            <tr><td>端口</td><td>发现页 <code>vmess.port</code></td><td><code>11081</code></td></tr>
+            <tr><td>UUID</td><td>发现页 <code>vmess.uuid</code></td><td><code>3f2b6c1e-…</code></td></tr>
+            <tr><td>传输 / WS 路径</td><td>发现页 <code>vmess.network</code> / <code>vmess.path</code></td><td><code>TCP</code> / <code>/vmess</code></td></tr>
+            <tr><td>TLS</td><td>发现页 <code>vmess.tls</code></td><td>关闭</td></tr>
+          </table>
+          <ol start="4">
+            <li><strong>验证</strong>：直接开浏览器即可上网（透明代理已接管）；局域网其它设备把代理设为「客户端 IP:10082」（SOCKS5，免认证），必要时在客户端放行入站 10082。</li>
+            <li><strong>可选</strong>：勾选「开机自启(含 nginx/v2ray)」，注册最高权限计划任务，重启后自动拉起程序与已装的 nginx / v2ray。</li>
+          </ol>
+          <p>
+            客户端配置每次启动生成到 <code>v2ray/client.json</code>；规则模式下私网网段直连，
+            全局模式全部走 VMess；透明代理会为服务端 IP 加 <code>/32</code> 直连路由，
+            避免 VMess 连接被自己的虚拟网卡捕获。
+          </p>
+
+          <h2>三、互通排查</h2>
+          <table>
+            <tr><th>现象（日志页原文）</th><th>原因 / 处理</th></tr>
+            <tr><td><code>未安装 v2ray，无法使用 VMess 上行</code></td><td>客户端本机也需安装 v2ray：安装器页「一键安装/修复」</td></tr>
+            <tr><td><code>未填写 v2ray 服务端地址</code> / <code>VMess UUID 无效</code></td><td>字段缺失或格式不对，UUID 须为 8-4-4-4-12 位</td></tr>
+            <tr><td><code>获取配置失败: 无法访问 http://…:18081/</code></td><td>服务端未运行、角色不是「服务端」，或 18081 被防火墙 / 安全软件拦截；确认后重试，或手工填 UUID</td></tr>
+            <tr><td><code>保存失败: UUID 无效，且未能从服务端获取配置</code></td><td>同上；也可能是第三方 v2ray 服务端（无发现页），需手工填写 UUID</td></tr>
+            <tr><td><code>v2ray 退出（码 …）</code></td><td>看 <code>v2ray/client-error.log</code>；多为端口 / UUID / 传输不一致</td></tr>
+            <tr><td><code>v2ray 启动超时：本机 SOCKS5 10082 未就绪</code></td><td>本地端口被占用：换端口或结束残留进程</td></tr>
+            <tr><td><code>VMess 上行不可用，回退到内置隧道</code></td><td>上面任一失败都会回退；修正后重新保存</td></tr>
+            <tr><td>能 ping 通服务端但连不上</td><td>服务端 11081 未放行防火墙，或 v2ray 未启动</td></tr>
+            <tr><td>客户端能上网、局域网设备不能</td><td>局域网设备填「客户端 IP:10082」，并在客户端放行该端口</td></tr>
+            <tr><td>改完设置不生效</td><td>保存会自动重载；仍异常先「停止代理」再「开始代理」</td></tr>
+          </table>
+          <p class="footer-id">
+            安全提示：VMess 只保证传输加密与完整性，UUID 等同密码请勿外泄；软件面向可信局域网，
+            需暴露公网时建议 WS + TLS 并收敛端口。
+          </p>
         </div>
 
         <div class="fieldset">
@@ -307,7 +395,7 @@ python main.py --role client --headless      # 客户端，SOCKS5 10082</pre>
         <span>服务端：0.0.0.0:10082 (TCP/UDP/SOCKS5)</span>
         <span>客户端：网关 192.168.1.10:10082</span>
         <span>托盘：静默启动 · cat.ico</span>
-        <span>服务：v2ray 11080 / VMess 11081 · nginx 18080</span>
+        <span>服务：v2ray 11080 / VMess 11081 · 发现页 18081 · nginx 18080</span>
         <span>配置：D:/JustSmart/InternetProxyPy → %APPDATA%</span>
       </div>
     </div>

@@ -252,6 +252,21 @@ def _allow_port(port: int, protocol: str, name: str, log: Log) -> None:
         log(f"防火墙放行失败: {exc}")
 
 
+def allow_port(port: int, protocol: str, name: str, log: Log = print) -> None:
+    """按需放行端口：规则已存在则跳过，非管理员静默返回（避免每次启动都改防火墙）."""
+    if not is_admin():
+        return
+    try:
+        exists = subprocess.run(
+            ["netsh", "advfirewall", "firewall", "show", "rule", f"name={name}"],
+            capture_output=True, creationflags=CREATE_NO_WINDOW,
+        ).returncode == 0
+    except OSError:
+        exists = False
+    if not exists:
+        _allow_port(port, protocol, name, log)
+
+
 def install(log: Log = print, start: bool = True) -> None:
     """解压并配置 nginx / v2ray，随后启动（start=False 供测试）."""
     log(f"安装目录: {BASE_DIR}")

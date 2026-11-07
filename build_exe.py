@@ -273,6 +273,8 @@ def main() -> None:
             "internet_proxy.vmess",
             "--hidden-import",
             "internet_proxy.autostart",
+            "--hidden-import",
+            "internet_proxy.discovery",
         ]
     cmd.append(str(ROOT / "main.py"))
     print(" ".join(cmd))
