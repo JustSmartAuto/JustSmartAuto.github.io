@@ -22,6 +22,8 @@ from .relay import encode_address, pipe
 
 log = logging.getLogger("internet_proxy.client")
 
+UDP_FLOW_IDLE = 300  # 单目标上行 socket 空闲保留时长（秒）
+
 
 def is_lan_host(host: str) -> bool:
     """是否局域网/本机地址：规则代理模式下这些目标直连，不经网关."""
@@ -72,6 +74,23 @@ def _socks5_request(conn: socket.socket) -> tuple[int, str, int] | None:
     except ConnectionError:
         return None
     return cmd, host, port
+
+
+def _socks5_udp_header(host: str, port: int) -> bytes:
+    """构造 SOCKS5 UDP 应答头（RSV:2 FRAG:1 ATYP + 远端地址 + 端口）.
+
+    这里必须填真实远端地址：tun2socks 等客户端按它匹配 NAT 映射，
+    填 0.0.0.0:0 会被判为无法匹配而丢包。
+    """
+    raw_port = port.to_bytes(2, "big")
+    try:
+        return b"\x00\x00\x00\x01" + socket.inet_pton(socket.AF_INET, host) + raw_port
+    except OSError:
+        try:
+            return b"\x00\x00\x00\x04" + socket.inet_pton(socket.AF_INET6, host) + raw_port
+        except OSError:
+            raw = host.encode("idna") if host.isascii() else host.encode("utf-8")
+            return b"\x00\x00\x00\x03" + bytes((len(raw),)) + raw + raw_port
 
 
 def _deny(conn: socket.socket, code: int) -> None:
@@ -151,7 +170,13 @@ class Client:
             conn.close()
 
     def _udp_associate(self, conn: socket.socket, host: str, port: int) -> None:
-        """UDP ASSOCIATE：一个 relay socket 单泵线程，按来源分流两个方向."""
+        """UDP ASSOCIATE：每个目标独立上行 socket，应答回填真实源地址.
+
+        网关的回包不带目标信息，若所有目标共用一个上行 socket 就无法判断
+        应答属于哪个目标，只能把 SOCKS5 头写成 0.0.0.0:0；tun2socks 会把
+        这种包当作“无法匹配 NAT 映射”丢弃（日志 drop packet from 0.0.0.0:0）。
+        按目标拆 socket 后，回包所在的 socket 即代表目标，应答头可填真实地址。
+        """
         relay = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         relay.bind(("0.0.0.0", 0))
         local_port = relay.getsockname()[1]
@@ -170,23 +195,58 @@ class Client:
             return
         gw = (self.cfg.gateway, self.gw_port)
         app_addr: list[tuple] = []
+        flows: dict[tuple[str, int], socket.socket] = {}
+        flows_lock = threading.Lock()
+        closed = threading.Event()
         direct_holder: list[socket.socket] = []  # 规则模式下局域网目标的直连 UDP socket
 
-        def reply_to_app(data: bytes) -> None:
+        def reply_to_app(src_host: str, src_port: int, data: bytes) -> None:
             dst = app_addr[-1] if app_addr else None
             if dst is None:
                 return
-            head = b"\x00\x00\x00\x01" + socket.inet_aton("0.0.0.0") + b"\x00\x00"
-            relay.sendto(head + data, dst)
+            head = _socks5_udp_header(src_host, src_port)
+            try:
+                relay.sendto(head + data, dst)
+            except OSError:
+                pass
 
-        def direct_loop(sock: socket.socket) -> None:
-            """局域网直连应答：原样套 SOCKS5 头回送本机应用."""
-            while not self._stop.is_set():
+        def upstream_loop(sock: socket.socket, target: tuple[str, int]) -> None:
+            """网关应答：socket 专属某个目标，按该目标回填应答头."""
+            sock.settimeout(UDP_FLOW_IDLE)
+            while not self._stop.is_set() and not closed.is_set():
                 try:
                     data, _ = sock.recvfrom(65535)
-                    reply_to_app(data)
+                except (OSError, socket.timeout):
+                    break
+                reply_to_app(target[0], target[1], data)
+            with flows_lock:
+                if flows.get(target) is sock:
+                    flows.pop(target, None)
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+        def upstream_for(target: tuple[str, int]) -> socket.socket:
+            with flows_lock:
+                sock = flows.get(target)
+                if sock is None:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    sock.bind(("0.0.0.0", 0))
+                    flows[target] = sock
+                    threading.Thread(
+                        target=upstream_loop, args=(sock, target), daemon=True
+                    ).start()
+                return sock
+
+        def direct_loop(sock: socket.socket) -> None:
+            """局域网直连应答：recvfrom 的来源就是真实源，直接回填."""
+            while not self._stop.is_set() and not closed.is_set():
+                try:
+                    data, addr = sock.recvfrom(65535)
                 except OSError:
                     break
+                reply_to_app(addr[0], addr[1], data)
 
         def direct_sock() -> socket.socket:
             if not direct_holder:
@@ -197,21 +257,13 @@ class Client:
             return direct_holder[0]
 
         def relay_loop() -> None:
-            """单方向收发循环：同一 socket，来源 == 本机即 SOCKS5 报文，否则为网关应答."""
+            """应用 → 目标：规则模式下局域网目标直连，其余经网关上行 socket."""
             log.debug("UDP relay_loop 启动 relay_port=%s gw=%s", relay.getsockname()[1], gw)
-            while not self._stop.is_set():
+            while not self._stop.is_set() and not closed.is_set():
                 try:
                     data, addr = relay.recvfrom(65535)
                 except OSError:
                     break
-                if addr[:2] == gw:
-                    # 网关应答：套 SOCKS5 头（目标字段占位 0.0.0.0:0）回送本机
-                    try:
-                        reply_to_app(data)
-                    except OSError:
-                        break
-                    continue
-                # 本地应用 → 网关（规则模式下局域网目标直连）
                 parsed = _parse_socks5_udp(data)
                 if parsed is None:
                     continue
@@ -226,14 +278,23 @@ class Client:
                     ):
                         direct_sock().sendto(payload, (inner_host, inner_port))
                     else:
-                        relay.sendto(encode_address(inner_host, inner_port) + payload, gw)
+                        upstream_for((inner_host, inner_port)).sendto(
+                            encode_address(inner_host, inner_port) + payload, gw
+                        )
                 except OSError:
                     break
 
         threading.Thread(target=relay_loop, daemon=True).start()
         self._await_control_close(conn, relay)
-        for sock in direct_holder:
-            sock.close()
+        closed.set()
+        with flows_lock:
+            sockets = list(flows.values())
+            flows.clear()
+        for sock in sockets + direct_holder:
+            try:
+                sock.close()
+            except OSError:
+                pass
 
     def _await_control_close(self, conn: socket.socket, relay: socket.socket) -> None:
         """控制连接由客户端主动关闭时结束本次 ASSOCIATE 会话."""
