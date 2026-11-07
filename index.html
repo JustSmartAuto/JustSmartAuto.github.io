@@ -120,6 +120,10 @@
         white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
       }
       a { color: var(--title); }
+      table { border-collapse: collapse; width: 100%; font-size: 12px; margin: 6px 0; }
+      th, td { border: 1px solid var(--chrome-dark); padding: 4px 6px; text-align: left; vertical-align: top; }
+      th { background: var(--chrome); font-weight: bold; }
+      td { background: var(--chrome-lighter); }
       .center { text-align: center; }
       .footer-id { font-size: 11px; color: var(--chrome-dark); }
     </style>
@@ -173,14 +177,47 @@
 
         <div class="fieldset">
           <legend>快速开始</legend>
-          <pre># 依赖（Python 3.x）
-pip install tk tkinterdnd2
+          <pre># 依赖（Python 3.x）；tkinter 为标准库
+pip install tkinterdnd2
 
-# 在接有互联网的工控机上（服务端，静默最小化到托盘）
-python server.py                       # 监听 0.0.0.0:10082 (TCP/UDP)
+# 托盘后台（GUI）方式运行 —— 启动即静默到托盘，默认客户端模式
+python main.py            # 或安装后运行 internet-proxy
 
-# 在其余工控机上（客户端，静默最小化到托盘）
-python client.py   # 首次运行后在设置里填写网关 IP + 端口(默认 10082)</pre>
+# 无界面前台运行（调试 / 服务方式）
+python main.py --role server --headless      # 服务端，监听 10082
+python main.py --role client --headless      # 客户端，SOCKS5 10082</pre>
+          <p>
+            双击打包出的 exe 即以客户端模式启动；配置文件里没有网关 IP 时回退
+            <code>127.0.0.1</code>。配置持久化在
+            <code>D:/JustSmart/InternetProxyPy/config.json</code>（回退规则见特性）。
+          </p>
+        </div>
+
+        <div class="fieldset">
+          <legend>与 SSH 隧道（ssh -L/-D）对比</legend>
+          <table>
+            <tr><th>维度</th><th>InternetProxyPy</th><th>SSH 隧道</th></tr>
+            <tr><td>部署前提</td><td>网关机跑一个免认证代理进程</td><td>需 SSH 服务 + 账号/密钥</td></tr>
+            <tr><td>协议覆盖</td><td>TCP + UDP 双协议</td><td>-L 仅 TCP；-D 的 UDP 常不可用</td></tr>
+            <tr><td>多客户端</td><td>一个服务端并发服务整个局域网</td><td>每个客户端各自建立 SSH 连接</td></tr>
+            <tr><td>配置方式</td><td>图形界面/配置文件，双击即用</td><td>命令行参数，现场门槛高</td></tr>
+            <tr><td>常驻运行</td><td>托盘静默后台常驻</td><td>需 autossh 等保活</td></tr>
+            <tr><td>运维成本</td><td>零（复制 exe → 双击 → 填网关 IP）</td><td>密钥分发、账号权限、sshd 加固</td></tr>
+            <tr><td>安全边界</td><td>仅适合可信封闭局域网</td><td>加密 + 认证，适合不可信链路</td></tr>
+          </table>
+          <p>
+            <strong>一句话总结</strong>：SSH 隧道是通用远程工具顺带做转发；本软件是为
+            "封闭局域网批量工控机共享一个外网出口"专门做的零配置常驻代理。
+          </p>
+        </div>
+
+        <div class="fieldset">
+          <legend>版本号规则</legend>
+          <p>
+            版本号采用日期时间格式 <code>YY.M.D.H</code>（年.月.日.24 小时制小时，
+            均不补零），每次发布取发布时间生成。
+            当前版本：<code>26.11.7.12</code>（2026 年 11 月 7 日 12 时）。
+          </p>
         </div>
 
         <div class="fieldset">
