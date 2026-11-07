@@ -219,7 +219,11 @@ class Client:
                     app_addr.append(addr)
                 inner_host, inner_port, payload = parsed
                 try:
-                    if self.cfg.proxy_mode == "rule" and is_lan_host(inner_host):
+                    if (
+                        self.cfg.proxy_mode == "rule"
+                        and is_lan_host(inner_host)
+                        and inner_port != 53
+                    ):
                         direct_sock().sendto(payload, (inner_host, inner_port))
                     else:
                         relay.sendto(encode_address(inner_host, inner_port) + payload, gw)
