@@ -62,10 +62,12 @@ class Controller:
                             import time
 
                             time.sleep(0.8)  # 等本地 SOCKS5 就绪
-                            if not stop.is_set() and tun.start():
+                            if stop.is_set():
+                                return
+                            if tun.start():
                                 self.on_log("[tun] 系统透明代理已接管（虚拟网卡）")
                             else:
-                                self.on_log("[tun] 未启用，保持纯 SOCKS5 模式")
+                                self.on_log("[tun] 启动失败，已回退纯 SOCKS5（原因见上方日志）")
 
                         threading.Thread(target=start_tun, daemon=True).start()
                     try:
@@ -129,7 +131,15 @@ def run_gui(cfg: Config) -> None:  # pragma: no cover - GUI 入口
     def build() -> None:
         ui = Win95UI(cfg, controller)
         ui_holder["ui"] = ui
-        controller.on_log = lambda text: (ui.append_log(text), log.info(text))
+
+        class UILogHandler(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                ui.append_log(self.format(record))
+
+        handler = UILogHandler()
+        handler.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
+        logging.getLogger().addHandler(handler)
+        controller.on_log = ui.append_log
         controller.on_state = ui.set_status
         tray = TrayIcon(
             tk=ui.root,
