@@ -19,41 +19,60 @@ log = logging.getLogger("internet_proxy.app")
 class Controller:
     """代理线程生命周期管理：按角色启动 / 停止 / 热切换."""
 
-    def __init__(self, cfg: Config, on_log=None) -> None:
+    def __init__(self, cfg: Config, on_log=None, on_state=None) -> None:
         self.cfg = cfg
         self.on_log = on_log or (lambda text: None)
+        self.on_state = on_state or (lambda running: None)
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
+        self._client: Client | None = None
+        self.running = False
         self.start()
 
+    def _set_running(self, running: bool) -> None:
+        self.running = running
+        self.on_state(running)
+
     def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
         cfg, stop = self.cfg, threading.Event()
         self._stop = stop
 
         def run() -> None:
-            if cfg.role == "server":
-                self.on_log(f"[server] listening TCP/UDP 0.0.0.0:{cfg.port}")
-                try:
-                    serve(port=cfg.port)
-                except OSError as exc:
-                    self.on_log(f"[server] 启动失败: {exc}")
-            else:
-                client = Client(cfg)
-                self.on_log(f"[client] SOCKS5 0.0.0.0:{cfg.port} → {cfg.gateway}:{cfg.port}")
-                try:
-                    client.start()
-                except OSError as exc:
-                    self.on_log(f"[client] 启动失败: {exc}")
+            self._set_running(True)
+            try:
+                if cfg.role == "server":
+                    self.on_log(f"[server] listening TCP/UDP 0.0.0.0:{cfg.port}")
+                    try:
+                        serve(port=cfg.port, stop=stop)
+                    except OSError as exc:
+                        self.on_log(f"[server] 启动失败: {exc}")
+                else:
+                    client = Client(cfg)
+                    self._client = client
+                    self.on_log(f"[client] SOCKS5 0.0.0.0:{cfg.port} → {cfg.gateway}:{cfg.port}")
+                    try:
+                        client.start()
+                    except OSError as exc:
+                        self.on_log(f"[client] 启动失败: {exc}")
+                    finally:
+                        self._client = None
+            finally:
+                self._set_running(False)
 
         self._thread = threading.Thread(target=run, name="proxy-engine", daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
+        """停止代理：置停止标志并关闭监听 socket，使阻塞的 accept 立即退出."""
         self._stop.set()
-        if self._thread and self._thread.is_alive():
-            # 服务端 serve() 是阻塞 accept；转换为终止 socket 才能退出
-            log.debug("代理线程待重载重置（daemon 线程可直接丢弃）")
+        if self._client:
+            self._client.stop()
+        if self._thread:
+            self._thread.join(timeout=2)
         self._thread = None
+        self._set_running(False)
 
     def reload(self, cfg: Config) -> None:
         """保存配置后热切换：重建代理引擎线程."""
@@ -93,6 +112,7 @@ def run_gui(cfg: Config) -> None:  # pragma: no cover - GUI 入口
         ui = Win95UI(cfg, controller)
         ui_holder["ui"] = ui
         controller.on_log = lambda text: (ui.append_log(text), log.info(text))
+        controller.on_state = ui.set_status
         tray = TrayIcon(
             tk=ui.root,
             cfg=cfg,

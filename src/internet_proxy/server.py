@@ -102,14 +102,18 @@ class _UdpChannel:
                 pass
 
 
-def serve(host: str = "0.0.0.0", port: int = 10082) -> None:
-    """监听 TCP/UDP 端口（默认 10082），为局域网客户端代转发."""
+def serve(host: str = "0.0.0.0", port: int = 10082, stop: threading.Event | None = None) -> None:
+    """监听 TCP/UDP 端口（默认 10082），为局域网客户端代转发.
+
+    stop 置位时关闭监听 socket 并返回（已有会话线程为 daemon，随进程结束）。
+    """
     log.info("服务端启动 TCP/UDP %s:%s", host, port)
 
     tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     tcp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     tcp.bind((host, port))
     tcp.listen(64)
+    tcp.settimeout(0.5)
 
     udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     udp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -117,6 +121,16 @@ def serve(host: str = "0.0.0.0", port: int = 10082) -> None:
     channel = _UdpChannel()
     channel.attach(udp)
 
-    while True:
-        conn, _ = tcp.accept()
-        threading.Thread(target=_tcp_channel, args=(conn,), daemon=True).start()
+    try:
+        while stop is None or not stop.is_set():
+            try:
+                conn, _ = tcp.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            threading.Thread(target=_tcp_channel, args=(conn,), daemon=True).start()
+    finally:
+        tcp.close()
+        udp.close()
+        log.info("服务端已停止")

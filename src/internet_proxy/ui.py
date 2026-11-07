@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import tkinter as tk
 from pathlib import Path
 
@@ -116,6 +117,42 @@ class Win95UI:
         tk.Button(panel, text="保存", bg=CHROME, font=FONT, command=self._save).grid(
             row=3, column=1, columnspan=2, sticky="we", pady=(4, 0)
         )
+
+        # —— 代理控制：运行状态指示灯 + 开始/停止按钮 ——
+        control = tk.Frame(panel, bg=CHROME)
+        control.grid(row=4, column=0, columnspan=3, sticky="we", pady=(8, 0))
+        self.status_dot = tk.Label(
+            control, text="●", bg=CHROME, fg="#008000", font=("Tahoma", 12),
+        )
+        self.status_dot.pack(side="left")
+        self.status_text = tk.Label(control, text="运行中", bg=CHROME, font=FONT)
+        self.status_text.pack(side="left", padx=(2, 12))
+        self.start_btn = tk.Button(
+            control, text="开始代理", bg=CHROME, font=FONT, command=self._start_proxy,
+        )
+        self.start_btn.pack(side="left", padx=2)
+        self.stop_btn = tk.Button(
+            control, text="停止代理", bg=CHROME, font=FONT, command=self._stop_proxy,
+        )
+        self.stop_btn.pack(side="left", padx=2)
+        self.set_status(self.controller.running)
+
+    def _start_proxy(self) -> None:
+        self.controller.start()
+        self.append_log("开始代理")
+
+    def _stop_proxy(self) -> None:
+        self.controller.stop()
+        self.append_log("停止代理")
+
+    def set_status(self, running: bool) -> None:
+        """代理运行状态指示灯：绿=运行中，红=已停止；按钮可用态随动."""
+        def apply() -> None:
+            self.status_dot.configure(fg="#008000" if running else "#C00000")
+            self.status_text.configure(text="运行中" if running else "已停止")
+            self.start_btn.configure(state="disabled" if running else "normal")
+            self.stop_btn.configure(state="normal" if running else "disabled")
+        self.root.after(0, apply) if threading.current_thread() is not threading.main_thread() else apply()
 
     def _sync_port_box(self) -> None:
         if self.role.get() == "服务端":
