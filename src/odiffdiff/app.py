@@ -9,9 +9,9 @@ from __future__ import annotations
 
 
 def main() -> None:
-    from odiffdiff.ui import OdiffDiffApp
+    from odiffdiff.ui import ImageDiffPyApp
 
-    app = OdiffDiffApp()
+    app = ImageDiffPyApp()
     app.run()
 
 

@@ -76,7 +76,7 @@ Options:
 
 ## 原理对比：PatInspect vs odiff
 
-本项目的差分引擎 odiff 与 Cognex VisionPro 的 PatInspect 都在做逐像素差异检测，但定位和算法模型不同。PatInspect 的完整算法说明见 [docs/PatInspect.md](docs/PatInspect.md)。
+本项目的差分引擎 odiff 与 Cognex VisionPro 的 PatInspect（**图案检验**，亦译“图案检测”）都在做逐像素差异检测，但定位和算法模型不同。PatInspect 的完整算法说明见 [docs/PatInspect.md](docs/PatInspect.md)。
 
 ### 相同点
 
@@ -105,6 +105,38 @@ Options:
 - odiff 的定位是“确定性像素回归”，不是“容忍生产波动的缺陷检测”；Base / Compare 应在同一设备、同一参数下采集。
 - 若用于工业图像，需先做几何对齐与光照归一化（类似 PMAlign + PatInspect normalization），否则正常波动会被判成缺陷。
 - PatInspect 的自适应阈值思路（按局部标准差定阈值）可作为后续增强：高噪声区域放宽、稳定区域收紧。
+
+## 术语对照
+
+**PatInspect** 中的 *Pat* 取自 Pattern（图案），*Inspect* 意为检验，因此准确中文译名为 **“图案检验”**（部分资料译“图案检测”）。Cognex 官方中文资料通常保留英文名，功能上对应“瑕疵 / 缺陷检测”；本文档统一译为“图案检验”。相关术语对照如下（对应 [docs/PatInspect.md](docs/PatInspect.md)）：
+
+| 英文 | 中文 | 备注 |
+| --- | --- | --- |
+| PatInspect | 图案检验 | 亦译“图案检测”，基于训练图案的缺陷检测工具 |
+| trained pattern | 训练图案 | 多张良品图像逐像素统计得到的基准图案 |
+| training image | 训练图像 | 用于建立训练图案的良品图像 |
+| run-time image | 运行图像 | 实际待检图像，亦称“待检图像” |
+| standard deviation image | 标准差图像 | 表示训练图案各像素的允许波动 |
+| pseudo-standard deviation image | 伪标准差图像 | 单张训练图时由 Sobel Edge 生成 |
+| threshold image | 阈值图像 | 每像素的判定阈值 `A·σ + B` |
+| match image | 匹配图像 | 运行图像中与训练区域对应的部分 |
+| raw difference image | 原始差分图像 | 训练图案与匹配图像的绝对差 |
+| thresholded difference image | 阈值化差分图像 | 超过阈值的差异输出，供 Blob / Histogram 分析 |
+| image normalization | 图像归一化 | 补偿运行图像的光照变化 |
+| identity | 恒等（不归一化） | 不执行任何归一化 |
+| histogram equalization | 直方图均衡化 | 使直方图与训练图案匹配 |
+| mean and standard deviation | 均值与标准差 | 匹配直方图的均值与标准差 |
+| match tails | 尾部匹配 | 对齐直方图左右尾部 |
+| robust line fit | 稳健直线拟合 | 抗大缺陷的拟合方法，耗时更长 |
+| local correction | 局部校正 | 按矩形邻域分别归一化 |
+| enhanced local correction | 增强局部校正 | 效果更好但更慢 |
+| scale coefficient (A) | 比例系数 (A) | 控制边缘对比度 |
+| offset coefficient (B) | 偏移系数 (B) | 控制整体亮度 / 判定偏移 |
+| Pose | 位姿 | 描述物体位置、旋转、缩放的映射 |
+| PMAlign | PMAlign 图案匹配 | 基于 PatMax 的定位工具，为 PatInspect 提供位姿 |
+| interpolation mode | 插值模式 | Bilinear（双线性）/ Compatibility（兼容） |
+| defect pixel | 缺陷像素 | 超过阈值、被判定为异常的像素 |
+| Sobel Edge | Sobel 边缘检测 | 生成伪标准差图像时使用 |
 
 ## 许可证
 

@@ -1,4 +1,4 @@
-"""OdiffDiff 主界面 — 三栏并排图像差分对比。
+"""ImageDiffPy 主界面 — 三栏并排图像差分对比。
 
 布局：
     ┌─ 标题栏 ─────────────────────────────────────────────────┐
@@ -147,8 +147,8 @@ def _make_diff_filename(base: Path, compare: Path) -> str:
     return f"{a_short}{sep}{b_short}_{h}{ext}"
 
 
-class OdiffDiffApp(TkinterDnD.Tk if _DND_OK else tk.Tk):
-    """OdiffDiff 主窗口（继承 TkinterDnD.Tk 以支持拖拽）。"""
+class ImageDiffPyApp(TkinterDnD.Tk if _DND_OK else tk.Tk):
+    """ImageDiffPy 主窗口（继承 TkinterDnD.Tk 以支持拖拽）。"""
 
     def __init__(self) -> None:
         super().__init__()
@@ -166,7 +166,7 @@ class OdiffDiffApp(TkinterDnD.Tk if _DND_OK else tk.Tk):
         self._compare_scale = 1.0
         self._diff_scale = 1.0
 
-        self.title(f"OdiffDiff — 图像差分 v{__version__}")
+        self.title(f"ImageDiffPy — 图像差分 v{__version__}")
         self.geometry("1180x720")
         self.minsize(900, 560)
         self._set_icon()
@@ -216,7 +216,7 @@ class OdiffDiffApp(TkinterDnD.Tk if _DND_OK else tk.Tk):
 
     def _build_titlebar(self) -> None:
         bar, self.status_tag = theme.titlebar(
-            self, "  OdiffDiff — 图像差分", end_text="就绪")
+            self, "  ImageDiffPy — 图像差分", end_text="就绪")
 
     def _build_statusbar(self) -> None:
         bar, self.sb_left, self.sb_mid, self.sb_right = theme.statusbar(self)
@@ -625,8 +625,8 @@ class OdiffDiffApp(TkinterDnD.Tk if _DND_OK else tk.Tk):
     def _show_about(self) -> None:
         dnd_info = "✓ 已启用" if _DND_OK else "✗ 未启用（tkinterdnd2 DLL 不匹配）"
         messagebox.showinfo(
-            "关于 OdiffDiff",
-            f"OdiffDiff v{__version__}\n\n"
+            "关于 ImageDiffPy",
+            f"ImageDiffPy v{__version__}\n\n"
             f"Python Tk GUI + odiff.exe (Zig SIMD)\n"
             f"图像像素级差分对比器\n\n"
             f"拖拽支持: {dnd_info}\n"
