@@ -171,6 +171,8 @@
             <li><strong>默认端口 10082</strong> —— SOCKS5 等代理端口默认高端口 <code>10082</code>。</li>
             <li><strong>免认证</strong> —— 封闭局域网内连接即用，不设账号密码。</li>
             <li><strong>静默启动 + 托盘后台运行</strong> —— 启动时立即静默最小化到托盘，用户无感知；Tkinter + TkDND2 创建托盘图标，代理常驻后台。</li>
+            <li><strong>开机自启（可选）</strong> —— 设置页勾选后注册计划任务（最高权限，登录不弹 UAC），写入 <code>config.json</code> 的 <code>autostart</code>；登录后随程序自动拉起已安装的 nginx / v2ray 服务。非管理员环境下退回注册表启动项。</li>
+            <li><strong>客户端 VMess 上行（可选）</strong> —— 客户端可改由内嵌 v2ray 以 VMess（TCP / WS，可加 TLS）连接 v2ray 服务端，复用成熟加密与传输；本机 SOCKS5 与透明代理端口不变。</li>
             <li><strong>单实例保护</strong> —— 同一角色重复启动会提示并退出，避免多实例抢网卡、耗尽系统套接字。</li>
             <li><strong>配置持久化</strong> —— 网关工控机 IP 与代理端口写入配置文件，重启自动生效。目录默认 <code>D:/JustSmart/InternetProxyPy</code>（自动创建），不可用时回退 <code>%APPDATA%/InternetProxyPy</code>。</li>
             <li><strong>Windows 95 风格界面</strong> —— 日志 / 设置 / 安装器三个标签页，采用 Win95 设计令牌（02-windows-95.css）。</li>
@@ -211,6 +213,12 @@ python main.py --role client --headless      # 客户端，SOCKS5 10082</pre>
               <td>SOCKS5 服务端，账号 <code>justsmart</code> / 密码 <code>justsmart</code>，开启 UDP</td>
             </tr>
             <tr>
+              <td>v2ray</td>
+              <td>同上</td>
+              <td>0.0.0.0:11081</td>
+              <td><strong>VMess 入站</strong>，UUID 首次安装时生成并写入 <code>installer.json</code></td>
+            </tr>
+            <tr>
               <td>nginx</td>
               <td>D:/JustSmart/InternetProxyPy/nginx</td>
               <td>0.0.0.0:18080</td>
@@ -221,8 +229,32 @@ python main.py --role client --headless      # 客户端，SOCKS5 10082</pre>
             <li>两个组件来自 exe 内嵌的压缩包，无需联网下载；</li>
             <li>安装时写入 <code>nginx.conf</code> 与 v2ray <code>config.json</code>，并放行防火墙端口；</li>
             <li>安装记录写入 <code>installer.json</code>，自动安装只尝试一次；</li>
-            <li>页面提供 一键安装/修复、启动服务、停止服务、打开目录、刷新状态；</li>
-            <li>端口取 11080 / 18080，避开 1080 / 8080 这类常见占用。</li>
+            <li>页面提供 一键安装/修复、启动服务、停止服务、打开目录、刷新状态、复制 UUID；</li>
+            <li>端口取 11080 / 11081 / 18080，避开 1080 / 8080 这类常见占用。</li>
+          </ul>
+        </div>
+
+        <div class="fieldset">
+          <legend>客户端 VMess 上行（连接 v2ray 服务端）</legend>
+          <p>
+            设置页新增「通过 v2ray 服务端（VMess）代理互联网」。启用后客户端不再走自研隧道，
+            而是由内嵌 v2ray 提供本机 SOCKS5 入站、经 VMess 出站连到服务端：
+          </p>
+          <div class="diagram">
+应用 / tun2socks / 局域网设备 ──▶ 本机 SOCKS5 0.0.0.0:10082
+    ──▶ VMess（TCP 或 WS，可加 TLS）──▶ v2ray 服务端 ──▶ 互联网</div>
+          <table>
+            <tr><th>配置项</th><th>说明</th></tr>
+            <tr><td>服务端 / 端口</td><td>v2ray 服务端地址与 VMess 入站端口，本软件安装器默认 <code>11081</code></td></tr>
+            <tr><td>UUID</td><td>与服务端 <code>clients[].id</code> 一致；可在「安装器」页「复制 UUID」</td></tr>
+            <tr><td>传输 / WS 路径</td><td><code>TCP</code>（默认）或 <code>WS</code>，WS 路径默认 <code>/vmess</code></td></tr>
+            <tr><td>TLS</td><td>WS 常配 TLS，勾选后 SNI 取服务端地址</td></tr>
+          </table>
+          <ul>
+            <li>启用后网关 IP 不再参与转发；规则模式私网直连，全局模式全部走 VMess；</li>
+            <li>客户端配置由程序每次启动生成到 <code>v2ray/client.json</code>；</li>
+            <li>v2ray 未安装、地址/UUID 缺失或核心启动失败时，自动回退内置隧道并写日志；</li>
+            <li>透明代理为服务端 IP 添加 /32 直连路由，避免 VMess 连接被自己的虚拟网卡捕获。</li>
           </ul>
         </div>
 
@@ -275,7 +307,7 @@ python main.py --role client --headless      # 客户端，SOCKS5 10082</pre>
         <span>服务端：0.0.0.0:10082 (TCP/UDP/SOCKS5)</span>
         <span>客户端：网关 192.168.1.10:10082</span>
         <span>托盘：静默启动 · cat.ico</span>
-        <span>服务：v2ray 11080 (justsmart) · nginx 18080</span>
+        <span>服务：v2ray 11080 / VMess 11081 · nginx 18080</span>
         <span>配置：D:/JustSmart/InternetProxyPy → %APPDATA%</span>
       </div>
     </div>

@@ -267,6 +267,12 @@ def main() -> None:
             "internet_proxy.client",
             "--hidden-import",
             "internet_proxy.config",
+            "--hidden-import",
+            "internet_proxy.installer",
+            "--hidden-import",
+            "internet_proxy.vmess",
+            "--hidden-import",
+            "internet_proxy.autostart",
         ]
     cmd.append(str(ROOT / "main.py"))
     print(" ".join(cmd))

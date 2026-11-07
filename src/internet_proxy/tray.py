@@ -221,9 +221,15 @@ class TrayIcon:
         nid.uCallbackMessage = WM_APP_TRAY
         nid.hIcon = self._hicon
         try:
-            nid.szTip = _TIPS.get(self.cfg.role, "InternetProxyPy").format(
-                gw=self.cfg.gateway, port=self.cfg.port
-            )
+            if self.cfg.role == "client" and self.cfg.v2ray_enabled:
+                nid.szTip = (
+                    f"InternetProxyPy — 代理客户端 · VMess "
+                    f"{self.cfg.v2ray_server}:{self.cfg.v2ray_port}"
+                )
+            else:
+                nid.szTip = _TIPS.get(self.cfg.role, "InternetProxyPy").format(
+                    gw=self.cfg.gateway, port=self.cfg.port
+                )
         except Exception:
             nid.szTip = "InternetProxyPy"
         return nid

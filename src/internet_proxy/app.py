@@ -48,36 +48,61 @@ class Controller:
                         serve(port=cfg.port, stop=stop)
                     except OSError as exc:
                         self.on_log(f"[server] 启动失败: {exc}")
-                else:
+                    return
+
+                tun = None
+                if cfg.transparent:
+                    from .tun import TunProxy
+                    from .vmess import server_ip
+
+                    # 隧道出口必须绕过虚拟网卡：网关模式走网关 IP，VMess 模式走服务端 IP
+                    bypass = (server_ip(cfg) if cfg.v2ray_enabled else None) or cfg.gateway
+                    tun = TunProxy(cfg.port, bypass)
+
+                # 先建立上行再接管系统流量：VMess 到服务端的连接若晚于覆盖路由，
+                # 会被自己的虚拟网卡捕获形成回环。
+                uplink = None
+                if cfg.v2ray_enabled:
+                    from .vmess import VmessUplink
+
+                    uplink = VmessUplink(cfg)
+                    if not uplink.start(self.on_log):
+                        uplink = None
+                        self.on_log("[client] VMess 上行不可用，回退到内置隧道")
+
+                client = None
+                if uplink is None:
                     client = Client(cfg)
                     self._client = client
                     self.on_log(f"[client] SOCKS5 0.0.0.0:{cfg.port} → {cfg.gateway}:{cfg.port}")
-                    tun = None
-                    if cfg.transparent:
-                        from .tun import TunProxy
 
-                        tun = TunProxy(cfg.port, cfg.gateway)
+                if tun:
 
-                        def start_tun() -> None:
-                            import time
+                    def start_tun() -> None:
+                        import time
 
-                            time.sleep(0.8)  # 等本地 SOCKS5 就绪
-                            if stop.is_set():
-                                return
-                            if tun.start():
-                                self.on_log("[tun] 系统透明代理已接管（虚拟网卡）")
-                            else:
-                                self.on_log("[tun] 启动失败，已回退纯 SOCKS5（原因见上方日志）")
+                        time.sleep(0.5)  # 等本地 SOCKS5 就绪
+                        if stop.is_set():
+                            return
+                        if tun.start():
+                            self.on_log("[tun] 系统透明代理已接管（虚拟网卡）")
+                        else:
+                            self.on_log("[tun] 启动失败，已回退纯 SOCKS5（原因见上方日志）")
 
-                        threading.Thread(target=start_tun, daemon=True).start()
-                    try:
+                    threading.Thread(target=start_tun, daemon=True).start()
+                try:
+                    if uplink is not None:
+                        stop.wait()  # 上行由 v2ray 进程自己维持，等到停止信号即可
+                    else:
                         client.start()
-                    except OSError as exc:
-                        self.on_log(f"[client] 启动失败: {exc}")
-                    finally:
-                        if tun:
-                            tun.stop()
-                        self._client = None
+                except OSError as exc:
+                    self.on_log(f"[client] 启动失败: {exc}")
+                finally:
+                    if uplink is not None:
+                        uplink.stop()
+                    if tun:
+                        tun.stop()
+                    self._client = None
             finally:
                 self._set_running(False)
 
@@ -151,9 +176,14 @@ def run_gui(cfg: Config) -> None:  # pragma: no cover - GUI 入口
         tray.start()
 
         # 首次启动：自动提权静默安装 nginx / v2ray（已装或已尝试过则跳过）
-        from .installer import auto_install
+        from .installer import auto_install, is_installed, start_services
 
         auto_install(ui.append_log)
+        # 开机自启：登录后随程序一起把 nginx / v2ray 拉起（重启后无需手动点启动）
+        if cfg.autostart and is_installed():
+            threading.Thread(
+                target=start_services, args=(ui.append_log,), daemon=True
+            ).start()
 
     controller = Controller(cfg, on_log=lambda text: log.info(text))
     build()

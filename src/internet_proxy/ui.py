@@ -2,7 +2,8 @@
 
 三个标签页：
     - 日志：滚动文本区，客户端 / 服务端运行日志实时输出
-    - 设置：角色（服务端/客户端）、网关 IP、端口（默认 10082），保存写回 config.json
+    - 设置：角色（服务端/客户端）、网关 IP、端口（默认 10082）、VMess 上行、
+      开机自启，保存写回 config.json
     - 安装器：nginx / v2ray 的安装状态与一键安装、启停、打开目录
 
 窗口启动即沉淀（withdraw，静默最小化到托盘），仅经托盘唤出，用户无感知。
@@ -20,8 +21,9 @@ from tkinter import ttk
 
 from tkinterdnd2 import TkinterDnD
 
-from . import installer
+from . import autostart, installer
 from .config import CONFIG_PATH, Config
+from .vmess import normalize_uuid
 
 # —— Win95 设计令牌（与 assets/02-windows-95.css 保持一致）——
 BG = "#008080"        # --bg
@@ -46,7 +48,7 @@ class Win95UI:
         self.root = TkinterDnD.Tk()
         self.root.title("InternetProxyPy")
         self.root.iconbitmap(self._icon_path())
-        self.root.geometry("600x470")
+        self.root.geometry("620x660")
         self.root.report_callback_exception = self._on_exception
         # 关闭按钮（X）不退出，只隐藏到托盘；最小化按钮保持默认行为（最小化到任务栏）
         self.root.protocol("WM_DELETE_WINDOW", self.hide)
@@ -107,7 +109,7 @@ class Win95UI:
         self.log.pack(fill="both", expand=True)
 
     def _build_settings_tab(self, parent: tk.Frame) -> None:
-        # —— 设置（Win95 groupbox 风格）——
+        # —— 基础设置（Win95 groupbox 风格）——
         panel = tk.Frame(parent, bg=CHROME, padx=8, pady=8)
         panel.pack(fill="x", padx=2, pady=2)
         for c in range(4):
@@ -150,13 +152,18 @@ class Win95UI:
             panel, text="系统透明代理(虚拟网卡)", variable=self.transparent,
             bg=CHROME, font=FONT, activebackground=CHROME,
         ).grid(row=4, column=0, sticky="w")
+        self.autostart = tk.BooleanVar(value=self.cfg.autostart)
+        tk.Checkbutton(
+            panel, text="开机自启(含 nginx/v2ray)", variable=self.autostart,
+            bg=CHROME, font=FONT, activebackground=CHROME,
+        ).grid(row=4, column=1, columnspan=2, sticky="w")
         tk.Button(panel, text="保存", bg=CHROME, font=FONT, command=self._save).grid(
-            row=4, column=1, columnspan=2, sticky="we", pady=(4, 0)
+            row=5, column=1, columnspan=2, sticky="we", pady=(4, 0)
         )
 
         # —— 代理控制：运行状态指示灯 + 开始/停止按钮 ——
         control = tk.Frame(panel, bg=CHROME)
-        control.grid(row=5, column=0, columnspan=3, sticky="we", pady=(8, 0))
+        control.grid(row=6, column=0, columnspan=3, sticky="we", pady=(8, 0))
         self.status_dot = tk.Label(
             control, text="●", bg=CHROME, fg="#008000", font=("Tahoma", 12),
         )
@@ -172,6 +179,64 @@ class Win95UI:
         )
         self.stop_btn.pack(side="left", padx=2)
         self.set_status(self.controller.running)
+
+        # —— VMess 上行：客户端连接 v2ray 服务端，替代内置隧道 ——
+        proxy = tk.Frame(parent, bg=CHROME, padx=8, pady=8)
+        proxy.pack(fill="x", padx=2, pady=2)
+        for c in range(4):
+            proxy.grid_columnconfigure(c, pad=4, weight=0 if c > 0 else 1)
+
+        self.v2ray_enabled = tk.BooleanVar(value=self.cfg.v2ray_enabled)
+        tk.Checkbutton(
+            proxy, text="通过 v2ray 服务端（VMess）代理互联网", variable=self.v2ray_enabled,
+            bg=CHROME, font=FONT, activebackground=CHROME,
+        ).grid(row=0, column=0, columnspan=4, sticky="w")
+
+        tk.Label(proxy, text="服务端", bg=CHROME, font=FONT).grid(row=1, column=0, sticky="w")
+        self.v2ray_server = tk.StringVar(value=self.cfg.v2ray_server)
+        tk.Entry(proxy, textvariable=self.v2ray_server, font=FONT, bg=WHITE, width=18).grid(
+            row=1, column=1, columnspan=2, sticky="we"
+        )
+        port_box = tk.Frame(proxy, bg=CHROME)
+        port_box.grid(row=1, column=3, sticky="w")
+        tk.Label(port_box, text="端口", bg=CHROME, font=FONT).pack(side="left", padx=(0, 4))
+        self.v2ray_port = tk.StringVar(value=str(self.cfg.v2ray_port))
+        tk.Entry(
+            port_box, textvariable=self.v2ray_port, font=FONT, bg=WHITE, width=7,
+        ).pack(side="left")
+
+        tk.Label(proxy, text="UUID", bg=CHROME, font=FONT).grid(row=2, column=0, sticky="w")
+        self.v2ray_uuid = tk.StringVar(value=self.cfg.v2ray_uuid)
+        tk.Entry(proxy, textvariable=self.v2ray_uuid, font=FONT, bg=WHITE).grid(
+            row=2, column=1, columnspan=3, sticky="we"
+        )
+
+        tk.Label(proxy, text="传输", bg=CHROME, font=FONT).grid(row=3, column=0, sticky="w")
+        self.v2ray_network = tk.StringVar(
+            value="WS" if self.cfg.v2ray_network == "ws" else "TCP"
+        )
+        for i, label in enumerate(("TCP", "WS")):
+            tk.Radiobutton(
+                proxy, text=label, variable=self.v2ray_network, value=label,
+                bg=CHROME, font=FONT,
+            ).grid(row=3, column=1 + i, sticky="w")
+        self.v2ray_tls = tk.BooleanVar(value=self.cfg.v2ray_tls)
+        tk.Checkbutton(
+            proxy, text="TLS", variable=self.v2ray_tls,
+            bg=CHROME, font=FONT, activebackground=CHROME,
+        ).grid(row=3, column=3, sticky="w")
+
+        tk.Label(proxy, text="WS 路径", bg=CHROME, font=FONT).grid(row=4, column=0, sticky="w")
+        self.v2ray_path = tk.StringVar(value=self.cfg.v2ray_path)
+        tk.Entry(proxy, textvariable=self.v2ray_path, font=FONT, bg=WHITE).grid(
+            row=4, column=1, columnspan=3, sticky="we"
+        )
+
+        tk.Label(
+            proxy,
+            text="服务端 UUID 见「安装器」页；启用后网关 IP 不再参与转发。",
+            bg=CHROME, fg=CHROME_DARK, font=FONT, justify="left",
+        ).grid(row=5, column=0, columnspan=4, sticky="w", pady=(4, 0))
 
     def _build_installer_tab(self, parent: tk.Frame) -> None:
         # —— 安装器：nginx / v2ray 状态与操作 ——
@@ -196,6 +261,13 @@ class Win95UI:
             text=f"nginx：静态站点 0.0.0.0:{installer.NGINX_PORT}，/status 健康检查",
             bg=CHROME, font=FONT, justify="left",
         ).pack(anchor="w")
+        self.vmess_info = tk.StringVar(
+            value=f"VMess：0.0.0.0:{installer.V2RAY_VMESS_PORT}  安装后生成 UUID"
+        )
+        tk.Label(
+            panel, textvariable=self.vmess_info, bg=CHROME, font=FONT,
+            justify="left", wraplength=540,
+        ).pack(anchor="w")
 
         row = tk.Frame(panel, bg=CHROME)
         row.pack(fill="x", pady=(10, 0))
@@ -219,6 +291,9 @@ class Win95UI:
         ).pack(side="left", padx=(0, 4))
         tk.Button(
             row2, text="刷新状态", bg=CHROME, font=FONT, command=self._refresh_installer,
+        ).pack(side="left", padx=4)
+        tk.Button(
+            row2, text="复制 UUID", bg=CHROME, font=FONT, command=self._copy_uuid,
         ).pack(side="left", padx=4)
 
         tk.Label(
@@ -246,17 +321,40 @@ class Win95UI:
                 st = installer.status()
             except Exception as exc:
                 text = f"状态检测失败: {exc}"
+                info = None
             else:
                 text = (
                     f"nginx  {'已安装' if st['nginx_installed'] else '未安装'}"
                     f"  {'运行中' if st['nginx_running'] else '未运行'}\n"
                     f"v2ray  {'已安装' if st['v2ray_installed'] else '未安装'}"
                     f"  {'运行中' if st['v2ray_running'] else '未运行'}\n"
+                    f"VMess  {st['vmess_port']}"
+                    f"  {'运行中' if st['vmess_running'] else '未运行'}\n"
                     f"目录   {st['base_dir']}"
                 )
+                info = (
+                    f"VMess：0.0.0.0:{st['vmess_port']}  "
+                    f"UUID {st['vmess_uuid'] or '（安装后生成）'}"
+                )
             self.root.after(0, lambda: self.inst_status.set(text))
+            if info is not None:
+                self.root.after(0, lambda: self.vmess_info.set(info))
 
         threading.Thread(target=work, name="installer-status", daemon=True).start()
+
+    def _copy_uuid(self) -> None:
+        """把服务端 VMess UUID 复制到剪贴板，方便填到客户端."""
+        try:
+            uid = installer.status()["vmess_uuid"]
+        except Exception as exc:
+            self.append_log(f"读取 UUID 失败: {exc}")
+            return
+        if not uid:
+            self.append_log("UUID 尚未生成：请先在安装器页完成安装")
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(uid)
+        self.append_log(f"已复制 VMess UUID: {uid}")
 
     def _open_install_dir(self) -> None:
         try:
@@ -311,13 +409,51 @@ class Win95UI:
         if not (PORT_MIN <= port <= PORT_MAX):
             self.append_log(f"保存失败: 端口须在 {PORT_MIN}-{PORT_MAX} 之间（高端口）")
             return
+        try:
+            v2ray_port = int(self.v2ray_port.get())
+        except ValueError:
+            self.append_log("保存失败: v2ray 端口必须是 1-65535 的整数")
+            return
+        if not (1 <= v2ray_port <= 65535):
+            self.append_log("保存失败: v2ray 端口必须是 1-65535 的整数")
+            return
+
+        server = self.v2ray_server.get().strip()
+        uid = self.v2ray_uuid.get().strip()
+        if self.v2ray_enabled.get():
+            if not server:
+                self.append_log("保存失败: 启用 VMess 时需填写 v2ray 服务端地址")
+                return
+            normalized = normalize_uuid(uid)
+            if normalized is None:
+                self.append_log("保存失败: VMess UUID 无效（形如 8 位-4 位-4 位-4 位-12 位）")
+                return
+            uid = normalized
+
+        path = self.v2ray_path.get().strip() or "/vmess"
+        if not path.startswith("/"):
+            path = "/" + path
+
         self.cfg.role = role
         self.cfg.gateway = self.gw.get().strip() or self.cfg.gateway
         self.cfg.port = port
         self.cfg.proxy_mode = "global" if self.mode.get() == "全局代理" else "rule"
         self.cfg.transparent = self.transparent.get()
+        self.cfg.v2ray_enabled = self.v2ray_enabled.get()
+        self.cfg.v2ray_server = server
+        self.cfg.v2ray_port = v2ray_port
+        self.cfg.v2ray_uuid = uid
+        self.cfg.v2ray_network = "ws" if self.v2ray_network.get() == "WS" else "tcp"
+        self.cfg.v2ray_path = path
+        self.cfg.v2ray_tls = self.v2ray_tls.get()
+        self.cfg.autostart = self.autostart.get()
         self.cfg.save()
         self.append_log(f"配置已写入 {CONFIG_PATH}")
+
+        # 开机自启是系统侧状态：只在勾选状态变化时改计划任务 / 注册表
+        if self.cfg.autostart != autostart.is_enabled():
+            autostart.apply(self.cfg.autostart, self.append_log)
+
         self.controller.reload(self.cfg)
 
     def _on_exception(self, *exc) -> None:  # Tk 死循环兜底：打到日志即可

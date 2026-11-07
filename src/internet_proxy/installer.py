@@ -6,9 +6,11 @@
 
 服务形态（参考 reference/setup_v2ray_server_at_windows.md）：
     v2ray  SOCKS5 服务端，监听 0.0.0.0:11080，账号 justsmart / 密码 justsmart
+           VMess 服务端，监听 0.0.0.0:11081，UUID 首次安装时生成并存 installer.json
     nginx  HTTP 静态站点，监听 0.0.0.0:18080，/status 为健康检查
 
 端口取高位段，避开 1080 / 8080 这类常被其它代理、Web 服务占用的默认端口。
+客户端用 VMess 连接服务端时直接取这里的 UUID（见 ui.py 安装器页）。
 
 首次启动时 ``auto_install()`` 会在没有安装记录的情况下自动请求 UAC 提权并静默
 安装；非管理员进程通过 ShellExecuteW("runas") 以 ``--install-extras`` 重新拉起
@@ -25,6 +27,7 @@ import subprocess
 import sys
 import threading
 import traceback
+import uuid
 import zipfile
 from pathlib import Path
 from typing import Callable
@@ -39,6 +42,7 @@ LOG_PATH = BASE_DIR / "installer.log"
 
 NGINX_PORT = 18080
 V2RAY_PORT = 11080
+V2RAY_VMESS_PORT = 11081  # VMess 入站，供本软件客户端连接
 PROXY_USER = "justsmart"
 PROXY_PASS = "justsmart"
 
@@ -71,7 +75,7 @@ def is_admin() -> bool:
         return False
 
 
-def _port_open(port: int) -> bool:
+def port_open(port: int) -> bool:
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=0.3):
             return True
@@ -98,14 +102,31 @@ def is_installed() -> bool:
     return (NGINX_DIR / "nginx.exe").is_file() and (V2RAY_DIR / "v2ray.exe").is_file()
 
 
+def vmess_uuid() -> str:
+    """服务端 VMess UUID：首次需要时生成并写入 installer.json，之后保持不变."""
+    state = _read_state()
+    uid = state.get("vmess_uuid")
+    if isinstance(uid, str) and uid:
+        return uid
+    uid = str(uuid.uuid4())
+    state["vmess_uuid"] = uid
+    _write_state(state)
+    return uid
+
+
 def status() -> dict:
     """安装 / 运行状态，供界面轮询."""
+    state = _read_state()
+    uid = state.get("vmess_uuid")
     return {
         "installed": is_installed(),
         "nginx_installed": (NGINX_DIR / "nginx.exe").is_file(),
         "v2ray_installed": (V2RAY_DIR / "v2ray.exe").is_file(),
-        "nginx_running": _port_open(NGINX_PORT),
-        "v2ray_running": _port_open(V2RAY_PORT),
+        "nginx_running": port_open(NGINX_PORT),
+        "v2ray_running": port_open(V2RAY_PORT),
+        "vmess_port": V2RAY_VMESS_PORT,
+        "vmess_running": port_open(V2RAY_VMESS_PORT),
+        "vmess_uuid": uid if isinstance(uid, str) else "",
         "base_dir": str(BASE_DIR),
     }
 
@@ -174,7 +195,7 @@ http {{
     (NGINX_DIR / "conf" / "nginx.conf").write_text(conf, encoding="utf-8")
 
 
-def _write_v2ray_conf() -> None:
+def _write_v2ray_conf(uid: str) -> None:
     conf = {
         "log": {
             "loglevel": "warning",
@@ -194,7 +215,15 @@ def _write_v2ray_conf() -> None:
                     "ip": "0.0.0.0",
                 },
                 "sniffing": {"enabled": True, "destOverride": ["http", "tls"]},
-            }
+            },
+            {
+                # 本软件客户端以 VMess 连接服务端时用这个入站（无需额外账号）
+                "tag": "vmess-in",
+                "listen": "0.0.0.0",
+                "port": V2RAY_VMESS_PORT,
+                "protocol": "vmess",
+                "settings": {"clients": [{"id": uid, "alterId": 0, "level": 0}]},
+            },
         ],
         "outbounds": [{"tag": "direct", "protocol": "freedom", "settings": {}}],
     }
@@ -239,12 +268,14 @@ def install(log: Log = print, start: bool = True) -> None:
 
     log("写入 nginx.conf")
     _write_nginx_conf()
-    log("写入 v2ray config.json（SOCKS5 账号 justsmart）")
-    _write_v2ray_conf()
+    uid = vmess_uuid()
+    log(f"写入 v2ray config.json（SOCKS5 账号 {PROXY_USER}，VMess UUID {uid}）")
+    _write_v2ray_conf(uid)
 
     if is_admin():
         _allow_port(V2RAY_PORT, "TCP", "InternetProxyPy-v2ray-TCP", log)
         _allow_port(V2RAY_PORT, "UDP", "InternetProxyPy-v2ray-UDP", log)
+        _allow_port(V2RAY_VMESS_PORT, "TCP", "InternetProxyPy-v2ray-VMess", log)
         _allow_port(NGINX_PORT, "TCP", "InternetProxyPy-nginx-TCP", log)
 
     _write_state(
@@ -252,6 +283,8 @@ def install(log: Log = print, start: bool = True) -> None:
             "installed": True,
             "nginx_port": NGINX_PORT,
             "v2ray_port": V2RAY_PORT,
+            "vmess_port": V2RAY_VMESS_PORT,
+            "vmess_uuid": uid,
             "user": PROXY_USER,
             "pass": PROXY_PASS,
         }
@@ -282,20 +315,54 @@ def _listen_pids(port: int) -> set[int]:
     return pids
 
 
+def ensure_vmess(log: Log = print) -> bool:
+    """老版本安装只有 SOCKS5 入站：补写含 VMess 入站的配置。
+
+    返回是否补写过（调用方据此决定要不要重启 v2ray 让新配置生效）。
+    """
+    if not is_installed() or _read_state().get("vmess_uuid"):
+        return False
+    uid = vmess_uuid()
+    _write_v2ray_conf(uid)
+    state = _read_state()
+    state["vmess_port"] = V2RAY_VMESS_PORT
+    _write_state(state)
+    if is_admin():
+        _allow_port(V2RAY_VMESS_PORT, "TCP", "InternetProxyPy-v2ray-VMess", log)
+    log(f"已补充 VMess 入站 0.0.0.0:{V2RAY_VMESS_PORT}，UUID {uid}")
+    return True
+
+
+def _kill_listeners(port: int) -> None:
+    for pid in _listen_pids(port):
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/F"],
+            creationflags=CREATE_NO_WINDOW,
+            capture_output=True,
+        )
+
+
 def start_services(log: Log = print) -> None:
     if not is_installed():
         log("服务尚未安装，请先执行安装")
         return
-    if not _port_open(V2RAY_PORT):
+    if ensure_vmess(log) and port_open(V2RAY_PORT):
+        # 配置刚补写过，重启 v2ray 使其生效
+        _kill_listeners(V2RAY_PORT)
+        log("v2ray 已按新配置重启")
+    if not port_open(V2RAY_PORT):
         subprocess.Popen(
             [str(V2RAY_DIR / "v2ray.exe"), "run", "-c", "config.json"],
             cwd=str(V2RAY_DIR),
             creationflags=CREATE_NO_WINDOW,
         )
-        log(f"v2ray 已启动: SOCKS5 0.0.0.0:{V2RAY_PORT}（{PROXY_USER}/{PROXY_PASS}）")
+        log(
+            f"v2ray 已启动: SOCKS5 0.0.0.0:{V2RAY_PORT}（{PROXY_USER}/{PROXY_PASS}），"
+            f"VMess 0.0.0.0:{V2RAY_VMESS_PORT}"
+        )
     else:
         log(f"v2ray 已在运行: {V2RAY_PORT}")
-    if not _port_open(NGINX_PORT):
+    if not port_open(NGINX_PORT):
         subprocess.Popen(
             [str(NGINX_DIR / "nginx.exe")],
             cwd=str(NGINX_DIR),
@@ -308,7 +375,7 @@ def start_services(log: Log = print) -> None:
 
 def stop_services(log: Log = print) -> None:
     nginx_exe = NGINX_DIR / "nginx.exe"
-    if nginx_exe.is_file() and _port_open(NGINX_PORT):
+    if nginx_exe.is_file() and port_open(NGINX_PORT):
         subprocess.run(
             [str(nginx_exe), "-s", "quit"],
             cwd=str(NGINX_DIR),
@@ -316,14 +383,9 @@ def stop_services(log: Log = print) -> None:
             capture_output=True,
         )
         log("nginx 已停止")
-    if _port_open(V2RAY_PORT):
+    if port_open(V2RAY_PORT):
         pids = _listen_pids(V2RAY_PORT)
-        for pid in pids:
-            subprocess.run(
-                ["taskkill", "/PID", str(pid), "/F"],
-                creationflags=CREATE_NO_WINDOW,
-                capture_output=True,
-            )
+        _kill_listeners(V2RAY_PORT)
         log("v2ray 已停止" if pids else "v2ray 端口已释放")
 
 

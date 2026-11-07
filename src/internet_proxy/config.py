@@ -13,9 +13,11 @@ from pathlib import Path
 
 DEFAULT_PORT = 10082
 DEFAULT_GATEWAY = "127.0.0.1"
+DEFAULT_V2RAY_PORT = 11081  # v2ray 服务端 VMess 入站口（与 SOCKS5 11080 分开）
 
 _ROLES = ("server", "client")
 _MODES = ("rule", "global")  # 规则代理（忽略局域网 IP）/ 全局代理
+_NETWORKS = ("tcp", "ws")    # VMess 传输方式
 
 
 def _default_dir() -> Path:
@@ -44,10 +46,11 @@ CONFIG_PATH = config_dir() / "config.json"
 
 
 class Config:
-    """代理配置：角色、网关 IP、端口。
+    """代理配置：角色、网关 IP、端口、VMess 上行、开机自启。
 
     缺省 = 客户端模式（双击 exe 即代理其它设备上网），网关未配置时用
-    127.0.0.1；端口默认 10082。
+    127.0.0.1；端口默认 10082。客户端可选把上行从自研隧道切到 v2ray
+    服务端的 VMess（``v2ray_enabled``），此时网关字段不再参与转发。
     """
 
     def __init__(
@@ -57,6 +60,14 @@ class Config:
         port: int = DEFAULT_PORT,
         proxy_mode: str = "rule",
         transparent: bool = True,
+        v2ray_enabled: bool = False,
+        v2ray_server: str = "",
+        v2ray_port: int = DEFAULT_V2RAY_PORT,
+        v2ray_uuid: str = "",
+        v2ray_network: str = "tcp",
+        v2ray_path: str = "/vmess",
+        v2ray_tls: bool = False,
+        autostart: bool = False,
     ) -> None:
         if role not in _ROLES:
             role = "client"
@@ -65,6 +76,14 @@ class Config:
         self.port = int(port)
         self.proxy_mode = proxy_mode if proxy_mode in _MODES else "rule"
         self.transparent = bool(transparent)
+        self.v2ray_enabled = bool(v2ray_enabled)
+        self.v2ray_server = v2ray_server
+        self.v2ray_port = int(v2ray_port)
+        self.v2ray_uuid = v2ray_uuid
+        self.v2ray_network = v2ray_network if v2ray_network in _NETWORKS else "tcp"
+        self.v2ray_path = v2ray_path
+        self.v2ray_tls = bool(v2ray_tls)
+        self.autostart = bool(autostart)
 
     def to_dict(self) -> dict:
         return {
@@ -73,6 +92,14 @@ class Config:
             "port": self.port,
             "proxy_mode": self.proxy_mode,
             "transparent": self.transparent,
+            "v2ray_enabled": self.v2ray_enabled,
+            "v2ray_server": self.v2ray_server,
+            "v2ray_port": self.v2ray_port,
+            "v2ray_uuid": self.v2ray_uuid,
+            "v2ray_network": self.v2ray_network,
+            "v2ray_path": self.v2ray_path,
+            "v2ray_tls": self.v2ray_tls,
+            "autostart": self.autostart,
         }
 
     def save(self, path: Path = CONFIG_PATH) -> Path:
@@ -111,4 +138,25 @@ class Config:
         mode = data.get("proxy_mode")
         cfg.proxy_mode = mode if mode in _MODES else "rule"  # 缺省规则代理
         cfg.transparent = bool(data.get("transparent", True))  # 缺省透明代理（虚拟网卡）
+
+        # —— VMess 上行（连接 v2ray 服务端）——
+        cfg.v2ray_enabled = bool(data.get("v2ray_enabled", False))
+        server = data.get("v2ray_server")
+        cfg.v2ray_server = server.strip() if isinstance(server, str) else ""
+        try:
+            v2ray_port = int(data.get("v2ray_port", DEFAULT_V2RAY_PORT))
+        except (TypeError, ValueError):
+            v2ray_port = DEFAULT_V2RAY_PORT
+        cfg.v2ray_port = v2ray_port if 1 <= v2ray_port <= 65535 else DEFAULT_V2RAY_PORT
+        uuid_text = data.get("v2ray_uuid")
+        cfg.v2ray_uuid = uuid_text.strip() if isinstance(uuid_text, str) else ""
+        network = data.get("v2ray_network")
+        cfg.v2ray_network = network if network in _NETWORKS else "tcp"
+        path = data.get("v2ray_path")
+        if isinstance(path, str) and path.strip():
+            path = path.strip()
+            cfg.v2ray_path = path if path.startswith("/") else "/" + path
+        cfg.v2ray_tls = bool(data.get("v2ray_tls", False))
+
+        cfg.autostart = bool(data.get("autostart", False))
         return cfg
