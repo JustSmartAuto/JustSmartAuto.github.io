@@ -1,0 +1,52 @@
+<h3>3proxy Traffic Correction Plugin</h3>
+3proxy logs and counts traffic at the application level, while providers usually do
+so at the network or link level. This is significant if you use 3proxy for billing,
+especially in cases where network packets are small, e.g., online games.
+<p>
+This plugin attempts to correct 3proxy's computations to approximate network or
+link-level traffic by using either fixed coefficients by port number or
+by attempting to predict the number and sizes of network packets.
+</p><h4>Usage:</h4>
+<ol>
+ <li>Extract TrafficPlugin.dll to the same folder as the 3proxy executable.
+ </li><li>Start the plugin in 3proxy.cfg with:
+<pre>plugin TrafficPlugin.dll start
+</pre>
+ </li><li>Add correction rules:
+<br>
+FOR FIXED COEFFICIENTS MODE:
+<pre>trafcorrect m &lt;service&gt; &lt;target port&gt; &lt;coefficient&gt;
+</pre>
+where &lt;service&gt; - one of proxy, socks4, socks45, socks5, tcppm, udppm, pop3p; * matches "any".
+<br> &lt;target port&gt; - target port; * matches any
+<br> &lt;coefficient&gt; - coefficient to multiply traffic for this port.
+<br>
+FOR PACKET HEADER PREDICTION MODE:
+<pre>trafcorrect p &lt;service&gt; &lt;tcp/udp&gt; &lt;target port&gt; [empty packet size]
+</pre>
+tcp or udp - transport-level protocol to apply the rule to
+<br>
+empty packet size - average size of an "empty" packet, i.e., the sum of average network/transport headers.
+You can use a network sniffer such as Ethereal to discover it. Usually, the packet size
+is 42 for UDP and
+<br>Modes can be mixed.
+<br>The plugin creates a list of rules; the first matching rule will be applied.
+</li></ol>
+For any mode, the plugin approximates traffic; the logged or counted amount is not exact.
+<h4>Example:</h4>
+<pre>plugin "TrafficPlugin.dll" start
+trafcorrect m socks5 6112 4.5
+trafcorrect m socks5 * 1.1
+</pre>
+Wrong usage:
+<pre>trafcorrect m socks5 * 1.1
+trafcorrect m socks5 6112 4.5
+</pre>
+The second rule will never be applied.
+<h4>Download:</h4>
+<ul>
+ <li>Plugin is included in the 3proxy 0.6 binary and source distribution
+</li></ul>
+
+&copy; Maslov Michael aka Flexx(rus)
+ 
