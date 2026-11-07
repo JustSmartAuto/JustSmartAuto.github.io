@@ -47,7 +47,13 @@ class Win95UI:
         self.root.withdraw()
 
     def _icon_path(self) -> str:
-        for base in (Path.cwd(), Path(__file__).resolve().parents[2]):
+        import sys
+
+        bases = [Path.cwd(), Path(__file__).resolve().parents[2]]
+        bundle = getattr(sys, "_MEIPASS", None)
+        if bundle:
+            bases.insert(0, Path(bundle))
+        for base in bases:
             p = base / "assets" / "cat.ico"
             if p.is_file():
                 return str(p)
