@@ -170,12 +170,13 @@ class Client:
             conn.close()
 
     def _udp_associate(self, conn: socket.socket, host: str, port: int) -> None:
-        """UDP ASSOCIATE：每个目标独立上行 socket，应答回填真实源地址.
+        """UDP ASSOCIATE：应答回填真实源地址，同时尽量少占 socket.
 
         网关的回包不带目标信息，若所有目标共用一个上行 socket 就无法判断
         应答属于哪个目标，只能把 SOCKS5 头写成 0.0.0.0:0；tun2socks 会把
         这种包当作“无法匹配 NAT 映射”丢弃（日志 drop packet from 0.0.0.0:0）。
-        按目标拆 socket 后，回包所在的 socket 即代表目标，应答头可填真实地址。
+        这里首个目标直接复用 relay socket（tun2socks 一个关联只有一个目标，
+        等于零额外开销），同一关联出现其它目标时才为它们单独开上行 socket。
         """
         relay = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         relay.bind(("0.0.0.0", 0))
@@ -195,6 +196,9 @@ class Client:
             return
         gw = (self.cfg.gateway, self.gw_port)
         app_addr: list[tuple] = []
+        # 第一个目标直接复用 relay socket 收发，避免每个目标都多开 socket/线程；
+        # 同一关联里出现第二个目标时才为它单独开上行 socket。
+        primary: list[tuple[str, int] | None] = [None]
         flows: dict[tuple[str, int], socket.socket] = {}
         flows_lock = threading.Lock()
         closed = threading.Event()
@@ -257,28 +261,41 @@ class Client:
             return direct_holder[0]
 
         def relay_loop() -> None:
-            """应用 → 目标：规则模式下局域网目标直连，其余经网关上行 socket."""
+            """relay socket 双向复用：本机应用报文 → 网关，网关应答 → 本机应用.
+
+            首个经网关的目标就挂在这条 socket 上，因此它的应答按 primary 回填；
+            后续目标走各自的上行 socket，应答由 upstream_loop 处理。
+            """
             log.debug("UDP relay_loop 启动 relay_port=%s gw=%s", relay.getsockname()[1], gw)
             while not self._stop.is_set() and not closed.is_set():
                 try:
                     data, addr = relay.recvfrom(65535)
                 except OSError:
                     break
+                if addr[:2] == gw:
+                    # 网关应答（primary 目标）：套 SOCKS5 头回送本机应用
+                    if primary[0] is not None:
+                        reply_to_app(primary[0][0], primary[0][1], data)
+                    continue
                 parsed = _parse_socks5_udp(data)
                 if parsed is None:
                     continue
                 if not app_addr or app_addr[-1] != addr:
                     app_addr.append(addr)
                 inner_host, inner_port, payload = parsed
+                target = (inner_host, inner_port)
                 try:
                     if (
                         self.cfg.proxy_mode == "rule"
                         and is_lan_host(inner_host)
                         and inner_port != 53
                     ):
-                        direct_sock().sendto(payload, (inner_host, inner_port))
+                        direct_sock().sendto(payload, target)
+                    elif primary[0] is None or primary[0] == target:
+                        primary[0] = target
+                        relay.sendto(encode_address(inner_host, inner_port) + payload, gw)
                     else:
-                        upstream_for((inner_host, inner_port)).sendto(
+                        upstream_for(target).sendto(
                             encode_address(inner_host, inner_port) + payload, gw
                         )
                 except OSError:
