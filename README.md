@@ -1,4 +1,4 @@
-# OdiffDiff — 图像差分 Diff 器
+# ImageDiffPy — 图像差分 Diff 器
 
 基于 **Python Tk GUI** + **odiff.exe（Zig SIMD 加速）** 的像素级图像差分对比工具。
 左右并排 + Diff 结果三栏同屏对比，支持拖拽加载、Ctrl+滚轮缩放、自动保存结果。
@@ -42,7 +42,7 @@ python -m odiffdiff.app
 # 打包（单文件 exe）
 pip install pyinstaller pillow
 python build_exe.py
-# 产物：dist/OdiffDiff_<时间戳>.exe
+# 产物：dist/ImageDiffPy_<时间戳>.exe
 ```
 
 **注意**：tkinterdnd2 依赖 Tcl/Tk DLL 位数与 Python 一致。如果启动报 "Bad exe format"，拖放功能将自动降级为仅按钮选择，不影响核心 diff 功能。

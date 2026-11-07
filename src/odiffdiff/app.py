@@ -1,7 +1,7 @@
 """应用入口。
 
 用法：
-    odiff-diff
+    imagediffpy
     python -m odiffdiff.app
 """
 

@@ -1,4 +1,4 @@
-"""PyInstaller 打包：单文件 exe，命名 OdiffDiff_{yyyyMMddHHmmss}。
+"""PyInstaller 打包：单文件 exe，命名 ImageDiffPy_{yyyyMMddHHmmss}。
 
 用法：python build_exe.py
 """
