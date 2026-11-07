@@ -15,6 +15,7 @@ DEFAULT_PORT = 10082
 DEFAULT_GATEWAY = "127.0.0.1"
 
 _ROLES = ("server", "client")
+_MODES = ("rule", "global")  # 规则代理（忽略局域网 IP）/ 全局代理
 
 
 def _default_dir() -> Path:
@@ -54,15 +55,22 @@ class Config:
         role: str = "client",
         gateway: str = DEFAULT_GATEWAY,
         port: int = DEFAULT_PORT,
+        proxy_mode: str = "rule",
     ) -> None:
         if role not in _ROLES:
             role = "client"
         self.role = role
         self.gateway = gateway
         self.port = int(port)
+        self.proxy_mode = proxy_mode if proxy_mode in _MODES else "rule"
 
     def to_dict(self) -> dict:
-        return {"role": self.role, "gateway": self.gateway, "port": self.port}
+        return {
+            "role": self.role,
+            "gateway": self.gateway,
+            "port": self.port,
+            "proxy_mode": self.proxy_mode,
+        }
 
     def save(self, path: Path = CONFIG_PATH) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -97,4 +105,6 @@ class Config:
         except (TypeError, ValueError):
             port = DEFAULT_PORT
         cfg.port = port if 1 <= port <= 65535 else DEFAULT_PORT
+        mode = data.get("proxy_mode")
+        cfg.proxy_mode = mode if mode in _MODES else "rule"  # 缺省规则代理
         return cfg

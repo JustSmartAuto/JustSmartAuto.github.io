@@ -114,13 +114,23 @@ class Win95UI:
         self.port_box.grid(row=2, column=1, sticky="w")
         self._sync_port_box()
 
+        tk.Label(panel, text="代理模式", bg=CHROME, font=FONT).grid(row=3, column=0, sticky="w")
+        self.mode = tk.StringVar(
+            value="规则代理" if self.cfg.proxy_mode != "global" else "全局代理"
+        )
+        for i, label in enumerate(("规则代理", "全局代理")):
+            tk.Radiobutton(
+                panel, text=label, variable=self.mode, value=label,
+                bg=CHROME, font=FONT,
+            ).grid(row=3, column=1 + i, sticky="w")
+
         tk.Button(panel, text="保存", bg=CHROME, font=FONT, command=self._save).grid(
-            row=3, column=1, columnspan=2, sticky="we", pady=(4, 0)
+            row=4, column=1, columnspan=2, sticky="we", pady=(4, 0)
         )
 
         # —— 代理控制：运行状态指示灯 + 开始/停止按钮 ——
         control = tk.Frame(panel, bg=CHROME)
-        control.grid(row=4, column=0, columnspan=3, sticky="we", pady=(8, 0))
+        control.grid(row=5, column=0, columnspan=3, sticky="we", pady=(8, 0))
         self.status_dot = tk.Label(
             control, text="●", bg=CHROME, fg="#008000", font=("Tahoma", 12),
         )
@@ -187,6 +197,7 @@ class Win95UI:
         self.cfg.role = role
         self.cfg.gateway = self.gw.get().strip() or self.cfg.gateway
         self.cfg.port = port
+        self.cfg.proxy_mode = "global" if self.mode.get() == "全局代理" else "rule"
         self.cfg.save()
         self.append_log(f"配置已写入 {CONFIG_PATH}")
         self.controller.reload(self.cfg)

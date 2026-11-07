@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import socket
 import struct
@@ -20,6 +21,15 @@ from .config import Config
 from .relay import encode_address, pipe
 
 log = logging.getLogger("internet_proxy.client")
+
+
+def is_lan_host(host: str) -> bool:
+    """是否局域网/本机地址：规则代理模式下这些目标直连，不经网关."""
+    try:
+        ip = ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        return False  # 域名一律交给网关解析
+    return ip.is_private or ip.is_loopback or ip.is_link_local
 
 
 def _read_exact(conn: socket.socket, n: int) -> bytes:
@@ -122,10 +132,15 @@ class Client:
             self._udp_associate(conn, host, port)
 
     def _connect(self, conn: socket.socket, host: str, port: int) -> None:
-        """CONNECT：网关 TCP 隧道，字节双向泵."""
+        """CONNECT：规则模式下局域网目标直连，其余经网关 TCP 隧道双向泵."""
+        direct = self.cfg.proxy_mode == "rule" and is_lan_host(host)
         try:
-            up = socket.create_connection((self.cfg.gateway, self.gw_port), timeout=10)
-            up.sendall(encode_address(host, port))
+            if direct:
+                up = socket.create_connection((host, port), timeout=10)
+                log.info("直连(局域网) %s:%s", host, port)
+            else:
+                up = socket.create_connection((self.cfg.gateway, self.gw_port), timeout=10)
+                up.sendall(encode_address(host, port))
             conn.sendall(b"\x05\x00\x00\x01" + socket.inet_aton("0.0.0.0") + b"\x00\x00")
             pipe(conn, up)
             log.info("CONNECT %s:%s 会话结束", host, port)
@@ -152,6 +167,31 @@ class Client:
             return
         gw = (self.cfg.gateway, self.gw_port)
         app_addr: list[tuple] = []
+        direct_holder: list[socket.socket] = []  # 规则模式下局域网目标的直连 UDP socket
+
+        def reply_to_app(data: bytes) -> None:
+            dst = app_addr[-1] if app_addr else None
+            if dst is None:
+                return
+            head = b"\x00\x00\x00\x01" + socket.inet_aton("0.0.0.0") + b"\x00\x00"
+            relay.sendto(head + data, dst)
+
+        def direct_loop(sock: socket.socket) -> None:
+            """局域网直连应答：原样套 SOCKS5 头回送本机应用."""
+            while not self._stop.is_set():
+                try:
+                    data, _ = sock.recvfrom(65535)
+                    reply_to_app(data)
+                except OSError:
+                    break
+
+        def direct_sock() -> socket.socket:
+            if not direct_holder:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.bind(("0.0.0.0", 0))
+                direct_holder.append(sock)
+                threading.Thread(target=direct_loop, args=(sock,), daemon=True).start()
+            return direct_holder[0]
 
         def relay_loop() -> None:
             """单方向收发循环：同一 socket，来源 == 本机即 SOCKS5 报文，否则为网关应答."""
@@ -163,16 +203,12 @@ class Client:
                     break
                 if addr[:2] == gw:
                     # 网关应答：套 SOCKS5 头（目标字段占位 0.0.0.0:0）回送本机
-                    dst = app_addr[-1] if app_addr else None
-                    if dst is None:
-                        continue
-                    head = b"\x00\x00\x00\x01" + socket.inet_aton("0.0.0.0") + b"\x00\x00"
                     try:
-                        relay.sendto(head + data, dst)
+                        reply_to_app(data)
                     except OSError:
                         break
                     continue
-                # 本地应用 → 网关
+                # 本地应用 → 网关（规则模式下局域网目标直连）
                 parsed = _parse_socks5_udp(data)
                 if parsed is None:
                     continue
@@ -180,12 +216,17 @@ class Client:
                     app_addr.append(addr)
                 inner_host, inner_port, payload = parsed
                 try:
-                    relay.sendto(encode_address(inner_host, inner_port) + payload, gw)
+                    if self.cfg.proxy_mode == "rule" and is_lan_host(inner_host):
+                        direct_sock().sendto(payload, (inner_host, inner_port))
+                    else:
+                        relay.sendto(encode_address(inner_host, inner_port) + payload, gw)
                 except OSError:
                     break
 
         threading.Thread(target=relay_loop, daemon=True).start()
         self._await_control_close(conn, relay)
+        for sock in direct_holder:
+            sock.close()
 
     def _await_control_close(self, conn: socket.socket, relay: socket.socket) -> None:
         """控制连接由客户端主动关闭时结束本次 ASSOCIATE 会话."""
