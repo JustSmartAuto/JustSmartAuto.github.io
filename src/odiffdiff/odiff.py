@@ -270,6 +270,9 @@ def run_diff(
         ]
         cwd = None
 
+    # odiff.exe 是控制台程序；窗口模式下必须禁止创建子进程控制台黑框
+    creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+
     try:
         proc = subprocess.run(
             cmd,
@@ -279,7 +282,7 @@ def run_diff(
             errors="replace",  # 子进程输出可能被系统代码页污染，容错解码
             timeout=timeout,
             cwd=cwd,
-            creationflags=0,  # Windows 下避免弹窗
+            creationflags=creationflags,
         )
     except FileNotFoundError as exc:
         return DiffResult(False, "file-error", stderr=str(exc))

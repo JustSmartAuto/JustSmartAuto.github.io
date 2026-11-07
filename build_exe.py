@@ -17,14 +17,17 @@ ASSETS = ROOT / "assets"
 ASSET_WHITELIST = [
     "odiff-windows-x64.exe",   # odiff 引擎 —— 运行必需
     "odiff-icon.png",          # 方形圆角 icon
+    "app_icon.ico",            # 窗口 / exe 图标
     "02-windows-95.css",       # Win95 设计 token
 ]
 
 
 def make_icon() -> Path | None:
-    """由 odiff-icon.png 生成 app_icon.ico（需 Pillow）。"""
+    """返回 app_icon.ico；不存在时由 odiff-icon.png 生成。"""
     png = ASSETS / "odiff-icon.png"
     ico = ASSETS / "app_icon.ico"
+    if ico.exists():
+        return ico
     try:
         from PIL import Image
 
@@ -39,6 +42,7 @@ def make_icon() -> Path | None:
 def main() -> None:
     stamp = datetime.now().strftime("%Y%m%d%H%M%S")
     name = f"ImageDiffPy_{stamp}"
+    icon = make_icon()
 
     cmd = [
         sys.executable, "-m", "PyInstaller",
@@ -53,7 +57,6 @@ def main() -> None:
             print(f"⚠ 跳过缺失的 asset: {fname}")
 
     cmd += [str(ROOT / "src" / "odiffdiff" / "app.py")]
-    icon = make_icon()
     if icon is not None:
         cmd += ["--icon", str(icon)]
 

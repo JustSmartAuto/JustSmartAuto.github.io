@@ -200,10 +200,21 @@ class ImageDiffPyApp(TkinterDnD.Tk if _DND_OK else tk.Tk):
     # —— 窗口骨架 ————————————————————————————————————————————
 
     def _set_icon(self) -> None:
-        icon = Path(__file__).resolve().parents[2] / "assets" / "odiff-icon.png"
-        if icon.exists():
+        # 源码运行：仓库根/assets；PyInstaller 解包：_MEIPASS/assets
+        base = (Path(sys._MEIPASS) if getattr(sys, "_MEIPASS", None)
+                else Path(__file__).resolve().parents[2])
+        ico = base / "assets" / "app_icon.ico"
+        if ico.is_file():
             try:
-                img = Image.open(icon).resize((32, 32), Image.LANCZOS)
+                self.iconbitmap(str(ico))
+                return
+            except tk.TclError:
+                pass
+
+        png = base / "assets" / "odiff-icon.png"
+        if png.is_file():
+            try:
+                img = Image.open(png).resize((32, 32), Image.LANCZOS)
                 self._icon_img = ImageTk.PhotoImage(img)
                 self.iconphoto(True, self._icon_img)
             except Exception:  # noqa: BLE001
