@@ -140,15 +140,23 @@ class Client:
                 pass
 
     def _handle(self, conn: socket.socket) -> None:
-        req = _socks5_request(conn)
-        if req is None:
-            _deny(conn, 1)
-            return
-        cmd, host, port = req
-        if cmd == 1:
-            self._connect(conn, host, port)
-        else:
-            self._udp_associate(conn, host, port)
+        try:
+            req = _socks5_request(conn)
+            if req is None:
+                _deny(conn, 1)
+                return
+            cmd, host, port = req
+            if cmd == 1:
+                self._connect(conn, host, port)
+            else:
+                self._udp_associate(conn, host, port)
+        except Exception:
+            # 不能让异常静默杀掉处理线程：否则对端只看到连接被关（EOF），无从定位
+            log.exception("SOCKS5 会话异常")
+            try:
+                conn.close()
+            except OSError:
+                pass
 
     def _connect(self, conn: socket.socket, host: str, port: int) -> None:
         """CONNECT：规则模式下局域网目标直连，其余经网关 TCP 隧道双向泵."""
@@ -178,8 +186,15 @@ class Client:
         这里首个目标直接复用 relay socket（tun2socks 一个关联只有一个目标，
         等于零额外开销），同一关联出现其它目标时才为它们单独开上行 socket。
         """
-        relay = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        relay.bind(("0.0.0.0", 0))
+        try:
+            relay = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            relay.bind(("0.0.0.0", 0))
+        except OSError as exc:
+            # 端口/内核缓冲耗尽时 bind 会失败（WSAENOBUFS 10055 等），
+            # 必须回一个 SOCKS5 失败应答，而不是直接断开
+            log.warning("UDP ASSOCIATE %s:%s 无法创建中继 socket: %s", host, port, exc)
+            _deny(conn, 1)
+            return
         local_port = relay.getsockname()[1]
         try:
             # BND.ADDR 必须是客户端本机（应用把 UDP 报文发到这里的中继端口），
@@ -190,7 +205,8 @@ class Client:
                 + socket.inet_aton(bnd_addr)
                 + local_port.to_bytes(2, "big")
             )
-        except OSError:
+        except OSError as exc:
+            log.warning("UDP ASSOCIATE %s:%s 握手回包失败: %s", host, port, exc)
             conn.close()
             relay.close()
             return
