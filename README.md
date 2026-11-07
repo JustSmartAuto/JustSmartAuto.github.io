@@ -55,6 +55,92 @@
 
 一句话总结：**SSH 隧道是通用远程工具顺带做转发，本软件是为"封闭局域网批量工控机共享一个外网出口"场景专门做的零配置常驻代理**。如果链路不可信或需要加密与访问控制，应选 SSH/VPN；如果目标是现场免运维、开机即用，本软件更合适。
 
+## 与参考实现对比：3proxy 与 wintun
+
+`reference/` 下放了两份上游实现用于对照：**3proxy**（通用代理服务器，与本项目解决
+同一类问题）和 **wintun**（Windows L3 TUN 驱动，本项目透明代理的底座）。这里只做
+架构对照，没有复制它们的代码。
+
+### 3proxy 1.0.3
+
+`reference/3proxy-1.0.3-x64/` 是发行包（`3proxy.exe`、插件 DLL、`cfg/3proxy.cfg.sample`
+与 man 文档），源码在 `reference/3proxy-master.zip` 的 `src/`。
+
+实现要点：
+
+- **配置即服务**：`3proxy.cfg` 每行声明一个监听服务（`socks`、`proxy`、`pop3p`、
+  `smtpp`、`udppm` 等），一个进程同时跑多种协议；支持注册为 Windows 服务、
+  `nscache` DNS 缓存、`timeouts` 超时组、ACL 与 `auth` 认证。
+- **单进程 select/poll 事件循环**：`src/common.c` 的 `mypoll()` 用 `select()` 模拟
+  `poll()`（Windows 上同样走 select），所有连接在同一线程轮转，超时统一取
+  `conf.timeouts[]`；建连也走 `connectwithpoll()` 等可写。
+- **每连接一个 `struct clientparam`**（`src/structures.h`）：携带双端 socket、读写
+  缓冲、ACL/认证回调、限速与流量统计钩子；`FilePlugin.dll`、`TrafficPlugin.dll`、
+  `WindowsAuthentication.dll` 通过函数指针挂载。
+- **SOCKS5 在 `src/socks.c`**：实现 CONNECT / BIND / UDP ASSOCIATE，请求行缓冲
+  1024 字节（`BUFSIZE`），UDP 报文缓冲 16384 字节（`UDPBUFSIZE`）。UDP ASSOCIATE
+  可用 `-Ni` 向客户端通告一个"内部 NAT 地址"，客户端把数据报发到该地址，再由
+  `udpsockmap()` 按 TCP 控制连接归位。
+- **面向公网**：认证、ACL、计费、限速是它的卖点，因此配置项多、学习成本高。
+
+与本项目的差异：
+
+| 维度 | InternetProxyPy | 3proxy |
+|---|---|---|
+| 形态 | Python 单包，客户端 / 网关两种角色，PyInstaller 打成单 exe | C 守护进程 / Windows 服务，配置文件驱动 |
+| 客户端接入 | 默认透明代理（wintun + tun2socks），也可直接用 SOCKS5 | 只提供标准 SOCKS/HTTP 等，需应用显式配置 |
+| 网关侧协议 | 自定义"长度前缀地址 + 原始数据"隧道，网关不对外暴露 SOCKS5 | 直接对客户端提供 SOCKS5 等标准协议 |
+| 认证 / ACL | 无（封闭局域网免配置） | 认证、ACL、插件、计费齐备 |
+| 并发模型 | 每 TCP 连接、每 UDP 会话各一个线程，逻辑直观但千级连接时线程开销大 | 单线程 poll 复用，更适合高并发 |
+| UDP | 客户端为每个（会话，目标）维护上行 socket，回包按真实源地址回填 SOCKS5 头 | `-Ni` 通告内部地址 + `udpsockmap` 归位 |
+| 规模 | 11 个模块、约 1500 行 Python，现场改起来快 | 20 余年 C 代码，跨平台但阅读门槛高 |
+
+### wintun
+
+`reference/wintun/` 是完整源码：`api/`（用户态 DLL）与 `driver/`（内核驱动），
+支持 Windows 7–11，驱动需签名、创建网卡需管理员权限。
+
+实现要点：
+
+- **适配器**：[api/adapter.c](reference/wintun/api/adapter.c) 提供
+  `WintunCreateAdapter(name, type, guid)`，按名称/GUID 幂等复用；适配器信息落在
+  注册表命名空间（`api/registry.c`、`api/namespace.c`），所以**进程退出后网卡仍然
+  存在**。
+- **会话与环**：[api/session.c](reference/wintun/api/session.c) 的
+  `WintunStartSession()` 建立会话，内核与用户态通过环形缓冲区交换 IP 包，容量可在
+  128 KiB – 64 MiB 之间选择；收包 `WintunReceivePacket()` →
+  `WintunReleaseReceivePacket()`，发包 `WintunAllocateSendPacket()` →
+  `WintunSendPacket()`，无包时等 `WintunGetReadWaitEvent()`。
+- **驱动侧**：[driver/wintun.c](reference/wintun/driver/wintun.c) 处理 IRP，把 IP 包
+  放进 ring，本身不解析、不转发任何协议——它只搬包。
+
+与本项目的关系：
+
+- 本项目**不直接调用 wintun API**：`assets/bin/wintun.dll` 由内嵌的 tun2socks 加载
+  （`--device tun://InternetProxyPy`），TCP/IP 协议栈还原、DNS、UDP 会话都交给
+  tun2socks；我们只负责起进程、配地址、加路由（[tun.py](src/internet_proxy/tun.py)）。
+- 正因为适配器是持久的，才出现过"重名网卡被改名为 `InternetProxyPy 2`、
+  `198.18.0.1` 已被占用（错误 5010）"的问题；现在启动前用 `_cleanup_adapters()`
+  清残留、用 `_adapter_index()` 按 `ifIndex` 配置，绕开名字漂移。
+- 路由策略（`0.0.0.0/1` + `128.0.0.0/1` 覆盖路由、网关 `/32` 直连防回环）属于
+  Windows 路由表操作，wintun 完全不涉及，是本项目自己补的一层。
+- 若绕过 tun2socks 直接用 wintun：可用 `ctypes` 调 `WintunCreateAdapter` /
+  `WintunStartSession` 省掉一个外部进程，但必须在 Python 里实现 TCP/IP 栈，
+  代价远大于收益，因此没有采用。
+
+### 可以直接借鉴的点
+
+- **3proxy 的 `-Ni` 内部 NAT 地址**：让应用把 UDP 统一发往一个中继端口，可显著
+  减少客户端 UDP socket 数量，缓解 `WSAENOBUFS (10055)`；代价是要在客户端维护
+  "控制连接 ↔ 数据报来源"的映射。
+- **3proxy 的 poll 模型**：若以后要顶上千并发，可把"每连接一线程"改为单线程
+  `selectors` 多路复用。
+- **3proxy 的 ACL**：即使保持免认证，也可以只允许配置中的局域网网段连接，
+  降低被误用风险。
+- **3proxy 的 `nscache`**：网关侧加一层 DNS 缓存，减少上游查询、加快客户端解析。
+- **wintun 的 `WintunEnumAdapters`**：比现在用 PowerShell `Get-NetAdapter` 轮询更快，
+  也不受中文系统编码影响，可作为后续优化项。
+
 ## 版本号规则
 
 版本号采用 **日期时间格式 `YY.M.D.H`**（年.月.日.24 小时制小时，均不补零），
