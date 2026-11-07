@@ -55,6 +55,24 @@
 
 一句话总结：**SSH 隧道是通用远程工具顺带做转发，本软件是为"封闭局域网批量工控机共享一个外网出口"场景专门做的零配置常驻代理**。如果链路不可信或需要加密与访问控制，应选 SSH/VPN；如果目标是现场免运维、开机即用，本软件更合适。
 
+## 安装器（nginx / v2ray）
+
+主界面新增「安装器」标签页，并在**首次启动时自动请求管理员权限（UAC）静默安装**：
+
+| 组件 | 来源 | 安装位置 | 监听 | 说明 |
+|---|---|---|---|---|
+| v2ray | `assets/v2ray-windows-64.zip` | `D:/JustSmart/InternetProxyPy/v2ray` | `0.0.0.0:11080` | SOCKS5 服务端，账号 `justsmart` / 密码 `justsmart`，开启 UDP |
+| nginx | `assets/nginx-1.31.8.zip` | `D:/JustSmart/InternetProxyPy/nginx` | `0.0.0.0:18080` | 静态站点，`/status` 为健康检查 |
+
+- 安装时写入 `nginx/conf/nginx.conf` 与 `v2ray/config.json`，并按参考文档放行防火墙端口；
+- 安装记录写入 `D:/JustSmart/InternetProxyPy/installer.json`；自动安装只尝试一次，
+  取消 UAC 后可在「安装器」页手动重试；
+- 「安装器」页提供 一键安装/修复、启动服务、停止服务、打开目录、刷新状态，
+  并实时显示两个组件的安装与运行状态；
+- 端口取 11080 / 18080 而非 1080 / 8080，避免与常见代理、Web 服务冲突。
+
+参考实现见 [setup_v2ray_server_at_windows.md](reference/setup_v2ray_server_at_windows.md)。
+
 ## 与参考实现对比：3proxy 与 wintun
 
 `reference/` 下放了两份上游实现用于对照：**3proxy**（通用代理服务器，与本项目解决

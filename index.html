@@ -166,11 +166,14 @@
           <legend>特性</legend>
           <ul>
             <li><strong>TCP / UDP 双协议代理</strong> —— 覆盖 HTTP(S)、DNS 在内的大多数场景。</li>
+            <li><strong>系统透明代理（默认开启）</strong> —— wintun + tun2socks 创建虚拟网卡并接管系统流量，应用无需任何代理设置；非管理员或缺组件时自动回退纯 SOCKS5。</li>
+            <li><strong>规则 / 全局两种代理模式</strong> —— 规则模式下局域网目标客户端直连，只有外网流量进隧道。</li>
             <li><strong>默认端口 10082</strong> —— SOCKS5 等代理端口默认高端口 <code>10082</code>。</li>
             <li><strong>免认证</strong> —— 封闭局域网内连接即用，不设账号密码。</li>
             <li><strong>静默启动 + 托盘后台运行</strong> —— 启动时立即静默最小化到托盘，用户无感知；Tkinter + TkDND2 创建托盘图标，代理常驻后台。</li>
+            <li><strong>单实例保护</strong> —— 同一角色重复启动会提示并退出，避免多实例抢网卡、耗尽系统套接字。</li>
             <li><strong>配置持久化</strong> —— 网关工控机 IP 与代理端口写入配置文件，重启自动生效。目录默认 <code>D:/JustSmart/InternetProxyPy</code>（自动创建），不可用时回退 <code>%APPDATA%/InternetProxyPy</code>。</li>
-            <li><strong>Windows 95 风格界面</strong> —— 日志输出与设置界面采用 Win95 设计令牌（02-windows-95.css）。</li>
+            <li><strong>Windows 95 风格界面</strong> —— 日志 / 设置 / 安装器三个标签页，采用 Win95 设计令牌（02-windows-95.css）。</li>
             <li><strong>图标</strong> —— 托盘与窗口使用圆角处理的 cat.ico。</li>
           </ul>
         </div>
@@ -191,6 +194,36 @@ python main.py --role client --headless      # 客户端，SOCKS5 10082</pre>
             <code>127.0.0.1</code>。配置持久化在
             <code>D:/JustSmart/InternetProxyPy/config.json</code>（回退规则见特性）。
           </p>
+        </div>
+
+        <div class="fieldset">
+          <legend>安装器（nginx / v2ray）</legend>
+          <p>
+            主界面新增「安装器」标签页，并在<strong>首次启动时自动请求管理员权限（UAC）静默安装</strong>，
+            装完即启动；取消 UAC 后可在该页手动重试。
+          </p>
+          <table>
+            <tr><th>组件</th><th>安装位置</th><th>监听</th><th>说明</th></tr>
+            <tr>
+              <td>v2ray</td>
+              <td>D:/JustSmart/InternetProxyPy/v2ray</td>
+              <td>0.0.0.0:11080</td>
+              <td>SOCKS5 服务端，账号 <code>justsmart</code> / 密码 <code>justsmart</code>，开启 UDP</td>
+            </tr>
+            <tr>
+              <td>nginx</td>
+              <td>D:/JustSmart/InternetProxyPy/nginx</td>
+              <td>0.0.0.0:18080</td>
+              <td>静态站点，<code>/status</code> 为健康检查</td>
+            </tr>
+          </table>
+          <ul>
+            <li>两个组件来自 exe 内嵌的压缩包，无需联网下载；</li>
+            <li>安装时写入 <code>nginx.conf</code> 与 v2ray <code>config.json</code>，并放行防火墙端口；</li>
+            <li>安装记录写入 <code>installer.json</code>，自动安装只尝试一次；</li>
+            <li>页面提供 一键安装/修复、启动服务、停止服务、打开目录、刷新状态；</li>
+            <li>端口取 11080 / 18080，避开 1080 / 8080 这类常见占用。</li>
+          </ul>
         </div>
 
         <div class="fieldset">
@@ -216,7 +249,7 @@ python main.py --role client --headless      # 客户端，SOCKS5 10082</pre>
           <p>
             版本号采用日期时间格式 <code>YY.M.D.H</code>（年.月.日.24 小时制小时，
             均不补零），每次发布取发布时间生成。
-            当前版本：<code>26.11.7.12</code>（2026 年 11 月 7 日 12 时）。
+            当前版本：<code>26.11.7.20</code>（2026 年 11 月 7 日 20 时）。
           </p>
         </div>
 
@@ -242,6 +275,7 @@ python main.py --role client --headless      # 客户端，SOCKS5 10082</pre>
         <span>服务端：0.0.0.0:10082 (TCP/UDP/SOCKS5)</span>
         <span>客户端：网关 192.168.1.10:10082</span>
         <span>托盘：静默启动 · cat.ico</span>
+        <span>服务：v2ray 11080 (justsmart) · nginx 18080</span>
         <span>配置：D:/JustSmart/InternetProxyPy → %APPDATA%</span>
       </div>
     </div>

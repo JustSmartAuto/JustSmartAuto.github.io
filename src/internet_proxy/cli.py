@@ -52,7 +52,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--port", type=int, help="代理端口，默认 10082")
     parser.add_argument("--headless", action="store_true", help="无界面方式运行")
+    parser.add_argument(
+        "--install-extras", action="store_true", help=argparse.SUPPRESS
+    )
     args = parser.parse_args(argv)
+
+    if args.install_extras:  # 提权子进程：只装 nginx / v2ray，装完退出
+        from .installer import cli_install
+
+        return cli_install()
 
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)-7s %(message)s"

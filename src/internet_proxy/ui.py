@@ -1,8 +1,9 @@
 """主界面：Tkinter + TkDND2，Windows 95 风格（设计令牌取自 assets/02-windows-95.css）。
 
-两个区块：
+三个标签页：
     - 日志：滚动文本区，客户端 / 服务端运行日志实时输出
     - 设置：角色（服务端/客户端）、网关 IP、端口（默认 10082），保存写回 config.json
+    - 安装器：nginx / v2ray 的安装状态与一键安装、启停、打开目录
 
 窗口启动即沉淀（withdraw，静默最小化到托盘），仅经托盘唤出，用户无感知。
 关闭按钮（X）只隐藏回托盘，退出只能走托盘菜单；最小化按钮为系统默认（最小化到任务栏）。
@@ -11,12 +12,15 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import tkinter as tk
 from pathlib import Path
+from tkinter import ttk
 
 from tkinterdnd2 import TkinterDnD
 
+from . import installer
 from .config import CONFIG_PATH, Config
 
 # —— Win95 设计令牌（与 assets/02-windows-95.css 保持一致）——
@@ -42,7 +46,7 @@ class Win95UI:
         self.root = TkinterDnD.Tk()
         self.root.title("InternetProxyPy")
         self.root.iconbitmap(self._icon_path())
-        self.root.geometry("560x420")
+        self.root.geometry("600x470")
         self.root.report_callback_exception = self._on_exception
         # 关闭按钮（X）不退出，只隐藏到托盘；最小化按钮保持默认行为（最小化到任务栏）
         self.root.protocol("WM_DELETE_WINDOW", self.hide)
@@ -74,9 +78,25 @@ class Win95UI:
             bg=TITLE, fg=TITLE_TEXT, font=FONT, anchor="w",
         ).pack(fill="x")
 
+        notebook = ttk.Notebook(body)
+        notebook.pack(fill="both", expand=True, pady=(6, 0))
+        log_tab = tk.Frame(notebook, bg=BG)
+        set_tab = tk.Frame(notebook, bg=BG)
+        inst_tab = tk.Frame(notebook, bg=BG)
+        notebook.add(log_tab, text="日志")
+        notebook.add(set_tab, text="设置")
+        notebook.add(inst_tab, text="安装器")
+        notebook.bind("<<NotebookTabChanged>>", lambda _e: self._refresh_installer())
+
+        self._build_log_tab(log_tab)
+        self._build_settings_tab(set_tab)
+        self._build_installer_tab(inst_tab)
+        self._refresh_installer()
+
+    def _build_log_tab(self, parent: tk.Frame) -> None:
         # —— 日志（Win95 内凹 log view）——
-        logbox = tk.Frame(body, bg=CHROME, bd=2, relief="solid")
-        logbox.pack(fill="both", expand=True, pady=(6, 4))
+        logbox = tk.Frame(parent, bg=CHROME, bd=2, relief="solid")
+        logbox.pack(fill="both", expand=True, padx=2, pady=2)
         self.log = tk.Text(
             logbox, bg=WHITE, fg=INK, font=MONO, state="disabled",
             height=12, wrap="char", bd=0,
@@ -86,9 +106,10 @@ class Win95UI:
         sb.pack(side="right", fill="y")
         self.log.pack(fill="both", expand=True)
 
+    def _build_settings_tab(self, parent: tk.Frame) -> None:
         # —— 设置（Win95 groupbox 风格）——
-        panel = tk.Frame(body, bg=CHROME, padx=8, pady=8)
-        panel.pack(fill="x")
+        panel = tk.Frame(parent, bg=CHROME, padx=8, pady=8)
+        panel.pack(fill="x", padx=2, pady=2)
         for c in range(4):
             panel.grid_columnconfigure(c, pad=4, weight=0 if c > 0 else 1)
 
@@ -151,6 +172,97 @@ class Win95UI:
         )
         self.stop_btn.pack(side="left", padx=2)
         self.set_status(self.controller.running)
+
+    def _build_installer_tab(self, parent: tk.Frame) -> None:
+        # —— 安装器：nginx / v2ray 状态与操作 ——
+        panel = tk.Frame(parent, bg=CHROME, padx=8, pady=8)
+        panel.pack(fill="both", expand=True, padx=2, pady=2)
+
+        tk.Label(panel, text="服务组件", bg=CHROME, font=FONT).pack(anchor="w")
+        self.inst_status = tk.StringVar(value="检测中 ...")
+        tk.Label(
+            panel, textvariable=self.inst_status, justify="left", anchor="nw",
+            bg=WHITE, fg=INK, font=MONO, bd=1, relief="sunken", padx=4, pady=4,
+        ).pack(fill="x", pady=(2, 8))
+
+        tk.Label(
+            panel,
+            text=f"v2ray：SOCKS5 0.0.0.0:{installer.V2RAY_PORT}  "
+                 f"账号 {installer.PROXY_USER} / 密码 {installer.PROXY_PASS}",
+            bg=CHROME, font=FONT, justify="left",
+        ).pack(anchor="w")
+        tk.Label(
+            panel,
+            text=f"nginx：静态站点 0.0.0.0:{installer.NGINX_PORT}，/status 健康检查",
+            bg=CHROME, font=FONT, justify="left",
+        ).pack(anchor="w")
+
+        row = tk.Frame(panel, bg=CHROME)
+        row.pack(fill="x", pady=(10, 0))
+        tk.Button(
+            row, text="一键安装/修复", bg=CHROME, font=FONT,
+            command=lambda: self._installer_action(installer.request_install),
+        ).pack(side="left", padx=(0, 4))
+        tk.Button(
+            row, text="启动服务", bg=CHROME, font=FONT,
+            command=lambda: self._installer_action(installer.start_services),
+        ).pack(side="left", padx=4)
+        tk.Button(
+            row, text="停止服务", bg=CHROME, font=FONT,
+            command=lambda: self._installer_action(installer.stop_services),
+        ).pack(side="left", padx=4)
+
+        row2 = tk.Frame(panel, bg=CHROME)
+        row2.pack(fill="x", pady=(6, 0))
+        tk.Button(
+            row2, text="打开目录", bg=CHROME, font=FONT, command=self._open_install_dir,
+        ).pack(side="left", padx=(0, 4))
+        tk.Button(
+            row2, text="刷新状态", bg=CHROME, font=FONT, command=self._refresh_installer,
+        ).pack(side="left", padx=4)
+
+        tk.Label(
+            panel,
+            text="首次启动会自动请求管理员权限（UAC）并静默安装，取消后可在本页重试。",
+            bg=CHROME, fg=CHROME_DARK, font=FONT, justify="left",
+        ).pack(anchor="w", pady=(10, 0))
+
+    # —— 安装器操作 ——
+    def _installer_action(self, action) -> None:
+        """安装 / 启停放到后台线程，避免 UAC、解压和等待端口时卡住界面."""
+        def work() -> None:
+            try:
+                action(self.append_log)
+            except Exception as exc:  # 失败只记日志，不弹异常
+                self.append_log(f"安装器执行失败: {exc}")
+            finally:
+                self.root.after(0, self._refresh_installer)
+
+        threading.Thread(target=work, name="installer-ui", daemon=True).start()
+
+    def _refresh_installer(self) -> None:
+        def work() -> None:
+            try:
+                st = installer.status()
+            except Exception as exc:
+                text = f"状态检测失败: {exc}"
+            else:
+                text = (
+                    f"nginx  {'已安装' if st['nginx_installed'] else '未安装'}"
+                    f"  {'运行中' if st['nginx_running'] else '未运行'}\n"
+                    f"v2ray  {'已安装' if st['v2ray_installed'] else '未安装'}"
+                    f"  {'运行中' if st['v2ray_running'] else '未运行'}\n"
+                    f"目录   {st['base_dir']}"
+                )
+            self.root.after(0, lambda: self.inst_status.set(text))
+
+        threading.Thread(target=work, name="installer-status", daemon=True).start()
+
+    def _open_install_dir(self) -> None:
+        try:
+            os.startfile(str(installer.BASE_DIR))
+        except OSError as exc:
+            self.append_log(f"打开目录失败: {exc}")
 
     def _start_proxy(self) -> None:
         self.controller.start()

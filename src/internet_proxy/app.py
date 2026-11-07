@@ -150,6 +150,11 @@ def run_gui(cfg: Config) -> None:  # pragma: no cover - GUI 入口
         tray_holder["tray"] = tray
         tray.start()
 
+        # 首次启动：自动提权静默安装 nginx / v2ray（已装或已尝试过则跳过）
+        from .installer import auto_install
+
+        auto_install(ui.append_log)
+
     controller = Controller(cfg, on_log=lambda text: log.info(text))
     build()
     ui_holder["ui"].run()

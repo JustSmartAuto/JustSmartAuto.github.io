@@ -13,7 +13,7 @@ wheels = [
 
 [[package]]
 name = "internetproxypy"
-version = "26.11.7.18"
+version = "26.11.7.20"
 source = { editable = "." }
 dependencies = [
     { name = "tkinterdnd2" },
