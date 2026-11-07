@@ -5,6 +5,7 @@
     - 设置：角色（服务端/客户端）、网关 IP、端口（默认 10082），保存写回 config.json
 
 窗口启动即沉淀（withdraw，静默最小化到托盘），仅经托盘唤出，用户无感知。
+关闭按钮（X）只隐藏回托盘，退出只能走托盘菜单；最小化按钮为系统默认（最小化到任务栏）。
 """
 
 from __future__ import annotations
@@ -42,6 +43,8 @@ class Win95UI:
         self.root.iconbitmap(self._icon_path())
         self.root.geometry("560x420")
         self.root.report_callback_exception = self._on_exception
+        # 关闭按钮（X）不退出，只隐藏到托盘；最小化按钮保持默认行为（最小化到任务栏）
+        self.root.protocol("WM_DELETE_WINDOW", self.hide)
         self._build()
         # —— 启动静默：立即沉淀到托盘，用户无感知 ——
         self.root.withdraw()

@@ -97,7 +97,6 @@ def run_gui(cfg: Config) -> None:  # pragma: no cover - GUI 入口
             tk=ui.root,
             cfg=cfg,
             on_show=show,
-            on_toggle=lambda: controller.reload(Config.load()),
             on_exit=exit_app,
         )
         tray_holder["tray"] = tray

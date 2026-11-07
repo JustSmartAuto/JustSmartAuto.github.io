@@ -2,7 +2,7 @@
 
 启动静默：Tk 主窗口全程 withdraw，用户无感知；所有交互经由托盘完成：
     - 左键单击：唤出主窗口（Win95 风格：日志 + 设置）
-    - 右键菜单：显示主窗口 / 启动·停止代理 / 退出
+    - 右键菜单：显示窗口 / 退出
 
 不引入 pystray/pywin32：托盘线程自建窗口类 (CreateWindowExW + GetMessageW)，
 回调经 Tk.after(0, ...) 派回 Tk 主线程，天然线程安全。
@@ -129,7 +129,7 @@ class NOTIFYICONDATAW(ctypes.Structure):
     ]
 
 
-MENU_SHOW, MENU_START, MENU_STOP, MENU_EXIT = 4001, 4002, 4003, 4004
+MENU_SHOW, MENU_EXIT = 4001, 4004
 _TIPS = {
     "server": "InternetProxyPy — 代理服务端（网关）· TCP/UDP {port}",
     "client": "InternetProxyPy — 代理客户端 · 网关 {gw}:{port}",
@@ -162,11 +162,10 @@ def _load_ico() -> wt.HICON:
 class TrayIcon:
     """托盘宿主：独立窗口线程 + 消息泵，回调经 tk.after 派回主线程."""
 
-    def __init__(self, tk, cfg, on_show, on_toggle, on_exit) -> None:
+    def __init__(self, tk, cfg, on_show, on_exit) -> None:
         self.tk = tk
         self.cfg = cfg
         self.on_show = on_show
-        self.on_toggle = on_toggle
         self.on_exit = on_exit
         self._hwnd = None
         self._hicon = None
@@ -243,10 +242,7 @@ class TrayIcon:
 
     def _popup_menu(self, hwnd) -> None:
         menu = user32.CreatePopupMenu()
-        user32.AppendMenuW(menu, 0, MENU_SHOW, "显示主窗口")
-        user32.AppendMenuW(menu, 0, MENU_START, "启动代理")
-        user32.AppendMenuW(menu, 0, MENU_STOP, "停止代理")
-        user32.AppendMenuW(menu, 0x800, -1)  # MF_SEPARATOR
+        user32.AppendMenuW(menu, 0, MENU_SHOW, "显示窗口")
         user32.AppendMenuW(menu, 0, MENU_EXIT, "退出")
         user32.SetForegroundWindow(hwnd)
         pt = wt.POINT()
@@ -258,8 +254,6 @@ class TrayIcon:
         user32.DestroyMenu(menu)
         if chosen == MENU_SHOW:
             self.tk.after(0, self.on_show)
-        elif chosen in (MENU_START, MENU_STOP):
-            self.tk.after(0, self.on_toggle)
         elif chosen == MENU_EXIT:
             self.tk.after(0, self.on_exit)
 
