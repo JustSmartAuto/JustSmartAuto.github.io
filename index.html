@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>OdiffDiff — 图像差分 Diff 器</title>
-<meta name="description" content="Python Tk + odiff.exe 的像素级图像差分对比工具，拖拽加载、三栏同屏、自动保存。" />
+<title>ImageDiffPy — 图像差分 Diff 器</title>
+<meta name="description" content="Python Tk + odiff.exe 的像素级图像差分工具：双图三栏对比、文件夹批量图案检验、差异热力图。" />
 <style>
   :root {
     --bg: #008080;         /* Win95 teal 桌面 */
@@ -181,6 +181,55 @@
   .feat h3 { margin: 4px 0 6px 0; font-size: 14px; }
   .feat p { margin: 0; font-size: 13px; line-height: 1.5; color: #222; }
 
+  /* 流程 */
+  .flow {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 8px;
+    margin: 12px 0;
+  }
+  .flow .step {
+    background: #fff;
+    border: 2px inset var(--chrome-dark);
+    padding: 10px 12px;
+    font-size: 13px;
+    line-height: 1.55;
+  }
+  .flow .step b { display: block; margin-bottom: 4px; color: var(--title); }
+
+  /* 数据表格 */
+  .table-wrap { overflow-x: auto; }
+  table.spec {
+    width: 100%;
+    border-collapse: collapse;
+    background: #fff;
+    font-size: 12.5px;
+    line-height: 1.55;
+  }
+  table.spec th, table.spec td {
+    border: 1px solid var(--chrome-dark);
+    padding: 6px 8px;
+    text-align: left;
+    vertical-align: top;
+  }
+  table.spec th {
+    background: var(--title);
+    color: #fff;
+    font-weight: bold;
+    white-space: nowrap;
+  }
+  table.spec tr:nth-child(even) td { background: #e8e8e8; }
+  table.spec td:first-child { white-space: nowrap; }
+
+  .note {
+    background: #ffffe1;
+    border: 1px solid var(--chrome-dark);
+    padding: 8px 10px;
+    font-size: 13px;
+    line-height: 1.65;
+    margin: 10px 0;
+  }
+
   /* 状态栏 */
   .statusbar {
     background: var(--chrome);
@@ -194,24 +243,30 @@
   }
 
   a { color: var(--link); }
+
+  @media (max-width: 640px) {
+    .hero { flex-direction: column; align-items: flex-start; }
+    .wrap { padding: 20px 12px; }
+  }
 </style>
 </head>
 <body>
 <div class="wrap">
 
-  <div class="titlebar">  OdiffDiff — 图像差分 Diff 器</div>
+  <div class="titlebar">ImageDiffPy — 图像差分 Diff 器</div>
 
   <!-- Hero -->
   <div class="hero">
     <div class="logo">
-      <img src="./assets/odiff-icon.png" alt="OdiffDiff icon"
+      <img src="./assets/odiff-icon.png" alt="ImageDiffPy icon"
            onerror="this.style.display='none'; this.parentElement.textContent='🦫'" />
     </div>
     <div>
       <h1>像素级图像差分，毫秒级完成。</h1>
       <p class="sub">
         Python Tk GUI + <strong>odiff.exe</strong>（Zig SIMD 加速）的桌面工具。
-        把两张图片拖入窗口，Diff 结果自动保存为 JPG，还能直接打开结果目录。
+        支持双图三栏对比，也支持拖入整个文件夹做<strong>图案检验</strong>与<strong>差异热力图</strong>；
+        结果自动保存，分析在后台线程执行，界面不卡顿。
         支持 PNG / JPG / WebP / TIFF / BMP，跨格式直接比较。
       </p>
       <p style="margin-top:12px">
@@ -224,12 +279,18 @@
 
   <!-- 特性 -->
   <div class="features">
-    <div class="feat"><div class="icon">🖱️</div><h3>拖拽加载</h3><p>把图片直接拖进 Base / Compare 面板，或点按钮选择。</p></div>
+    <div class="feat"><div class="icon">🖱️</div><h3>拖拽加载</h3><p>把图片拖进 Base / Compare 面板，或把整个文件夹拖入窗口做批量分析。</p></div>
     <div class="feat"><div class="icon">⚡</div><h3>SIMD 加速</h3><p>odiff.exe 基于 Zig，支持 SSE2 / AVX2 / AVX512。</p></div>
     <div class="feat"><div class="icon">🔍</div><h3>三栏同屏</h3><p>Ctrl+滚轮缩放，左键拖拽平移，差异一目了然。</p></div>
-    <div class="feat"><div class="icon">⚙️</div><h3>参数可调</h3><p>阈值 0-1 / 忽略抗锯齿 / Diff Mask / 差异色。</p></div>
-    <div class="feat"><div class="icon">💾</div><h3>自动保存</h3><p><code>D:/JustSmart/ImageDiffPy/Diff/</code>，JPG q=95。</p></div>
-    <div class="feat"><div class="icon">📂</div><h3>一键打开目录</h3><p>工具栏按钮直接在资源管理器中查看结果。</p></div>
+    <div class="feat"><div class="icon">📁</div><h3>文件夹批量</h3><p>自动收集 PNG / JPG / BMP / TIFF / WebP，逐张统计并输出汇总结果。</p></div>
+    <div class="feat"><div class="icon">🧩</div><h3>图案检验</h3><p>PatInspect 原理：多张良品训练均值 / 标准差模板，逐张计算缺陷率。</p></div>
+    <div class="feat"><div class="icon">🔥</div><h3>差异热力图</h3><p>以模板为基准逐张 odiff，累计每像素差异概率并映射为热力图。</p></div>
+    <div class="feat"><div class="icon">📊</div><h3>Win95 进度条</h3><p>凹陷边框 + 蓝色分段方块，实时显示模板训练与差异统计进度。</p></div>
+    <div class="feat"><div class="icon">🧵</div><h3>后台执行</h3><p>批量分析在工作线程运行，进度经队列回主线程，界面保持响应。</p></div>
+    <div class="feat"><div class="icon">🌐</div><h3>跨格式比较</h3><p>PNG / JPG / WebP / TIFF / BMP 任意组合，批量分析自动收集。</p></div>
+    <div class="feat"><div class="icon">🖥️</div><h3>Win95 界面</h3><p>teal 桌面、凸起按钮、navy 标题栏，复古外观下保持现代手感。</p></div>
+    <div class="feat"><div class="icon">⚙️</div><h3>参数可调</h3><p>阈值 0-1 / 忽略抗锯齿 / Diff Mask / 白底叠加 / 差异色。</p></div>
+    <div class="feat"><div class="icon">💾</div><h3>自动保存</h3><p>双图 diff 与批量结果统一保存，命名带时间戳，一键打开目录。</p></div>
   </div>
 
   <!-- 三栏对比示意图 -->
@@ -242,19 +303,180 @@
     </div>
   </div>
 
+  <!-- 文件夹批量分析 -->
+  <div class="group">
+    <h2>文件夹批量分析</h2>
+    <p>
+      拖入一个图片文件夹（或按 <kbd>Ctrl+3</kbd> 选择），工具栏会出现
+      <strong>「图案检验」</strong>与<strong>「热力图」</strong>按钮。
+      所有结果保存到 <code>D:/JustSmart/ImageDiffPy/Diff/</code>（回退到 APPDATA）。
+    </p>
+
+    <div class="flow">
+      <div class="step"><b>1. 加载文件夹</b>自动按文件名排序，收集常见图片格式。</div>
+      <div class="step"><b>2. 图案检验</b>训练良品模板，统计每张图的缺陷像素比例。</div>
+      <div class="step"><b>3. 热力图</b>以模板为基准逐张差分，累计差异概率。</div>
+      <div class="step"><b>4. 查看结果</b>进度条实时推进，完成后自动显示结果图。</div>
+    </div>
+
+    <div class="table-wrap">
+      <table class="spec">
+        <tr><th>功能</th><th>原理</th><th>输出</th></tr>
+        <tr>
+          <td>图案检验</td>
+          <td>PatInspect 原理：N 张良品逐像素求均值 <code>p̄(i,j)</code> 与标准差 <code>σ(i,j)</code>，
+              阈值 <code>A·σ + B</code>；逐张统计超过阈值的缺陷像素。</td>
+          <td><code>template_&lt;文件夹&gt;_&lt;时间戳&gt;.png</code><br>平均 / 最大缺陷率、σ 均值</td>
+        </tr>
+        <tr>
+          <td>热力图</td>
+          <td>以训练模板为 Base，逐张执行 <code>odiff --diff-mask</code>，
+              累计每个像素出现差异的次数 / 张数，映射为黑→蓝→青→绿→黄→红。</td>
+          <td><code>heatmap_&lt;文件夹&gt;_&lt;时间戳&gt;.png</code><br>最大概率、有差异像素占比、≥50% 像素占比</td>
+        </tr>
+      </table>
+    </div>
+
+    <div class="note">
+      <strong>注意</strong>：当前批量分析不做几何配准，OK 图之间的轻微位移会在物体边缘形成热点。
+      适合固定机位、稳定光照的批次分析；若用于工业在线检测，建议先做 PMAlign 类定位与光照归一化。
+    </div>
+    <p style="font-size:13px;color:#333">
+      批量任务在后台线程执行，分析期间可继续缩放 / 平移界面；按钮会临时置灰，切换文件夹会被拦截。
+    </p>
+  </div>
+
+  <!-- 原理对比 -->
+  <div class="group">
+    <h2>原理对比：PatInspect vs odiff</h2>
+    <p>
+      odiff 与 Cognex VisionPro 的 <strong>PatInspect（图案检验）</strong>都在做逐像素差异检测，
+      但定位和算法模型不同。完整算法说明见
+      <a href="https://github.com/JustSmartAuto/JustSmartAuto.github.io/blob/img-diff/docs/PatInspect.md" target="_blank">docs/PatInspect.md ↗</a>。
+    </p>
+
+    <p><strong>相同点</strong></p>
+    <ul>
+      <li><strong>逐像素比较</strong>：都以一张参考图（训练图案 / Base）为基准，找出与待检图的差异。</li>
+      <li><strong>输出差异图</strong>：把差异像素高亮成结果图，便于 Blob / Histogram 分析或人眼复核。</li>
+      <li><strong>有灵敏度参数</strong>：PatInspect 用 <code>A × σ + B</code>，odiff 用 0~1 的 <code>threshold</code>。</li>
+      <li><strong>可限定比较区域</strong>：PatInspect 通过训练区域 / Pose 限定，odiff 通过 <code>--ignore</code> 忽略区域。</li>
+      <li><strong>要求几何对齐</strong>：PatInspect 依赖 PMAlign / Fixture，odiff 要求两图像素级同尺寸对齐。</li>
+    </ul>
+
+    <p><strong>不同点</strong></p>
+    <div class="table-wrap">
+      <table class="spec">
+        <tr><th>维度</th><th>PatInspect（VisionPro）</th><th>odiff（本项目）</th></tr>
+        <tr><td>参考模型</td><td>统计训练：N 张良品逐像素求均值 <code>p̄(i,j)</code> 与标准差 <code>σ(i,j)</code></td><td>无训练模型，直接比较 Base / Compare 两张图</td></tr>
+        <tr><td>阈值</td><td>每像素自适应：<code>Threshold(i,j) = A·σ(i,j) + B</code></td><td>全局标量：<code>max_delta = 35215 × threshold²</code></td></tr>
+        <tr><td>光照鲁棒性</td><td>直方图均衡、均值标准差、Match Tails、Robust Line Fit、局部校正等归一化</td><td>无归一化，依赖两图采集 / 渲染条件一致</td></tr>
+        <tr><td>颜色度量</td><td>对像素值及其标准差建模，可配合 Sobel 边缘</td><td>转 YIQ，按 0.5053 / 0.299 / 0.1957 加权平方差</td></tr>
+        <tr><td>抗锯齿</td><td>不专门处理</td><td>可选用 3×3 邻域同色兄弟像素检测忽略抗锯齿</td></tr>
+        <tr><td>差异后处理</td><td>原始差分超过阈值后减去 offset，输出 thresholded difference</td><td>只标记差异像素并计数，不做二次阈值化</td></tr>
+        <tr><td>几何对齐</td><td>PMAlign + PatMax 定位，支持 Pose 传递</td><td>不做配准；尺寸不同时按重叠区域比较</td></tr>
+        <tr><td>加速方式</td><td>工业运行时（未开源）</td><td>Zig SIMD：AVX512 / NEON / RVV，毫秒级</td></tr>
+        <tr><td>典型场景</td><td>产线在线缺陷检测（容忍来料与光照波动）</td><td>截图 / 渲染结果视觉回归（要求像素稳定）</td></tr>
+      </table>
+    </div>
+
+    <p><strong>对本项目的启示</strong></p>
+    <ul>
+      <li>odiff 的定位是“确定性像素回归”，不是“容忍生产波动的缺陷检测”；Base / Compare 应在同一设备、同一参数下采集。</li>
+      <li>若用于工业图像，需先做几何对齐与光照归一化，否则正常波动会被判成缺陷。</li>
+      <li>PatInspect 的自适应阈值思路（按局部标准差定阈值）可作为后续增强：高噪声区域放宽、稳定区域收紧。</li>
+    </ul>
+  </div>
+
+  <!-- 术语对照 -->
+  <div class="group">
+    <h2>术语对照</h2>
+    <p>
+      <strong>PatInspect</strong> 中的 <em>Pat</em> 取自 Pattern（图案），<em>Inspect</em> 意为检验，
+      准确中文译名为<strong>「图案检验」</strong>（部分资料译“图案检测”）。
+      本项目统一使用“图案检验”，核心术语如下：
+    </p>
+    <div class="table-wrap">
+      <table class="spec">
+        <tr><th>英文</th><th>中文</th><th>备注</th></tr>
+        <tr><td>PatInspect</td><td>图案检验</td><td>亦译“图案检测”，基于训练图案的缺陷检测工具</td></tr>
+        <tr><td>trained pattern</td><td>训练图案</td><td>多张良品图像逐像素统计得到的基准图案</td></tr>
+        <tr><td>training image</td><td>训练图像</td><td>用于建立训练图案的良品图像</td></tr>
+        <tr><td>run-time image</td><td>运行图像</td><td>实际待检图像，亦称“待检图像”</td></tr>
+        <tr><td>standard deviation image</td><td>标准差图像</td><td>表示训练图案各像素的允许波动</td></tr>
+        <tr><td>pseudo-standard deviation image</td><td>伪标准差图像</td><td>单张训练图时由 Sobel Edge 生成</td></tr>
+        <tr><td>threshold image</td><td>阈值图像</td><td>每像素的判定阈值 <code>A·σ + B</code></td></tr>
+        <tr><td>match image</td><td>匹配图像</td><td>运行图像中与训练区域对应的部分</td></tr>
+        <tr><td>raw difference image</td><td>原始差分图像</td><td>训练图案与匹配图像的绝对差</td></tr>
+        <tr><td>thresholded difference image</td><td>阈值化差分图像</td><td>超过阈值的差异输出，供 Blob / Histogram 分析</td></tr>
+        <tr><td>image normalization</td><td>图像归一化</td><td>补偿运行图像的光照变化</td></tr>
+        <tr><td>identity</td><td>恒等（不归一化）</td><td>不执行任何归一化</td></tr>
+        <tr><td>histogram equalization</td><td>直方图均衡化</td><td>使直方图与训练图案匹配</td></tr>
+        <tr><td>mean and standard deviation</td><td>均值与标准差</td><td>匹配直方图的均值与标准差</td></tr>
+        <tr><td>match tails</td><td>尾部匹配</td><td>对齐直方图左右尾部</td></tr>
+        <tr><td>robust line fit</td><td>稳健直线拟合</td><td>抗大缺陷的拟合方法，耗时更长</td></tr>
+        <tr><td>local correction</td><td>局部校正</td><td>按矩形邻域分别归一化</td></tr>
+        <tr><td>enhanced local correction</td><td>增强局部校正</td><td>效果更好但更慢</td></tr>
+        <tr><td>scale coefficient (A)</td><td>比例系数 (A)</td><td>控制边缘对比度</td></tr>
+        <tr><td>offset coefficient (B)</td><td>偏移系数 (B)</td><td>控制整体亮度 / 判定偏移</td></tr>
+        <tr><td>Pose</td><td>位姿</td><td>描述物体位置、旋转、缩放的映射</td></tr>
+        <tr><td>PMAlign</td><td>PMAlign 图案匹配</td><td>基于 PatMax 的定位工具，为 PatInspect 提供位姿</td></tr>
+        <tr><td>interpolation mode</td><td>插值模式</td><td>Bilinear（双线性）/ Compatibility（兼容）</td></tr>
+        <tr><td>defect pixel</td><td>缺陷像素</td><td>超过阈值、被判定为异常的像素</td></tr>
+        <tr><td>Sobel Edge</td><td>Sobel 边缘检测</td><td>生成伪标准差图像时使用</td></tr>
+      </table>
+    </div>
+  </div>
+
   <!-- 运行 -->
   <div class="group">
     <h2>运行</h2>
     <p>开发模式：</p>
-<pre><code>pip install pillow tkinterdnd2
+<pre><code>pip install pillow tkinterdnd2 numpy
 $env:PYTHONPATH = "src"
 python -m odiffdiff.app</code></pre>
     <p style="margin-top:12px">打包为单文件 exe：</p>
 <pre><code>pip install pyinstaller pillow
 python build_exe.py
-# 产物: dist/OdiffDiff_&lt;时间戳&gt;.exe</code></pre>
+# 产物: dist/ImageDiffPy_&lt;时间戳&gt;.exe</code></pre>
     <p style="margin-top:12px"><strong>注意</strong>：tkinterdnd2 依赖 Tcl/Tk DLL 位数与 Python 一致。若报 "Bad exe format"，
     拖放功能自动降级为按钮选择，不影响核心 diff 功能。</p>
+    <p>打包仅收录运行必需的 <code>odiff-windows-x64.exe</code>、图标与 Win95 CSS，不包含 <code>odiff-main.zip</code>。</p>
+  </div>
+
+  <!-- 项目结构 -->
+  <div class="group">
+    <h2>项目结构</h2>
+<pre><code>├── src/odiffdiff/
+│   ├── app.py          # 入口
+│   ├── ui.py           # 三栏 Tk 主界面 + 批量分析交互
+│   ├── odiff.py        # odiff.exe 子进程封装
+│   ├── batch.py        # 图案检验模板 / 差异热力图
+│   └── theme.py        # Win95 主题 + 分段进度条
+├── assets/
+│   ├── odiff-windows-x64.exe   # odiff 引擎（运行必需）
+│   ├── odiff-icon.png          # 方形圆角 app icon
+│   ├── app_icon.ico            # 窗口 / exe 图标
+│   └── 02-windows-95.css       # Win95 设计 token
+├── docs/               # PatInspect 算法文档（PDF 转 Markdown）
+├── legacy/             # 旧版 WPF + Python 存档
+├── build_exe.py        # PyInstaller onefile 打包
+└── pyproject.toml</code></pre>
+  </div>
+
+  <!-- 技术栈 -->
+  <div class="group">
+    <h2>技术栈</h2>
+    <div class="table-wrap">
+      <table class="spec">
+        <tr><th>组件</th><th>技术</th></tr>
+        <tr><td>UI</td><td>Python 3.10+ / Tkinter / TkinterDnD2</td></tr>
+        <tr><td>图像处理</td><td>Pillow + NumPy</td></tr>
+        <tr><td>Diff 引擎</td><td>odiff.exe（Zig + SIMD）</td></tr>
+        <tr><td>批量分析</td><td>均值 / 标准差模板、odiff --diff-mask、概率热力图</td></tr>
+        <tr><td>打包</td><td>PyInstaller --onefile --windowed</td></tr>
+      </table>
+    </div>
   </div>
 
   <!-- 快捷键 -->
@@ -263,9 +485,10 @@ python build_exe.py
     <ul>
       <li><kbd>Ctrl+1</kbd> 选 Base 图像</li>
       <li><kbd>Ctrl+2</kbd> 选 Compare 图像</li>
+      <li><kbd>Ctrl+3</kbd> 选择图片文件夹</li>
       <li><kbd>Ctrl + 滚轮</kbd> 缩放当前面板</li>
       <li><kbd>左键拖拽</kbd> 平移图像</li>
-      <li>把文件拖入窗口 → 自动填入第一个空槽</li>
+      <li>把图片 / 文件夹拖入窗口 → 自动填入空槽或进入批量分析</li>
     </ul>
   </div>
 
@@ -296,8 +519,8 @@ Options:
 
   <!-- 状态栏 -->
   <div class="statusbar">
-    <span>OdiffDiff v26.11.4.1 · Windows 95 风格界面</span>
-    <span>odiff.exe (Zig SIMD)</span>
+    <span>ImageDiffPy v26.11.7.1 · Windows 95 风格界面</span>
+    <span>odiff.exe (Zig SIMD) · PatInspect</span>
   </div>
 
 </div>

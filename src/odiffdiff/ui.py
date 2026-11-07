@@ -14,9 +14,11 @@
 from __future__ import annotations
 
 import os
+import queue
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import tkinter as tk
 from pathlib import Path
@@ -169,6 +171,9 @@ class ImageDiffPyApp(TkinterDnD.Tk if _DND_OK else tk.Tk):
         self.folder_path: Path | None = None
         self._folder_images: list[Path] = []
         self._template_path: Path | None = None
+        self._batch_running = False
+        self._batch_queue: queue.Queue = queue.Queue()
+        self._worker: threading.Thread | None = None
         self._result_dir: Path = result_dir()
         self._base_img: Image.Image | None = None
         self._compare_img: Image.Image | None = None
@@ -542,6 +547,9 @@ class ImageDiffPyApp(TkinterDnD.Tk if _DND_OK else tk.Tk):
             self._set_folder(Path(folder))
 
     def _set_folder(self, folder: Path) -> None:
+        if self._batch_running:
+            messagebox.showinfo("提示", "批量分析进行中，请稍候…", parent=self)
+            return
         if not folder.is_dir():
             messagebox.showerror("打开失败", f"文件夹不存在:\n{folder}", parent=self)
             return
@@ -587,15 +595,20 @@ class ImageDiffPyApp(TkinterDnD.Tk if _DND_OK else tk.Tk):
             messagebox.showinfo("提示", "至少需要 2 张图片才能分析", parent=self)
             return
 
-        folder = self.folder_path or self._folder_images[0].parent
+        images = list(self._folder_images)
+        folder = self.folder_path or images[0].parent
         stamp = time.strftime("%Y%m%d_%H%M%S")
         label = "图案检验" if kind == "template" else "热力图"
+        template_path = self._template_path
 
         need_template = (
             kind == "heatmap"
-            and (self._template_path is None or not self._template_path.is_file())
+            and (template_path is None or not template_path.is_file())
         )
-        count = len(self._folder_images)
+        threshold = float(self.var_threshold.get())
+        antialiasing = bool(self.var_aa.get())
+
+        count = len(images)
         if kind == "template":
             steps = count * 2          # 模板训练 + 缺陷统计
         elif need_template:
@@ -606,54 +619,19 @@ class ImageDiffPyApp(TkinterDnD.Tk if _DND_OK else tk.Tk):
         self._progress_total = max(1, steps)
         self._update_progress(0.0)
 
+        self._batch_running = True
+        self._batch_queue = queue.Queue()
         self._set_batch_busy(True)
         self.status_tag.config(text=f"● {label}")
-        self.update_idletasks()
 
-        try:
-            if kind == "template":
-                out = self._result_dir / _batch_filename("template", folder, stamp)
-                result = train_template(
-                    self._folder_images, out, progress=self._batch_progress)
-                self._template_path = result.path
-                summary = (
-                    f"模板: {result.image_count} 张 | 平均缺陷率 "
-                    f"{result.mean_defect_ratio * 100:.2f}% | 最大 "
-                    f"{result.max_defect_ratio * 100:.2f}% | σ均值 {result.mean_std:.1f}"
-                )
-                self._show_batch_result(result.path, summary)
-                self._update_progress(1.0)
-                self.status_tag.config(text="模板完成")
-            else:
-                # 热力图以模板为基准；没有模板时先训练一张
-                if need_template:
-                    template_out = self._result_dir / _batch_filename(
-                        "template", folder, stamp)
-                    template = train_template(
-                        self._folder_images, template_out,
-                        progress=self._batch_progress)
-                    self._template_path = template.path
-                out = self._result_dir / _batch_filename("heatmap", folder, stamp)
-                result = make_heatmap(
-                    self._folder_images, self._template_path, out,
-                    threshold=float(self.var_threshold.get()),
-                    antialiasing=bool(self.var_aa.get()),
-                    progress=self._batch_progress)
-                summary = (
-                    f"热力图: {result.image_count} 张 | 最大概率 "
-                    f"{result.max_probability * 100:.1f}% | 有差异像素 "
-                    f"{result.active_ratio * 100:.2f}% | ≥50% 像素 "
-                    f"{result.strong_ratio * 100:.2f}%"
-                )
-                self._show_batch_result(result.path, summary)
-                self._update_progress(1.0)
-                self.status_tag.config(text="热力图完成")
-        except Exception as exc:  # noqa: BLE001
-            self.status_tag.config(text="出错")
-            self.sb_mid.config(text=f"{label}失败")
-            messagebox.showerror(f"{label}失败", str(exc), parent=self)
-        finally:
-            self._set_batch_busy(False)
+        self._worker = threading.Thread(
+            target=self._batch_worker,
+            args=(kind, images, folder, stamp, template_path, need_template,
+                  threshold, antialiasing, self._result_dir),
+            daemon=True,
+        )
+        self._worker.start()
+        self.after(80, self._poll_batch_queue)
 
     def _set_batch_busy(self, busy: bool) -> None:
         state = "disabled" if busy else "normal"
@@ -663,14 +641,111 @@ class ImageDiffPyApp(TkinterDnD.Tk if _DND_OK else tk.Tk):
         self.btn_pat.config(text=text or "图案检验")
         self.btn_heat.config(text=text or "热力图")
 
-    def _batch_progress(self, phase: str, index: int, total: int, path: Path) -> None:
+    def _batch_worker(
+        self,
+        kind: str,
+        images: list[Path],
+        folder: Path,
+        stamp: str,
+        template_path: Path | None,
+        need_template: bool,
+        threshold: float,
+        antialiasing: bool,
+        result_dir: Path,
+    ) -> None:
+        """后台线程：只做计算，Tk 控件更新全部经队列回主线程。"""
+        label = "图案检验" if kind == "template" else "热力图"
+        try:
+            if kind == "template":
+                out = result_dir / _batch_filename("template", folder, stamp)
+                result = train_template(
+                    images, out, progress=self._queue_progress)
+                self._batch_queue.put(("template_done", result))
+            else:
+                # 热力图以模板为基准；没有模板时先训练一张
+                if need_template:
+                    template_out = result_dir / _batch_filename(
+                        "template", folder, stamp)
+                    template = train_template(
+                        images, template_out, progress=self._queue_progress)
+                    template_path = template.path
+                    self._batch_queue.put(("template_ready", template_path))
+                out = result_dir / _batch_filename("heatmap", folder, stamp)
+                result = make_heatmap(
+                    images, template_path, out,
+                    threshold=threshold,
+                    antialiasing=antialiasing,
+                    progress=self._queue_progress)
+                self._batch_queue.put(("heatmap_done", result))
+        except Exception as exc:  # noqa: BLE001
+            self._batch_queue.put(("error", label, str(exc)))
+        finally:
+            self._batch_queue.put(("done",))
+
+    def _poll_batch_queue(self) -> None:
+        while True:
+            try:
+                msg = self._batch_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                self._handle_batch_message(msg)
+            except Exception as exc:  # noqa: BLE001
+                self.status_tag.config(text="出错")
+                messagebox.showerror("批量分析失败", str(exc), parent=self)
+        if self._batch_running:
+            self.after(80, self._poll_batch_queue)
+
+    def _handle_batch_message(self, msg: tuple) -> None:
+        tag = msg[0]
+        if tag == "progress":
+            self._apply_batch_progress(msg[1], msg[2], msg[3])
+        elif tag == "template_ready":
+            self._template_path = msg[1]
+        elif tag == "template_done":
+            result = msg[1]
+            self._template_path = result.path
+            summary = (
+                f"模板: {result.image_count} 张 | 平均缺陷率 "
+                f"{result.mean_defect_ratio * 100:.2f}% | 最大 "
+                f"{result.max_defect_ratio * 100:.2f}% | σ均值 {result.mean_std:.1f}"
+            )
+            self._show_batch_result(result.path, summary)
+            self._update_progress(1.0)
+            self.status_tag.config(text="模板完成")
+        elif tag == "heatmap_done":
+            result = msg[1]
+            summary = (
+                f"热力图: {result.image_count} 张 | 最大概率 "
+                f"{result.max_probability * 100:.1f}% | 有差异像素 "
+                f"{result.active_ratio * 100:.2f}% | ≥50% 像素 "
+                f"{result.strong_ratio * 100:.2f}%"
+            )
+            self._show_batch_result(result.path, summary)
+            self._update_progress(1.0)
+            self.status_tag.config(text="热力图完成")
+        elif tag == "error":
+            label, text = msg[1], msg[2]
+            self.status_tag.config(text="出错")
+            self.sb_mid.config(text=f"{label}失败")
+            messagebox.showerror(f"{label}失败", text, parent=self)
+        elif tag == "done":
+            self._batch_running = False
+            self._worker = None
+            self._set_batch_busy(False)
+
+    def _queue_progress(
+        self, phase: str, index: int, total: int, path: Path
+    ) -> None:
+        self._batch_queue.put(("progress", phase, index, total))
+
+    def _apply_batch_progress(self, phase: str, index: int, total: int) -> None:
         phase_name = {"train": "模板训练", "inspect": "缺陷统计", "diff": "差异统计"}.get(
             phase, phase)
         self._progress_done += 1
         self._update_progress(self._progress_done / self._progress_total)
         self.sb_mid.config(text=f"{phase_name} {index + 1}/{total}")
         self.status_tag.config(text=f"● {phase_name} {index + 1}/{total}")
-        self.update_idletasks()
 
     def _update_progress(self, value: float) -> None:
         self.progress.set(value)
