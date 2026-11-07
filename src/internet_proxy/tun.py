@@ -111,6 +111,21 @@ def _physical_ipv4() -> str | None:
         return None
 
 
+def _kill_stray_cores() -> None:
+    """结束上次残留的 tun2socks 进程.
+
+    残留核心仍占着虚拟网卡和大量套接字；应用被强杀/重复启动时它们不会退出，
+    累积后会耗尽系统端口与非分页池，表现为 tun2socks 自己 bind 失败
+    （WSAENOBUFS 10055 → DNS 等 UDP 全部不可用）。
+    """
+    try:
+        r = _run(["taskkill", "/F", "/IM", CORE_EXE, "/T"], timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return
+    if r.returncode == 0:
+        log.info("已结束残留的 tun2socks 进程")
+
+
 def _cleanup_adapters() -> None:
     """删除上次运行遗留的 InternetProxyPy* 虚拟网卡。
 
@@ -185,7 +200,8 @@ class TunProxy:
             log.warning("透明代理需管理员权限，回退为纯 SOCKS5 模式")
             return False
 
-        # 先清掉上次遗留的同名网卡，避免新网卡被命名为 "InternetProxyPy 2"
+        # 先杀掉残留核心，再清掉上次遗留的同名网卡，避免新网卡被命名为 "InternetProxyPy 2"
+        _kill_stray_cores()
         _cleanup_adapters()
         leftover = _adapter_indexes()
         if leftover:

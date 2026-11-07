@@ -7,11 +7,38 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import logging
 import sys
 import threading
 
 from .config import Config
+
+_SINGLETON_HANDLES: list[int] = []
+
+
+def _claim_single_instance(role: str) -> bool:
+    """同一角色只允许一个实例运行.
+
+    程序点关闭只是隐藏到托盘，换版本后直接再启动会留下多个实例：它们各自
+    启动一个 tun2socks、同时监听同一端口（SO_REUSEADDR 不会报错），互相
+    抢虚拟网卡并持续占用套接字，最终把系统端口/non-paged pool 耗尽，
+    tun2socks 连自己的 UDP socket 都建不出来（WSAENOBUFS 10055）。
+    """
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.restype = ctypes.c_void_p
+        kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
+        handle = kernel32.CreateMutexW(None, False, f"Local\\InternetProxyPy_{role}")
+        if not handle:
+            return True
+        if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+            kernel32.CloseHandle(ctypes.c_void_p(handle))
+            return False
+        _SINGLETON_HANDLES.append(handle)
+    except OSError:
+        pass
+    return True
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -39,6 +66,18 @@ def main(argv: list[str] | None = None) -> int:
         cfg.role = args.role
     cfg.save()
     print(f"配置文件: {cfg.save().as_posix()}")
+
+    role_key = "client" if cfg.role in ("gui", "client") else "server"
+    if not _claim_single_instance(role_key):
+        text = (
+            f"InternetProxyPy 已有 {role_key} 实例在运行。\n"
+            "请先在托盘图标上右键退出旧实例，再启动本程序。"
+        )
+        if args.headless:
+            print(text, file=sys.stderr)
+        else:
+            ctypes.windll.user32.MessageBoxW(0, text, "InternetProxyPy", 0x40)
+        return 1
 
     if cfg.role == "gui" or (not args.headless and args.role is None):
         from .app import run_gui

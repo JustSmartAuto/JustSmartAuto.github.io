@@ -79,7 +79,7 @@ class Win95UI:
         logbox.pack(fill="both", expand=True, pady=(6, 4))
         self.log = tk.Text(
             logbox, bg=WHITE, fg=INK, font=MONO, state="disabled",
-            height=12, wrap="none", bd=0,
+            height=12, wrap="char", bd=0,
         )
         sb = tk.Scrollbar(logbox, command=self.log.yview)
         self.log.configure(yscrollcommand=sb.set)
