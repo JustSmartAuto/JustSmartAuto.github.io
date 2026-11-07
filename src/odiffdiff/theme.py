@@ -101,6 +101,48 @@ def sunken(master: tk.Misc, **kw) -> tk.Frame:
     return tk.Frame(master, **kw)
 
 
+class ProgressBar(tk.Canvas):
+    """Win95 风格分段进度条（凹陷边框 + 蓝色方块）。"""
+
+    def __init__(self, master: tk.Misc, width: int = 200, height: int = 18, **kw):
+        kw.setdefault("bg", CHROME)
+        kw.setdefault("highlightthickness", 0)
+        kw.setdefault("bd", 0)
+        super().__init__(master, width=width, height=height, **kw)
+        self._value = 0.0
+        self.bind("<Configure>", lambda _e: self._redraw())
+        self._redraw()
+
+    def set(self, value: float) -> None:
+        """设置进度 0.0 ~ 1.0。"""
+        value = max(0.0, min(1.0, float(value)))
+        if value != self._value:
+            self._value = value
+            self._redraw()
+
+    def _redraw(self) -> None:
+        self.delete("all")
+        w = max(20, self.winfo_width())
+        h = max(10, self.winfo_height())
+
+        # 凹陷边框：左上深灰、右下亮白
+        self.create_rectangle(1, 1, w - 2, h - 2, fill=CHROME_LIGHTER, outline="")
+        self.create_line(0, 0, w - 1, 0, fill=CHROME_DARK, width=2)
+        self.create_line(0, 0, 0, h - 1, fill=CHROME_DARK, width=2)
+        self.create_line(0, h - 1, w - 1, h - 1, fill=CHROME_LIGHTER, width=2)
+        self.create_line(w - 1, 0, w - 1, h - 1, fill=CHROME_LIGHTER, width=2)
+
+        # 蓝色分段块
+        x0, y0, x1, y1 = 3, 3, w - 4, h - 4
+        filled = (x1 - x0) * self._value
+        block, gap = 9, 3
+        x = x0
+        while x < x0 + filled:
+            right = min(x + block, x0 + filled)
+            self.create_rectangle(x, y0, right, y1, fill=TITLE, outline="")
+            x += block + gap
+
+
 def titlebar(master: tk.Misc, title: str, end_text: str = "") -> tuple[tk.Frame, tk.Label]:
     """窗口内嵌标题栏（navy 底 + 白字），返回 (标题栏, 右侧状态 Label)。"""
     bar = tk.Frame(master, bg=TITLE)

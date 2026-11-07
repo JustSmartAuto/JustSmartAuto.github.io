@@ -327,6 +327,13 @@ class ImageDiffPyApp(TkinterDnD.Tk if _DND_OK else tk.Tk):
             self.batch_bar, text="", bg=theme.CHROME, font=theme.FONT, anchor="w")
         self.lbl_batch.pack(side="left", fill="x", expand=True)
 
+        self.lbl_progress = tk.Label(
+            self.batch_bar, text="0%", bg=theme.CHROME, font=theme.FONT,
+            width=5, anchor="e")
+        self.lbl_progress.pack(side="right")
+        self.progress = theme.ProgressBar(self.batch_bar, width=200, height=18)
+        self.progress.pack(side="right", padx=(8, 4))
+
     # —— 三栏图像区 ——————————————————————————————————————————
 
     def _build_body(self) -> None:
@@ -545,6 +552,7 @@ class ImageDiffPyApp(TkinterDnD.Tk if _DND_OK else tk.Tk):
         self.ent_folder.config(state="readonly")
         self.lbl_folder_count.config(text=f"{len(images)} 张图片")
         self.lbl_batch.config(text=f"文件夹: {folder.name}（{len(images)} 张）")
+        self._update_progress(0.0)
 
         if not self.batch_bar.winfo_manager():
             self.batch_bar.pack(fill="x", padx=8, pady=(0, 8))
@@ -571,6 +579,22 @@ class ImageDiffPyApp(TkinterDnD.Tk if _DND_OK else tk.Tk):
         folder = self.folder_path or self._folder_images[0].parent
         stamp = time.strftime("%Y%m%d_%H%M%S")
         label = "图案检验" if kind == "template" else "热力图"
+
+        need_template = (
+            kind == "heatmap"
+            and (self._template_path is None or not self._template_path.is_file())
+        )
+        count = len(self._folder_images)
+        if kind == "template":
+            steps = count * 2          # 模板训练 + 缺陷统计
+        elif need_template:
+            steps = count * 3          # 模板训练 + 缺陷统计 + 差异统计
+        else:
+            steps = count              # 仅差异统计
+        self._progress_done = 0
+        self._progress_total = max(1, steps)
+        self._update_progress(0.0)
+
         self._set_batch_busy(True)
         self.status_tag.config(text=f"● {label}")
         self.update_idletasks()
@@ -587,10 +611,11 @@ class ImageDiffPyApp(TkinterDnD.Tk if _DND_OK else tk.Tk):
                     f"{result.max_defect_ratio * 100:.2f}% | σ均值 {result.mean_std:.1f}"
                 )
                 self._show_batch_result(result.path, summary)
+                self._update_progress(1.0)
                 self.status_tag.config(text="模板完成")
             else:
                 # 热力图以模板为基准；没有模板时先训练一张
-                if self._template_path is None or not self._template_path.is_file():
+                if need_template:
                     template_out = self._result_dir / _batch_filename(
                         "template", folder, stamp)
                     template = train_template(
@@ -610,6 +635,7 @@ class ImageDiffPyApp(TkinterDnD.Tk if _DND_OK else tk.Tk):
                     f"{result.strong_ratio * 100:.2f}%"
                 )
                 self._show_batch_result(result.path, summary)
+                self._update_progress(1.0)
                 self.status_tag.config(text="热力图完成")
         except Exception as exc:  # noqa: BLE001
             self.status_tag.config(text="出错")
@@ -629,9 +655,15 @@ class ImageDiffPyApp(TkinterDnD.Tk if _DND_OK else tk.Tk):
     def _batch_progress(self, phase: str, index: int, total: int, path: Path) -> None:
         phase_name = {"train": "模板训练", "inspect": "缺陷统计", "diff": "差异统计"}.get(
             phase, phase)
+        self._progress_done += 1
+        self._update_progress(self._progress_done / self._progress_total)
         self.sb_mid.config(text=f"{phase_name} {index + 1}/{total}")
         self.status_tag.config(text=f"● {phase_name} {index + 1}/{total}")
         self.update_idletasks()
+
+    def _update_progress(self, value: float) -> None:
+        self.progress.set(value)
+        self.lbl_progress.config(text=f"{value * 100:.0f}%")
 
     def _show_batch_result(self, path: Path, summary: str) -> None:
         try:
