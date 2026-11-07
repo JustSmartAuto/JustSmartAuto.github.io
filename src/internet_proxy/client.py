@@ -156,9 +156,12 @@ class Client:
         relay.bind(("0.0.0.0", 0))
         local_port = relay.getsockname()[1]
         try:
+            # BND.ADDR 必须是客户端本机（应用把 UDP 报文发到这里的中继端口），
+            # 填网关 IP 会导致应用把报文直接发到网关，DNS 等 UDP 必然失败。
+            bnd_addr = conn.getsockname()[0]
             conn.sendall(
                 b"\x05\x00\x00\x01"
-                + socket.inet_aton(self.cfg.gateway)
+                + socket.inet_aton(bnd_addr)
                 + local_port.to_bytes(2, "big")
             )
         except OSError:

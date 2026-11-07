@@ -124,6 +124,11 @@ class Win95UI:
                 bg=CHROME, font=FONT,
             ).grid(row=3, column=1 + i, sticky="w")
 
+        self.transparent = tk.BooleanVar(value=self.cfg.transparent)
+        tk.Checkbutton(
+            panel, text="系统透明代理(虚拟网卡)", variable=self.transparent,
+            bg=CHROME, font=FONT, activebackground=CHROME,
+        ).grid(row=4, column=0, sticky="w")
         tk.Button(panel, text="保存", bg=CHROME, font=FONT, command=self._save).grid(
             row=4, column=1, columnspan=2, sticky="we", pady=(4, 0)
         )
@@ -198,6 +203,7 @@ class Win95UI:
         self.cfg.gateway = self.gw.get().strip() or self.cfg.gateway
         self.cfg.port = port
         self.cfg.proxy_mode = "global" if self.mode.get() == "全局代理" else "rule"
+        self.cfg.transparent = self.transparent.get()
         self.cfg.save()
         self.append_log(f"配置已写入 {CONFIG_PATH}")
         self.controller.reload(self.cfg)

@@ -231,6 +231,7 @@ def main() -> None:
         "PyInstaller",
         "--onefile",
         "--windowed",
+        "--uac-admin",  # 透明代理需管理员权限创建 wintun 网卡与路由
         "--noconfirm",
         "--clean",
         "--name",

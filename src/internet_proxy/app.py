@@ -52,11 +52,29 @@ class Controller:
                     client = Client(cfg)
                     self._client = client
                     self.on_log(f"[client] SOCKS5 0.0.0.0:{cfg.port} → {cfg.gateway}:{cfg.port}")
+                    tun = None
+                    if cfg.transparent:
+                        from .tun import TunProxy
+
+                        tun = TunProxy(cfg.port, cfg.gateway)
+
+                        def start_tun() -> None:
+                            import time
+
+                            time.sleep(0.8)  # 等本地 SOCKS5 就绪
+                            if not stop.is_set() and tun.start():
+                                self.on_log("[tun] 系统透明代理已接管（虚拟网卡）")
+                            else:
+                                self.on_log("[tun] 未启用，保持纯 SOCKS5 模式")
+
+                        threading.Thread(target=start_tun, daemon=True).start()
                     try:
                         client.start()
                     except OSError as exc:
                         self.on_log(f"[client] 启动失败: {exc}")
                     finally:
+                        if tun:
+                            tun.stop()
                         self._client = None
             finally:
                 self._set_running(False)

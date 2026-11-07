@@ -56,6 +56,7 @@ class Config:
         gateway: str = DEFAULT_GATEWAY,
         port: int = DEFAULT_PORT,
         proxy_mode: str = "rule",
+        transparent: bool = True,
     ) -> None:
         if role not in _ROLES:
             role = "client"
@@ -63,6 +64,7 @@ class Config:
         self.gateway = gateway
         self.port = int(port)
         self.proxy_mode = proxy_mode if proxy_mode in _MODES else "rule"
+        self.transparent = bool(transparent)
 
     def to_dict(self) -> dict:
         return {
@@ -70,6 +72,7 @@ class Config:
             "gateway": self.gateway,
             "port": self.port,
             "proxy_mode": self.proxy_mode,
+            "transparent": self.transparent,
         }
 
     def save(self, path: Path = CONFIG_PATH) -> Path:
@@ -107,4 +110,5 @@ class Config:
         cfg.port = port if 1 <= port <= 65535 else DEFAULT_PORT
         mode = data.get("proxy_mode")
         cfg.proxy_mode = mode if mode in _MODES else "rule"  # 缺省规则代理
+        cfg.transparent = bool(data.get("transparent", True))  # 缺省透明代理（虚拟网卡）
         return cfg
