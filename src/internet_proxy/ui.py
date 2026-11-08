@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import queue
 import threading
 import tkinter as tk
 from pathlib import Path
@@ -52,7 +53,11 @@ class Win95UI:
         self.root.report_callback_exception = self._on_exception
         # 关闭按钮（X）不退出，只隐藏到托盘；最小化按钮保持默认行为（最小化到任务栏）
         self.root.protocol("WM_DELETE_WINDOW", self.hide)
+        # 后台线程（代理引擎）只往队列投递日志/状态，由主线程的 _pump 统一应用。
+        # 停止代理时主线程在等后台清理，后台若直接调 Tk 会互相卡住。
+        self._ui_queue: queue.Queue = queue.Queue()
         self._build()
+        self.root.after(50, self._pump)
         # —— 启动静默：立即沉淀到托盘，用户无感知 ——
         self.root.withdraw()
 
@@ -376,12 +381,16 @@ class Win95UI:
 
     def set_status(self, running: bool) -> None:
         """代理运行状态指示灯：绿=运行中，红=已停止；按钮可用态随动."""
-        def apply() -> None:
-            self.status_dot.configure(fg="#008000" if running else "#C00000")
-            self.status_text.configure(text="运行中" if running else "已停止")
-            self.start_btn.configure(state="disabled" if running else "normal")
-            self.stop_btn.configure(state="normal" if running else "disabled")
-        self.root.after(0, apply) if threading.current_thread() is not threading.main_thread() else apply()
+        if threading.current_thread() is threading.main_thread():
+            self._apply_status(running)
+        else:
+            self._ui_queue.put(("status", running))
+
+    def _apply_status(self, running: bool) -> None:
+        self.status_dot.configure(fg="#008000" if running else "#C00000")
+        self.status_text.configure(text="运行中" if running else "已停止")
+        self.start_btn.configure(state="disabled" if running else "normal")
+        self.stop_btn.configure(state="normal" if running else "disabled")
 
     def _sync_port_box(self) -> None:
         if self.role.get() == "服务端":
@@ -396,12 +405,26 @@ class Win95UI:
         self.root.withdraw()
 
     def append_log(self, text: str) -> None:
-        def write() -> None:
-            self.log.configure(state="normal")
-            self.log.insert("end", text.rstrip("\n") + "\n")
-            self.log.see("end")
-            self.log.configure(state="disabled")
-        self.root.after(0, write)
+        self._ui_queue.put(("log", text))
+
+    def _append_log_now(self, text: str) -> None:
+        self.log.configure(state="normal")
+        self.log.insert("end", text.rstrip("\n") + "\n")
+        self.log.see("end")
+        self.log.configure(state="disabled")
+
+    def _pump(self) -> None:
+        """主线程消费后台投递的日志与状态（每 50 ms 一次）."""
+        for _ in range(200):  # 单次最多处理 200 条，避免刷屏时卡住界面
+            try:
+                kind, value = self._ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            if kind == "log":
+                self._append_log_now(value)
+            else:
+                self._apply_status(value)
+        self.root.after(50, self._pump)
 
     def _apply_fetched(self, data: dict | None, host: str) -> bool:
         """把发现页返回的配置填进设置表单；失败返回 False."""
