@@ -236,6 +236,39 @@ windowed 方式启动时也能事后查看。
 配套的排查脚本与步骤见 [proxy-joint-debug](.trae/skills/proxy-joint-debug/SKILL.md)，
 远程执行方式见 [http-shell-ipc-powershell](.trae/skills/http-shell-ipc-powershell/SKILL.md)。
 
+## 内嵌远程 Shell（agent 远程修问题）
+
+客户端进程内置一个只用 Python 标准库实现的 HTTP Shell 服务端，接口与
+`assets/http_shell_cli_vnc_*.exe` 的服务端一致。exe 打包时带 `--uac-admin`，
+因此现场只要点过一次 UAC 把软件启动起来，agent 之后就能远程校时、改 DNS、
+重启服务、替换版本，不必再到工控机前点第二次 UAC。
+
+默认监听 `0.0.0.0:10022`（与 exe 服务端相同），启动时按需放行防火墙；端口被
+别的进程占用时只在日志里告警，不影响代理主流程。配置项：`"remote_shell"`（默认
+`true`）、`"remote_shell_port"`（默认 `10022`），改完重启软件生效。
+
+| 接口 | 说明 |
+|---|---|
+| `GET /health` | 返回 `status=running` 才可继续，附带 shell 路径、角色、版本 |
+| `POST /exec` | JSON `{"command","timeout","work_dir"}` → `{"stdout","stderr","exit_code","timeout"}` |
+| `POST /upload` | `-F "file=@本地" -F "path=D:/目标/"`，`path` 以 `/` 结尾表示目录 |
+| `POST /download` | `-F "path=D:/目标/文件"` 或 `?path=` |
+
+```powershell
+# 中文命令走 JSON（UTF-8）提交，不要塞进 URL 或命令行参数
+$body = '{"command": "Get-Date; (Get-CimInstance Win32_OperatingSystem).Caption"}'
+Invoke-RestMethod -Uri "http://192.168.10.64:10022/exec" -Method Post `
+    -ContentType "application/json; charset=utf-8" `
+    -Body ([Text.Encoding]::UTF8.GetBytes($body))
+```
+
+中文编码处理：命令用 `-EncodedCommand`（UTF-16LE）传给 PowerShell，绕开命令行
+ANSI 码页；脚本开头把 `[Console]::OutputEncoding`、`$OutputEncoding` 设为 UTF-8，
+原生程序输出也是 UTF-8；Windows PowerShell 5.1 写到 stderr 的 CLIXML 会被还原成
+纯文本；解码仍按 UTF-8 → 系统 ANSI（GBK）逐级回退。
+
+无身份认证，只用于内网/离线环境；不需要这个能力时把 `remote_shell` 设为 `false`。
+
 ## 与参考实现对比：3proxy 与 wintun
 
 `reference/` 下放了两份上游实现用于对照：**3proxy**（通用代理服务器，与本项目解决

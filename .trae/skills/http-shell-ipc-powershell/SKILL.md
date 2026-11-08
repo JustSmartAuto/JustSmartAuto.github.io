@@ -19,6 +19,15 @@ $exe = (Get-ChildItem "$Root\assets\http_shell_cli_vnc_*.exe" | Sort-Object Last
 
 每次 Shell 调用都是新的 PowerShell 会话，`$exe` 不会跨命令保留；需要时在同一段命令里重新解析。
 
+### 备选：InternetProxyPy 自带的内嵌 Shell
+
+工控机上如果已经跑着本项目打包的 InternetProxyPy 客户端，它内置了同款接口
+（`/health`、`/exec`、`/upload`、`/download`，默认 `10022`，配置项
+`remote_shell` / `remote_shell_port`），不必再单独起 `http_shell_cli_vnc_*.exe`。
+请求/响应格式完全一致，本文所有命令和第 3 节的 `Invoke-RemotePowerShell.ps1`
+都可直接复用；内嵌版没有 VNC 页面。它跟随软件以管理员身份运行，改时间、
+改网卡不需要再次 UAC。
+
 ## 1. 健康检查（每次会话先做一次）
 
 ```powershell

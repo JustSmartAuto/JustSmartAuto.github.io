@@ -13,6 +13,7 @@ description: Debug InternetProxy between this machine and a remote industrial PC
 - 工控机（客户端）示例：`192.168.10.64`，HTTP Shell `10022`，程序目录 `D:\JustSmart\InternetProxyPy`。
 - 两端时钟必须在 90 秒内，否则 VMess 报 `invalid user`。
 - 远程 Shell 是 Medium 权限：改时间、改 DNS、建 wintun 网卡、启动 exe 都要 UAC 提权；任务计划 `/RL HIGHEST` 会 `Access is denied`，只能用 `Start-Process -Verb RunAs`。
+- InternetProxyPy 客户端自带同款内嵌 Shell（默认 `10022`，配置项 `remote_shell` 可关），服务端 exe 没起时 `$Rps` 照样能直连；它随软件以管理员身份运行，改时间/网卡不需要再弹 UAC。
 
 项目内路径：
 

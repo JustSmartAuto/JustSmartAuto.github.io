@@ -14,6 +14,7 @@ from pathlib import Path
 DEFAULT_PORT = 10082
 DEFAULT_GATEWAY = "127.0.0.1"
 DEFAULT_V2RAY_PORT = 11081  # v2ray 服务端 VMess 入站口（与 SOCKS5 11080 分开）
+DEFAULT_SHELL_PORT = 10022  # 内嵌远程 Shell（与 http_shell 服务端默认端口一致）
 
 _ROLES = ("server", "client")
 _MODES = ("rule", "global")  # 规则代理（忽略局域网 IP）/ 全局代理
@@ -68,6 +69,8 @@ class Config:
         v2ray_path: str = "/vmess",
         v2ray_tls: bool = False,
         autostart: bool = False,
+        remote_shell: bool = True,
+        remote_shell_port: int = DEFAULT_SHELL_PORT,
     ) -> None:
         if role not in _ROLES:
             role = "client"
@@ -84,6 +87,8 @@ class Config:
         self.v2ray_path = v2ray_path
         self.v2ray_tls = bool(v2ray_tls)
         self.autostart = bool(autostart)
+        self.remote_shell = bool(remote_shell)
+        self.remote_shell_port = int(remote_shell_port)
 
     def to_dict(self) -> dict:
         return {
@@ -100,6 +105,8 @@ class Config:
             "v2ray_path": self.v2ray_path,
             "v2ray_tls": self.v2ray_tls,
             "autostart": self.autostart,
+            "remote_shell": self.remote_shell,
+            "remote_shell_port": self.remote_shell_port,
         }
 
     def save(self, path: Path = CONFIG_PATH) -> Path:
@@ -159,4 +166,12 @@ class Config:
         cfg.v2ray_tls = bool(data.get("v2ray_tls", False))
 
         cfg.autostart = bool(data.get("autostart", False))
+        cfg.remote_shell = bool(data.get("remote_shell", True))  # 缺省开启
+        try:
+            shell_port = int(data.get("remote_shell_port", DEFAULT_SHELL_PORT))
+        except (TypeError, ValueError):
+            shell_port = DEFAULT_SHELL_PORT
+        cfg.remote_shell_port = (
+            shell_port if 1 <= shell_port <= 65535 else DEFAULT_SHELL_PORT
+        )
         return cfg

@@ -26,6 +26,7 @@ class Controller:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._client: Client | None = None
+        self._shell = None
         self.running = False
         self.start()
 
@@ -55,6 +56,11 @@ class Controller:
                     finally:
                         discovery.stop()
                     return
+
+                # 客户端内置远程 Shell：进程本身已提权，agent 远程修问题时
+                # 不用再到现场点一次 UAC；端口被占用只告警，不影响代理。
+                if cfg.remote_shell:
+                    self._start_shell(cfg)
 
                 tun = None
                 if cfg.transparent:
@@ -110,6 +116,7 @@ class Controller:
                         tun.stop()
                     self._client = None
             finally:
+                self._stop_shell()
                 self._set_running(False)
 
         self._thread = threading.Thread(target=run, name="proxy-engine", daemon=True)
@@ -118,12 +125,29 @@ class Controller:
     def stop(self) -> None:
         """停止代理：置停止标志并关闭监听 socket，使阻塞的 accept 立即退出."""
         self._stop.set()
+        self._stop_shell()
         if self._client:
             self._client.stop()
         if self._thread:
             self._thread.join(timeout=2)
         self._thread = None
         self._set_running(False)
+
+    def _start_shell(self, cfg: Config) -> None:
+        """启动内嵌远程 Shell（HTTP /health /exec /upload /download）."""
+        from .installer import allow_port
+        from .remoteshell import ShellServer
+
+        # 新机器防火墙默认拦截入站，先按需放行；非管理员或规则已存在时直接跳过
+        allow_port(cfg.remote_shell_port, "tcp", "InternetProxyPy-Shell", self.on_log)
+        shell = ShellServer(cfg.remote_shell_port, cfg.role, self.on_log)
+        if shell.start():
+            self._shell = shell
+
+    def _stop_shell(self) -> None:
+        if self._shell is not None:
+            self._shell.stop()
+            self._shell = None
 
     def reload(self, cfg: Config) -> None:
         """保存配置后热切换：重建代理引擎线程."""
