@@ -254,6 +254,9 @@ windowed 方式启动时也能事后查看。
 | `POST /upload` | `-F "file=@本地" -F "path=D:/目标/"`，`path` 以 `/` 结尾表示目录 |
 | `POST /download` | `-F "path=D:/目标/文件"` 或 `?path=` |
 
+单次上传上限 256 MB（软件本体约 50 MB，可直接覆盖换版本）；下载中文文件名按
+RFC 5987 的 `filename*=UTF-8''…` 编码，浏览器与 curl 都能还原成原名。
+
 ```powershell
 # 中文命令走 JSON（UTF-8）提交，不要塞进 URL 或命令行参数
 $body = '{"command": "Get-Date; (Get-CimInstance Win32_OperatingSystem).Caption"}'

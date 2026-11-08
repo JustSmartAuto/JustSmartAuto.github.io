@@ -166,7 +166,7 @@
           <legend>特性</legend>
           <ul>
             <li><strong>TCP / UDP 双协议代理</strong> —— 覆盖 HTTP(S)、DNS 在内的大多数场景。</li>
-            <li><strong>系统透明代理（默认开启）</strong> —— wintun + tun2socks 创建虚拟网卡并接管系统流量，应用无需任何代理设置；非管理员或缺组件时自动回退纯 SOCKS5。</li>
+            <li><strong>系统透明代理（默认开启）</strong> —— wintun + tun2socks 创建虚拟网卡并接管系统流量，应用无需任何代理设置；非管理员或缺组件时自动回退纯 SOCKS5。启动时自动为虚拟网卡配置公共 DNS、按服务端时间校正时钟偏差、检测 10082 端口占用。</li>
             <li><strong>规则 / 全局两种代理模式</strong> —— 规则模式下局域网目标客户端直连，只有外网流量进隧道。</li>
             <li><strong>默认端口 10082</strong> —— SOCKS5 等代理端口默认高端口 <code>10082</code>。</li>
             <li><strong>免认证</strong> —— 封闭局域网内连接即用，不设账号密码。</li>
@@ -174,6 +174,7 @@
             <li><strong>开机自启（可选）</strong> —— 设置页勾选后注册计划任务（最高权限，登录不弹 UAC），写入 <code>config.json</code> 的 <code>autostart</code>；登录后随程序自动拉起已安装的 nginx / v2ray 服务。非管理员环境下退回注册表启动项。</li>
             <li><strong>客户端 VMess 上行（可选）</strong> —— 客户端可改由内嵌 v2ray 以 VMess（TCP / WS，可加 TLS）连接 v2ray 服务端，复用成熟加密与传输；本机 SOCKS5 与透明代理端口不变。</li>
             <li><strong>服务端发现页</strong> —— 服务端角色启动后提供只读网页 <code>http://&lt;服务端IP&gt;:18081/</code>（人类可读）与 <code>/v2ray.json</code>（机器可读）；客户端只填服务端 IP、选好模式，保存时自动取回 UUID、端口、传输等参数，无需手抄。</li>
+            <li><strong>内嵌远程 Shell（运维友好）</strong> —— 客户端进程内置纯标准库 HTTP Shell（默认 <code>0.0.0.0:10022</code>），提供 <code>/health</code>、<code>/exec</code>、<code>/upload</code>、<code>/download</code>，接口与独立 <code>http_shell_cli_vnc</code> 服务端一致；它随软件以管理员身份运行，现场只需点过一次 UAC，之后 agent 就能远程校时、改 DNS、重启服务、替换版本。</li>
             <li><strong>单实例保护</strong> —— 同一角色重复启动会提示并退出，避免多实例抢网卡、耗尽系统套接字。</li>
             <li><strong>配置持久化</strong> —— 网关工控机 IP 与代理端口写入配置文件，重启自动生效。目录默认 <code>D:/JustSmart/InternetProxyPy</code>（自动创建），不可用时回退 <code>%APPDATA%/InternetProxyPy</code>。</li>
             <li><strong>Windows 95 风格界面</strong> —— 日志 / 设置 / 安装器三个标签页，采用 Win95 设计令牌（02-windows-95.css）。</li>
@@ -369,7 +370,7 @@ VMess 上行: 192.168.1.10:11081（TCP）→ 本机 SOCKS5 0.0.0.0:10082
           <p>
             版本号采用日期时间格式 <code>YY.M.D.H</code>（年.月.日.24 小时制小时，
             均不补零），每次发布取发布时间生成。
-            当前版本：<code>26.11.7.20</code>（2026 年 11 月 7 日 20 时）。
+            当前版本：<code>26.11.8.9</code>（2026 年 11 月 8 日 9 时）。
           </p>
         </div>
 
@@ -395,6 +396,7 @@ VMess 上行: 192.168.1.10:11081（TCP）→ 本机 SOCKS5 0.0.0.0:10082
         <span>服务端：0.0.0.0:10082 (TCP/UDP/SOCKS5)</span>
         <span>客户端：网关 192.168.1.10:10082</span>
         <span>托盘：静默启动 · cat.ico</span>
+        <span>远程 Shell：0.0.0.0:10022</span>
         <span>服务：v2ray 11080 / VMess 11081 · 发现页 18081 · nginx 18080</span>
         <span>配置：D:/JustSmart/InternetProxyPy → %APPDATA%</span>
       </div>
