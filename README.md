@@ -204,6 +204,33 @@ tun2socks（透明代理）┘        │
 安全提示：VMess 只保证传输加密与完整性，UUID 等同密码，请勿外泄；软件本身
 面向可信局域网，若需暴露到公网，建议启用 WS + TLS 并配合端口收敛。
 
+## 现场踩坑记录（v2ray + wintun 联调）
+
+以下为工控机实测 v2ray + wintun 客户端联调时遇到的问题，按现象归档。
+
+| 现象 | 根因 | 处理 |
+|---|---|---|
+| 服务端 `access.log` 出现 `invalid user > Not Found`，客户端隧道能连但 HTTPS 全部失败 | 两端系统时钟相差超过 VMess 约 90 秒的容差 | 以服务端时间为准校时（可用服务端 `18081` 的 HTTP `Date` 响应头），再重启客户端；无外网的工控机建议固定从服务端同步时间 |
+| wintun 已 Up、用 IP 直连能返回 200，但域名解析全部超时 | 工控机原有 LAN DNS 已失效，而 wintun 网卡本身不下发 DNS | 把活动网卡 DNS 改为 `223.5.5.5`、`8.8.8.8`，并给 `InternetProxyPy` 网卡补 `223.5.5.5`；改前记录原值 |
+| 远程执行 `schtasks /RL HIGHEST` 报 `Access is denied` | HTTP Shell 会话是 Medium 完整性，无法创建高权限任务 | 用 `Start-Process -Verb RunAs` 触发 UAC，弹窗出现在工控机控制台，需要现场点“是” |
+| `--headless` 启动后看不到任何输出 | exe 为 windowed 构建，没有控制台 | 用进程、监听端口、网卡、路由和 `v2ray/client-error.log` 判断状态 |
+| 手写的 `config.json` 不生效，程序仍按默认配置启动 | 文件带 UTF-8 BOM，`json.loads` 抛 `ValueError` 后被静默忽略 | PowerShell 用 `[IO.File]::WriteAllText` 配 `UTF8Encoding($false)` 落盘，不要用 `Set-Content -Encoding UTF8` |
+| 客户端起不来，日志提示 `本机 SOCKS5 10082 未就绪` | 旧 v2ray 或上次残留进程占用端口 | 先确认并结束残留 v2ray，再启动客户端 |
+| 工控机上同时存在监听 11080/11081 的 v2ray | 之前按服务端方式安装过，客户端不会自动停掉它 | 先确认来源，不需要时手动停止，避免与 10082 混淆 |
+| `curl` 访问 HTTPS 报 `schannel: 0x80092013` | 证书吊销列表离线，无法校验证书 | 加 `--ssl-no-revoke` 先验证连通性；DNS 与路由正常后通常会恢复 |
+| `ping` 服务端不通 | 代理只承载 TCP/UDP，不含 ICMP | 正常现象，用 `Test-NetConnection`、HTTP 请求验证 |
+
+透明代理是否真正生效，按这四项判断：
+
+1. 网卡 `InternetProxyPy` 状态 Up，地址 `198.18.0.1/24`；
+2. `0.0.0.0/1` 与 `128.0.0.0/1` 路由指向 `198.18.0.1`；
+3. `10082` 由客户端 v2ray 子进程监听；
+4. 域名解析成功，HTTP 与 HTTPS 均返回 200。
+
+另外，v2ray 模式下**服务端本机不监听 10082 是正常的**（10082 只用于客户端本地 SOCKS5）。
+配套的排查脚本与步骤见 [proxy-joint-debug](.trae/skills/proxy-joint-debug/SKILL.md)，
+远程执行方式见 [http-shell-ipc-powershell](.trae/skills/http-shell-ipc-powershell/SKILL.md)。
+
 ## 与参考实现对比：3proxy 与 wintun
 
 `reference/` 下放了两份上游实现用于对照：**3proxy**（通用代理服务器，与本项目解决
