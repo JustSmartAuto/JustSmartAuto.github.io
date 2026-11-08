@@ -171,10 +171,11 @@
             <li><strong>默认端口 10082</strong> —— SOCKS5 等代理端口默认高端口 <code>10082</code>。</li>
             <li><strong>免认证</strong> —— 封闭局域网内连接即用，不设账号密码。</li>
             <li><strong>静默启动 + 托盘后台运行</strong> —— 启动时立即静默最小化到托盘，用户无感知；Tkinter + TkDND2 创建托盘图标，代理常驻后台。</li>
-            <li><strong>开机自启（可选）</strong> —— 设置页勾选后注册计划任务（最高权限，登录不弹 UAC），写入 <code>config.json</code> 的 <code>autostart</code>；登录后随程序自动拉起已安装的 nginx / v2ray 服务。非管理员环境下退回注册表启动项。</li>
+            <li><strong>开机自启（可选）</strong> —— 设置页勾选后注册计划任务（最高权限，登录不弹 UAC），写入 <code>config.json</code> 的 <code>autostart</code>；登录后程序随系统启动。<strong>服务端角色每次启动（包括手动启动）都会检查并拉起缺失的 nginx / v2ray</strong>，避免服务端重启后 VMess 客户端整体断网；自启只决定程序自身是否随登录启动。非管理员环境下退回注册表启动项。</li>
             <li><strong>客户端 VMess 上行（可选）</strong> —— 客户端可改由内嵌 v2ray 以 VMess（TCP / WS，可加 TLS）连接 v2ray 服务端，复用成熟加密与传输；本机 SOCKS5 与透明代理端口不变。</li>
             <li><strong>服务端发现页</strong> —— 服务端角色启动后提供只读网页 <code>http://&lt;服务端IP&gt;:18081/</code>（人类可读）与 <code>/v2ray.json</code>（机器可读）；客户端只填服务端 IP、选好模式，保存时自动取回 UUID、端口、传输等参数，无需手抄。</li>
             <li><strong>内嵌远程 Shell（运维友好）</strong> —— 客户端进程内置纯标准库 HTTP Shell（默认 <code>0.0.0.0:10022</code>），提供 <code>/health</code>、<code>/exec</code>、<code>/upload</code>、<code>/download</code>，接口与独立 <code>http_shell_cli_vnc</code> 服务端一致；它随软件以管理员身份运行，现场只需点过一次 UAC，之后 agent 就能远程校时、改 DNS、重启服务、替换版本。</li>
+            <li><strong>排障日志落盘</strong> —— 界面日志同时写入 <code>logs/app.log</code>（单文件 1 MB、保留 3 份，目录不可用时回退 <code>%APPDATA%</code>）；exe 以 windowed 方式运行、没有控制台，事后也能查到启动、校时、DNS 与透明代理的完整过程。</li>
             <li><strong>单实例保护</strong> —— 同一角色重复启动会提示并退出，避免多实例抢网卡、耗尽系统套接字。</li>
             <li><strong>配置持久化</strong> —— 网关工控机 IP 与代理端口写入配置文件，重启自动生效。目录默认 <code>D:/JustSmart/InternetProxyPy</code>（自动创建），不可用时回退 <code>%APPDATA%/InternetProxyPy</code>。</li>
             <li><strong>Windows 95 风格界面</strong> —— 日志 / 设置 / 安装器三个标签页，采用 Win95 设计令牌（02-windows-95.css）。</li>
@@ -198,6 +199,12 @@ python main.py --role client --headless      # 客户端，SOCKS5 10082</pre>
             <code>127.0.0.1</code>。配置持久化在
             <code>D:/JustSmart/InternetProxyPy/config.json</code>（回退规则见特性）。
           </p>
+          <ul>
+            <li><strong>ping 不通属正常</strong>：SOCKS5 只承载 TCP/UDP，不支持 ICMP；验证连通性请用浏览器或 <code>curl</code>。</li>
+            <li><strong>默认无需配置</strong>：透明代理已接管系统流量，DNS 也随流量走代理；若关闭透明代理，则要给应用显式配置 SOCKS5（客户端 IP:10082）并勾选「远程 DNS / 代理解析 DNS」。</li>
+            <li><strong>局域网其它设备</strong>：把代理指向「客户端 IP:10082」（SOCKS5，免认证），必要时在客户端放行入站 10082。</li>
+            <li><strong>排障</strong>：界面日志同时写入 <code>logs/app.log</code>；服务端 / 客户端分离排查见项目内 <code>.trae/skills/proxy-joint-debug</code>。</li>
+          </ul>
         </div>
 
         <div class="fieldset">
@@ -288,6 +295,7 @@ netstat -ano | findstr ":11081 :18081"    # 出现 LISTENING 即 VMess 入站与
             <tr><td><code>11081</code></td><td>TCP</td><td>v2ray <strong>VMess 入站</strong>，供本软件客户端连接</td></tr>
             <tr><td><code>18081</code></td><td>TCP</td><td>服务端<strong>发现页</strong> <code>/</code> 与 <code>/v2ray.json</code>（服务端角色运行时开启）</td></tr>
             <tr><td><code>18080</code></td><td>TCP</td><td>nginx 静态站点，<code>/status</code> 健康检查</td></tr>
+            <tr><td><code>10022</code></td><td>TCP</td><td>内嵌远程 Shell（客户端角色），供 agent 远程执行 / 传文件</td></tr>
           </table>
           <p>
             用第三方 v2ray 服务端时：加一个 vmess 入站，<code>clients[].id</code> 填 UUID、
@@ -348,6 +356,71 @@ VMess 上行: 192.168.1.10:11081（TCP）→ 本机 SOCKS5 0.0.0.0:10082
         </div>
 
         <div class="fieldset">
+          <legend>现场踩坑（已内置自动处理）</legend>
+          <p>工控机实测 v2ray + wintun 联调遇到的典型问题，多数已做成自动处理；仍有异常时按下表排查。</p>
+          <table>
+            <tr><th>现象</th><th>根因</th><th>处理</th></tr>
+            <tr><td>服务端 <code>access.log</code> 出现 <code>invalid user &gt; Not Found</code>，隧道能连但 HTTPS 全部失败</td><td>两端系统时钟相差超过 VMess 约 90 秒容差</td><td>客户端启动时读取服务端 <code>18081</code> 的 HTTP <code>Date</code>，偏差超过 60 秒自动校时（需管理员）并记录偏差</td></tr>
+            <tr><td>wintun 已 Up、IP 直连能返回 200，但域名解析全部超时</td><td>工控机原有 LAN DNS 已失效，wintun 网卡本身不下发 DNS</td><td>启动时自动把 <code>InternetProxyPy</code> 网卡 DNS 设为 <code>223.5.5.5</code> / <code>8.8.8.8</code> 并清缓存；产线封锁公共 DNS 时改 <code>tun.py</code> 的 <code>TUN_DNS</code></td></tr>
+            <tr><td>日志提示 <code>本机 SOCKS5 10082 未就绪</code> 或报端口占用</td><td>旧 v2ray 或上次残留进程占用端口</td><td>启动前检测占用并直接报错；结束残留 v2ray 后重试</td></tr>
+            <tr><td>手写 <code>config.json</code> 不生效，程序仍按默认配置启动</td><td>文件带 UTF-8 BOM，解析失败后被静默忽略</td><td>用 <code>[IO.File]::WriteAllText</code> + <code>UTF8Encoding($false)</code> 落盘，不要用 <code>Set-Content -Encoding UTF8</code></td></tr>
+            <tr><td><code>curl</code> 访问 HTTPS 报 <code>schannel: 0x80092013</code></td><td>证书吊销列表离线，无法校验证书</td><td>先加 <code>--ssl-no-revoke</code> 验证连通性；DNS 与路由正常后通常自动恢复</td></tr>
+            <tr><td><code>ping</code> 服务端不通</td><td>代理只承载 TCP/UDP，不含 ICMP</td><td>正常现象，用 <code>Test-NetConnection</code> 或 HTTP 请求验证</td></tr>
+          </table>
+          <p>透明代理是否真正生效，按四项判断：</p>
+          <ul>
+            <li>网卡 <code>InternetProxyPy</code> 状态 Up，地址 <code>198.18.0.1/24</code>；</li>
+            <li><code>0.0.0.0/1</code> 与 <code>128.0.0.0/1</code> 路由指向 <code>198.18.0.1</code>；</li>
+            <li><code>10082</code> 由客户端 v2ray 子进程监听；</li>
+            <li>域名解析成功，HTTP 与 HTTPS 均返回 200。</li>
+          </ul>
+          <p class="footer-id">
+            v2ray 模式下<strong>服务端本机不监听 10082 是正常的</strong>（10082 只用于客户端本地 SOCKS5）。
+          </p>
+        </div>
+
+        <div class="fieldset">
+          <legend>内嵌远程 Shell（agent 远程修问题）</legend>
+          <p>
+            客户端进程内置一个只用 Python 标准库实现的 HTTP Shell 服务端，接口与
+            <code>assets/http_shell_cli_vnc_*.exe</code> 的服务端一致。exe 打包时带
+            <code>--uac-admin</code>，因此现场只要点过一次 UAC 把软件启动起来，agent 之后就能
+            远程校时、改 DNS、重启服务、替换版本，不必再到工控机前点第二次 UAC。
+          </p>
+          <p>
+            默认监听 <code>0.0.0.0:10022</code>，启动时按需放行防火墙；端口被别的进程占用时只在
+            日志里告警，不影响代理主流程。配置项 <code>remote_shell</code>（默认
+            <code>true</code>）、<code>remote_shell_port</code>（默认 <code>10022</code>），改完重启软件生效。
+          </p>
+          <table>
+            <tr><th>接口</th><th>说明</th></tr>
+            <tr><td><code>GET /health</code></td><td>返回 <code>status=running</code> 才可继续，附带 shell 路径、角色、版本</td></tr>
+            <tr><td><code>POST /exec</code></td><td>JSON <code>{"command","timeout","work_dir"}</code> → <code>{"stdout","stderr","exit_code","timeout"}</code></td></tr>
+            <tr><td><code>POST /upload</code></td><td><code>-F "file=@本地" -F "path=D:/目标/"</code>，<code>path</code> 以 <code>/</code> 结尾表示目录</td></tr>
+            <tr><td><code>POST /download</code></td><td><code>-F "path=D:/目标/文件"</code> 或 <code>?path=</code></td></tr>
+          </table>
+          <p>
+            单次上传上限 <strong>256 MB</strong>（软件本体约 50 MB，可直接覆盖换版本）；下载中文文件名按
+            RFC 5987 的 <code>filename*=UTF-8''…</code> 编码，浏览器与 curl 都能还原成原名。
+          </p>
+          <pre># 中文命令走 JSON（UTF-8）提交，不要塞进 URL 或命令行参数
+$body = '{"command": "Get-Date; (Get-CimInstance Win32_OperatingSystem).Caption"}'
+Invoke-RestMethod -Uri "http://192.168.10.64:10022/exec" -Method Post `
+    -ContentType "application/json; charset=utf-8" `
+    -Body ([Text.Encoding]::UTF8.GetBytes($body))</pre>
+          <p>
+            中文编码处理：命令用 <code>-EncodedCommand</code>（UTF-16LE）传给 PowerShell，绕开命令行
+            ANSI 码页；脚本开头把 <code>[Console]::OutputEncoding</code>、<code>$OutputEncoding</code>
+            设为 UTF-8；PowerShell 5.1 写到 stderr 的 CLIXML 会还原成纯文本；解码按
+            UTF-8 → 系统 ANSI（GBK）逐级回退。
+          </p>
+          <p class="footer-id">
+            无身份认证，只用于内网 / 离线环境；不需要这个能力时把 <code>remote_shell</code> 设为
+            <code>false</code>。
+          </p>
+        </div>
+
+        <div class="fieldset">
           <legend>与 SSH 隧道（ssh -L/-D）对比</legend>
           <table>
             <tr><th>维度</th><th>InternetProxyPy</th><th>SSH 隧道</th></tr>
@@ -370,7 +443,7 @@ VMess 上行: 192.168.1.10:11081（TCP）→ 本机 SOCKS5 0.0.0.0:10082
           <p>
             版本号采用日期时间格式 <code>YY.M.D.H</code>（年.月.日.24 小时制小时，
             均不补零），每次发布取发布时间生成。
-            当前版本：<code>26.11.8.9</code>（2026 年 11 月 8 日 9 时）。
+            当前版本：<code>26.11.8.10</code>（2026 年 11 月 8 日 10 时）。
           </p>
         </div>
 

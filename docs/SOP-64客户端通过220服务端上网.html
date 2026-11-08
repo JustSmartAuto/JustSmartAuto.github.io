@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>.64 工控机上网 SOP（客户端 → 192.168.10.220 服务端）</title>
+<style>
+  :root{
+    --ink:#16233a; --muted:#5b6b82; --accent:#0b62d6; --accent-soft:#e8f1fd;
+    --ok:#0f7a52; --ok-soft:#e6f6ee; --warn:#b4470c; --warn-soft:#fdf0e6;
+    --line:#d7dee8; --bg:#e9eef5;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:"Microsoft YaHei","微软雅黑",system-ui,-apple-system,sans-serif;}
+  .page{width:1280px;height:960px;background:#fff;margin:26px auto;padding:46px 54px 38px;
+        position:relative;box-shadow:0 10px 30px rgba(16,32,64,.16);
+        display:flex;flex-direction:column;}
+  .eyebrow{font-size:18px;letter-spacing:.2em;color:var(--accent);font-weight:700;}
+  h1{font-size:42px;line-height:1.2;margin:10px 0 8px;}
+  .sub{font-size:21px;color:var(--muted);}
+  .meta{display:flex;flex-wrap:wrap;gap:10px 30px;font-size:17px;color:var(--muted);margin-top:16px;}
+  .meta b{color:var(--ink);}
+  .rule{height:4px;margin:20px 0 24px;
+        background:linear-gradient(90deg,var(--accent),#63a7f7 58%,transparent);}
+
+  /* 步骤卡片 */
+  .steps{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:1fr 1fr;gap:16px 24px;}
+  .steps li{position:relative;border:1px solid var(--line);border-radius:12px;padding:16px 18px 15px 62px;
+            background:#fbfcfe;}
+  .steps li .no{position:absolute;left:16px;top:15px;width:34px;height:34px;border-radius:50%;
+                background:var(--accent);color:#fff;font-weight:700;font-size:19px;
+                display:flex;align-items:center;justify-content:center;}
+  .steps h3{font-size:21px;margin:0 0 6px;}
+  .steps p{font-size:16.5px;line-height:1.62;color:#33425c;margin:0;}
+  code{background:#f1f5fa;border:1px solid #e0e8f2;border-radius:5px;padding:1px 6px;
+       font-family:Consolas,"Cascadia Mono",monospace;font-size:15.5px;color:#0d3f7a;}
+  .kbd{background:#1f2b3d;color:#fff;border-radius:5px;padding:1px 7px;font-size:15px;}
+
+  .tip{margin-top:14px;border-left:5px solid var(--accent);background:var(--accent-soft);
+       padding:12px 16px;font-size:16.5px;line-height:1.6;border-radius:0 8px 8px 0;}
+  .tip b{color:var(--accent);}
+  .tip.warn{border-left-color:var(--warn);background:var(--warn-soft);}
+  .tip.warn b{color:var(--warn);}
+
+  /* 截图 */
+  .shot{display:flex;gap:26px;align-items:flex-start;}
+  .shot img{width:640px;border:1px solid var(--line);border-radius:10px;
+            box-shadow:0 6px 18px rgba(16,32,64,.12);background:#fff;}
+  .shot figcaption{font-size:16px;color:var(--muted);margin-top:10px;}
+  .side{flex:1;display:flex;flex-direction:column;gap:14px;}
+  .side h3{font-size:19px;margin:0;}
+  .tray{display:flex;gap:14px;align-items:center;border:1px dashed #b9c9dd;border-radius:10px;
+        padding:12px 14px;background:#f6faff;}
+  .tray img{width:104px;border:1px solid var(--line);border-radius:6px;background:#fff;}
+  .tray p{font-size:14.5px;line-height:1.6;margin:0;color:#33425c;}
+  .tray b{color:var(--accent);}
+  .xx{margin:0;font-size:15px;color:#8a98ad;font-family:Consolas,monospace;}
+
+  /* 判据 */
+  .checks{list-style:none;margin:0;padding:0;display:grid;gap:10px;}
+  .checks li{display:flex;gap:12px;align-items:flex-start;font-size:17px;line-height:1.55;
+             border:1px solid var(--line);border-radius:10px;padding:11px 14px;background:#fbfcfe;}
+  .checks .ok{color:var(--ok);font-weight:700;}
+  .checks .idx{flex:0 0 26px;height:26px;border-radius:50%;background:var(--ok-soft);color:var(--ok);
+               font-size:14px;font-weight:700;display:flex;align-items:center;justify-content:center;}
+
+  /* 表格 */
+  table{width:100%;border-collapse:collapse;font-size:16px;}
+  th,td{border:1px solid var(--line);padding:9px 12px;text-align:left;vertical-align:top;line-height:1.5;}
+  th{background:#f2f6fb;font-size:16px;}
+  td:first-child{width:200px;font-weight:700;}
+  tbody tr:nth-child(even){background:#fafcff;}
+
+  .footer{margin-top:auto;padding-top:16px;border-top:1px dashed var(--line);
+          display:flex;justify-content:space-between;font-size:15px;color:#8a98ad;}
+  .pageno{font-weight:700;color:var(--accent);}
+
+  @media print{
+    body{background:#fff;}
+    .page{margin:0;box-shadow:none;page-break-after:always;}
+    .page:last-child{page-break-after:auto;}
+  }
+</style>
+</head>
+<body>
+
+<!-- ============ 第 1 页：操作步骤 ============ -->
+<section class="page">
+  <div class="eyebrow">现场作业指导书 · SOP</div>
+  <h1>.64 工控机通过 220 服务端上网</h1>
+  <div class="sub">客户端（192.168.10.64）→ 服务端（192.168.10.220）→ 互联网，主要用于向日葵远程维护</div>
+  <div class="meta">
+    <span>适用设备：<b>CCD 产线工控机 192.168.10.64</b></span>
+    <span>服务端：<b>192.168.10.220</b></span>
+    <span>软件版本：<b>26.11.8.10</b></span>
+  </div>
+  <div class="rule"></div>
+
+  <ol class="steps">
+    <li>
+      <div class="no">1</div>
+      <h3>确认服务端在线</h3>
+      <p>在 .64 浏览器打开 <code>http://192.168.10.220:18081/</code>，能看到服务端发现页即正常。
+         打不开先找运维：服务端软件未启动、IP 不对或 18081 未放行。</p>
+    </li>
+    <li>
+      <div class="no">2</div>
+      <h3>先看托盘，没有图标才启动</h3>
+      <p>查看任务栏托盘（折叠时先点 <b>^</b> 展开）：<b>已有本软件图标说明客户端早就在运行</b>，
+         单击图标打开界面即可，<b>不要再启动第二个实例</b>；确实没有图标，再双击桌面
+         <span class="kbd">连接互联网.exe</span>，UAC 弹窗点「是」。</p>
+    </li>
+    <li>
+      <div class="no">3</div>
+      <h3>填写服务端参数</h3>
+      <p>打开设置页：角色选 <b>客户端</b>，上行选 <b>v2ray（VMess）</b>，
+         服务端填 <code>192.168.10.220</code>，点「从服务端获取配置」自动带出 UUID / 端口 / 传输，保存。</p>
+    </li>
+    <li>
+      <div class="no">4</div>
+      <h3>开始代理</h3>
+      <p>点「开始代理」，等状态变<b>绿色·运行中</b>。日志应出现
+         <code>透明代理已启用</code> 与 <code>虚拟网卡 DNS 已设为 223.5.5.5, 8.8.8.8</code>。</p>
+    </li>
+    <li>
+      <div class="no">5</div>
+      <h3>验证上网</h3>
+      <p>浏览器打开 <code>www.baidu.com</code> 能正常显示即成功；也可在 PowerShell 执行
+         <code>Test-NetConnection 192.168.10.220 -Port 10082</code>。</p>
+    </li>
+    <li>
+      <div class="no">6</div>
+      <h3>打开向日葵</h3>
+      <p>启动桌面的 <span class="kbd">向日葵远程控制</span>，确认设备显示「在线」，
+         再从远程电脑发起连接测试一次画面。</p>
+    </li>
+  </ol>
+
+  <div class="tip">
+    <b>说明：</b>透明代理开启后，整机流量自动走隧道，向日葵无需单独配置代理；
+    应用内也不要再手动填 HTTP/SOCKS 代理，否则会二次代理导致连接失败。
+  </div>
+  <div class="tip warn">
+    <b>注意：</b><code>ping 192.168.10.220</code> 不通属于正常现象——代理只承载 TCP/UDP，不支持 ICMP。
+    判断连通性请用浏览器或 <code>Test-NetConnection</code>。
+  </div>
+
+  <div class="footer">
+    <span>.64 工控机上网 SOP · 第 1 页 / 共 3 页</span>
+    <span class="pageno">步骤 1–6</span>
+  </div>
+</section>
+
+<!-- ============ 第 2 页：界面截图与成功判据 ============ -->
+<section class="page">
+  <div class="eyebrow">界面参考 · 判据</div>
+  <h1>配置界面与成功判据</h1>
+  <div class="sub">照图核对参数，四判据全部满足才算真正生效</div>
+  <div class="rule"></div>
+
+  <div class="shot">
+    <figure style="margin:0;">
+      <img src="assets/client-screenshot.png" alt="客户端设置界面截图">
+      <figcaption>图 1　客户端设置界面：角色=客户端，上行=v2ray(VMess)，服务端=192.168.10.220</figcaption>
+    </figure>
+    <div style="flex:1;">
+      <h3 style="font-size:20px;margin:0 0 10px;">四项成功判据</h3>
+      <ul class="checks">
+        <li><span class="idx">1</span><span>网卡 <code>InternetProxyPy</code> 状态 <span class="ok">Up</span>，地址 <code>198.18.0.1/24</code>。</span></li>
+        <li><span class="idx">2</span><span>路由表存在 <code>0.0.0.0/1</code> 与 <code>128.0.0.0/1</code>，下一跳均为 <code>198.18.0.1</code>。</span></li>
+        <li><span class="idx">3</span><span>本机 <code>10082</code> 由客户端 v2ray 子进程监听（<code>Get-NetTCPConnection -LocalPort 10082</code>）。</span></li>
+        <li><span class="idx">4</span><span>域名解析正常，HTTP 与 HTTPS 页面都能打开（不止 IP 直连）。</span></li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="tip" style="margin-top:22px;">
+    <b>日志位置：</b><code>D:/JustSmart/InternetProxyPy/logs/app.log</code>（单文件 1 MB、保留 3 份）。
+    界面日志与文件内容一致，出现异常时先看这个文件，再把最后 20 行发给运维。
+  </div>
+  <div class="tip warn">
+    <b>服务端本机不监听 10082 是正常的</b>：10082 只在客户端本机提供 SOCKS5 入口；
+    服务端对外的是 <code>11080/11081（v2ray）</code>、<code>10082（内置隧道）</code> 与 <code>18081（发现页）</code>。
+  </div>
+
+  <div class="footer">
+    <span>.64 工控机上网 SOP · 第 2 页 / 共 3 页</span>
+    <span class="pageno">截图与判据</span>
+  </div>
+</section>
+
+<!-- ============ 第 3 页：异常处理 ============ -->
+<section class="page">
+  <div class="eyebrow">异常处理 · 常见问题</div>
+  <h1>连不上 / 向日葵不在线怎么查</h1>
+  <div class="sub">按「先看日志、再看端口、最后看服务端」的顺序排查，不要反复重启</div>
+  <div class="rule"></div>
+
+  <table>
+    <thead>
+      <tr><th>现象</th><th>原因</th><th>处理</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>点开始代理后状态不变绿</td>
+        <td>UAC 未允许、10082 被旧进程占用</td>
+        <td>允许 UAC 后重试；日志提示端口占用时，结束残留 v2ray 进程再启动</td>
+      </tr>
+      <tr>
+        <td>能打开 IP 地址、域名全部超时</td>
+        <td>虚拟网卡 DNS 未生效</td>
+        <td>重启代理，确认日志有「虚拟网卡 DNS 已设为 …」；仍失败则重启软件</td>
+      </tr>
+      <tr>
+        <td>日志报「两端时钟相差 N 秒」</td>
+        <td>工控机 CMOS 漂移，超出 VMess 约 90 秒容差</td>
+        <td>以管理员运行会自动按服务端时间校正；未校正时按提示手动改系统时间</td>
+      </tr>
+      <tr>
+        <td>服务端重启后 .64 突然断网</td>
+        <td>服务端依赖的 v2ray / nginx 未随软件启动</td>
+        <td>服务端升级到 26.11.8.10 及以上，每次启动会自动拉起缺失服务；临时可手动点「启动服务」</td>
+      </tr>
+      <tr>
+        <td>网页能开，向日葵显示离线</td>
+        <td>向日葵被单独配置了代理，或仍用旧版本缓存</td>
+        <td>移除向日葵内的代理设置，退出重登；必要时重启向日葵服务</td>
+      </tr>
+      <tr>
+        <td>发现页 <code>18081</code> 打不开</td>
+        <td>服务端未运行 / IP 变更 / 防火墙拦截</td>
+        <td>联系运维确认服务端软件与 IP；不要擅自修改本机网络配置</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="tip" style="margin-top:20px;">
+    <b>远程协助：</b>若向日葵不可用，可在服务端通过 HTTP Shell 访问 .64：
+    <code>http://192.168.10.64:10022/health</code> 返回 <code>status=running</code> 即说明客户端软件在线，可远程执行命令排查。
+  </div>
+  <div class="tip warn">
+    <b>禁止操作：</b>不要卸载 v2ray / wintun 组件，不要手动删除 <code>InternetProxyPy</code> 虚拟网卡，
+    不要在客户端与网关之间再加一层代理。
+  </div>
+
+  <div class="footer">
+    <span>.64 工控机上网 SOP · 第 3 页 / 共 3 页</span>
+    <span class="pageno">异常处理</span>
+  </div>
+</section>
+
+</body>
+</html>
