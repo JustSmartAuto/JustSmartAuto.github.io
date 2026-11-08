@@ -53,6 +53,16 @@ $exe = (Get-ChildItem "d:\JustStupid\httpshell远程操作工控机_2605201359\I
 
 远端命令自身需要单引号时，外层改用双引号并转义 `$`（例如 `` `$env:Path ``）。命令跨多行、引号嵌套或脚本较长时，不要硬拼字符串，改用第 3 节。
 
+### 中文输出乱码
+
+Windows PowerShell 5.1 被重定向时按系统 ANSI 码页（GBK）输出，而服务端按 UTF-8 解码，中文（日期、系统名称等）会乱码。需要中文结果时，在远端命令最前面加一行：
+
+```powershell
+& $exe -role client -url "http://192.168.1.100:10022" -c '[Console]::OutputEncoding = [Text.Encoding]::UTF8; Get-Date; (Get-CimInstance Win32_OperatingSystem).Caption'
+```
+
+用第 3 节辅助脚本时，把同样一行写在 `-Command` 开头或脚本文件第一行。
+
 ## 3. 复杂 / 多行脚本（推荐）
 
 配套脚本直接调用 `/exec` 接口，用 UTF-8 JSON 传输命令，避开所有嵌套引号问题：
@@ -101,7 +111,7 @@ curl.exe -X POST "http://192.168.1.100:10022/download" -F "path=C:/remote/dir/fi
 
 - `连接失败` 或健康检查无响应：服务端未启动、IP 错、防火墙拦截。确认一次后上报。
 - 退出码 `-1` 且 stderr 含“命令执行超时”：加大 `-timeout`，或把长任务放到远端后台执行后轮询结果。
-- 中文乱码：PowerShell 输出为 UTF-8，cmd 输出由服务端自动按 GBK 转码；仍乱码时让远端命令先设 `[Console]::OutputEncoding = [Text.Encoding]::UTF8`。
+- 中文乱码：Windows PowerShell 5.1 默认按 GBK 输出，按第 2 节“中文输出乱码”加一行设置即可；cmd 输出由服务端自动按 GBK 转码。
 - 输出过大：在远端先筛选或 `Out-File`，再下载结果文件，不要直接回传海量文本。
 
 ## 8. 安全边界

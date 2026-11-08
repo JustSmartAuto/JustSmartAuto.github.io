@@ -22,9 +22,9 @@ if ($base -notmatch '^https?://') { $base = "http://$base" }
 $exitCode = 0
 try {
     if ($Health) {
-        $health = Invoke-RestMethod -Uri "$base/health" -TimeoutSec 10
-        $health | ConvertTo-Json -Compress
-        if ($health.status -ne 'running') { $exitCode = 1 }
+        $healthResp = Invoke-RestMethod -Uri "$base/health" -TimeoutSec 10
+        $healthResp | ConvertTo-Json -Compress
+        if ($healthResp.status -ne 'running') { $exitCode = 1 }
     }
     else {
         if ($ScriptFile) {
