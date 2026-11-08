@@ -275,6 +275,8 @@ def main() -> None:
             "internet_proxy.autostart",
             "--hidden-import",
             "internet_proxy.discovery",
+            "--hidden-import",
+            "internet_proxy.remoteshell",
         ]
     cmd.append(str(ROOT / "main.py"))
     print(" ".join(cmd))

@@ -37,7 +37,7 @@ import time
 from html import unescape as _unescape_html
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 from . import __version__
 from .config import DEFAULT_SHELL_PORT, config_dir
@@ -46,7 +46,7 @@ log = logging.getLogger("internet_proxy.remoteshell")
 
 DEFAULT_PORT = DEFAULT_SHELL_PORT  # 与 assets 里的 http_shell 服务端默认端口一致
 MAX_TIMEOUT = 3600
-MAX_BODY = 32 * 1024 * 1024  # 上传/脚本体上限
+MAX_BODY = 256 * 1024 * 1024  # 上传/脚本体上限（软件本身约 50 MB，留足换版本的余量）
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
 
 # 输出统一按 UTF-8：不设的话 Windows PowerShell 5.1 重定向时按 GBK 输出；
@@ -236,8 +236,12 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Content-Length", str(len(data)))
+        # HTTP 头只能 latin-1：中文文件名放 RFC 5987 的 filename*，再用 ASCII 兜底
+        fallback = path.name.encode("ascii", "replace").decode("ascii").replace('"', "_")
         self.send_header(
-            "Content-Disposition", f'attachment; filename="{path.name}"'
+            "Content-Disposition",
+            f'attachment; filename="{fallback}"; '
+            f"filename*=UTF-8''{quote(path.name, safe='')}",
         )
         self.end_headers()
         self.wfile.write(data)
