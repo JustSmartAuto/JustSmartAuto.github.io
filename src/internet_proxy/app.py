@@ -116,21 +116,33 @@ class Controller:
                         tun.stop()
                     self._client = None
             finally:
-                self._stop_shell()
-                self._set_running(False)
+                # 只有本次运行仍是当前运行时才收尾：旧线程若晚于新一轮启动才退出，
+                # 不能再把状态改成“已停止”，也不能停掉新一轮的 Shell。
+                if stop is self._stop:
+                    self._stop_shell()
+                    self._set_running(False)
 
         self._thread = threading.Thread(target=run, name="proxy-engine", daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
-        """停止代理：置停止标志并关闭监听 socket，使阻塞的 accept 立即退出."""
+        """停止代理：置停止标志并关闭监听 socket，等后台线程完成清理.
+
+        v2ray 退出与虚拟网卡回收需要数秒；早先只 join 2 秒，旧线程在
+        “停止后立刻再启动”时会与新一轮竞争，并在结束时把界面状态改回
+        “已停止”，表现为代理已在跑但 UI 一直显示停止。
+        """
         self._stop.set()
-        self._stop_shell()
         if self._client:
             self._client.stop()
-        if self._thread:
-            self._thread.join(timeout=2)
-        self._thread = None
+        thread = self._thread
+        if thread:
+            thread.join(timeout=10)
+            if thread.is_alive():
+                log.warning("代理线程仍未退出，仍在清理资源（避免与之竞争，本次不做状态切换）")
+                return
+            self._thread = None
+        self._stop_shell()
         self._set_running(False)
 
     def _start_shell(self, cfg: Config) -> None:
@@ -210,10 +222,16 @@ def run_gui(cfg: Config) -> None:  # pragma: no cover - GUI 入口
         from .installer import auto_install, is_installed, start_services
 
         auto_install(ui.append_log)
-        # 开机自启：登录后随程序一起把 nginx / v2ray 拉起（重启后无需手动点启动）
-        if cfg.autostart and is_installed():
+        # 依赖服务与“开机自启”是两件事：服务端每次启动都必须确认 nginx /
+        # v2ray 在跑。否则服务端重启（尤其是重启后手动打开软件）时，
+        # 作为上行出口的 v2ray 不会自行恢复，所有 VMess 客户端会整体断网。
+        if is_installed() and (cfg.role == "server" or cfg.autostart):
+            # 走 root logger：界面通过 UILogHandler 显示，同时落到 logs/app.log，
+            # 现场排查“服务没起来”时有据可查。
             threading.Thread(
-                target=start_services, args=(ui.append_log,), daemon=True
+                target=start_services,
+                args=(lambda text: log.info("%s", text),),
+                daemon=True,
             ).start()
 
     controller = Controller(cfg, on_log=lambda text: log.info(text))

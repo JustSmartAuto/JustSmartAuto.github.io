@@ -1,6 +1,6 @@
 [project]
 name = "InternetProxyPy"
-version = "26.11.8.9"
+version = "26.11.8.10"
 description = "基于 Python 的工控机互联网代理（客户端/服务端）。局域网内只有一台工控机连接互联网时，由它充当 TCP/UDP 代理网关（SOCKS5 等端口默认 10082），其余设备运行客户端像 VPN 一样共享互联网出口。主界面/后台日志与设置使用 tkinter + tkinterdnd2 创建系统托盘图标，启动时静默最小化到托盘、用户无感知，界面采用 Windows 95 风格（02-windows-95.css 设计令牌）；网关工控机 IP 与代理端口持久化到配置文件（目录默认 D:/JustSmart/InternetProxyPy 自动创建，不可用时回退 %APPDATA%/InternetProxyPy），免认证，连接即用。"
 requires-python = ">=3.13"
 dependencies = [
