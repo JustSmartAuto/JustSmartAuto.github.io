@@ -28,6 +28,9 @@ log = logging.getLogger("internet_proxy.tun")
 
 TUN_IP = "198.18.0.1"
 TUN_NAME = "InternetProxyPy"
+# 虚拟网卡统一用公共 DNS：工控机原有的局域网 DNS 常已失效，且 wintun
+# 网卡默认不下发 DNS；查询会经覆盖路由进入隧道，由服务端侧解析。
+TUN_DNS = ("223.5.5.5", "8.8.8.8")
 CORE_EXE = "tun2socks-windows-amd64.exe"
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
 
@@ -305,6 +308,19 @@ class TunProxy:
                 "-RouteMetric 1 -ErrorAction SilentlyContinue | Out-Null"
             )
             self._gw_route_added = r.returncode == 0
+
+        # 给虚拟网卡配 DNS 并清缓存：不配的话 Windows 仍会去问已失效的
+        # 局域网 DNS，表现为隧道通、IP 直连正常，但所有域名解析超时。
+        dns = ",".join(TUN_DNS)
+        r = _ps(
+            f"Set-DnsClientServerAddress -InterfaceIndex {idx} "
+            f"-ServerAddresses {dns} -ErrorAction SilentlyContinue"
+        )
+        if r.returncode == 0:
+            _ps("Clear-DnsClientCache")
+            log.info("虚拟网卡 DNS 已设为 %s", ", ".join(TUN_DNS))
+        else:
+            log.warning("设置虚拟网卡 DNS 失败: %s", _decode(r.stderr).strip())
 
     def stop(self) -> None:
         idx = self._if_index

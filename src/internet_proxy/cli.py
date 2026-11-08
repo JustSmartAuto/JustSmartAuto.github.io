@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import argparse
 import ctypes
-import logging
 import sys
 import threading
 
@@ -62,9 +61,9 @@ def main(argv: list[str] | None = None) -> int:
 
         return cli_install()
 
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)-7s %(message)s"
-    )
+    from .logsetup import setup_logging
+
+    setup_logging()
     cfg = Config.load()
     if args.gateway:
         cfg.gateway = args.gateway

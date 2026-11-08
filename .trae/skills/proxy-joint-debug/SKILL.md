@@ -110,10 +110,10 @@ curl.exe -sS -X POST "http://192.168.10.64:10022/upload" -F "file=@$Diag" -F "pa
 
 | 现象 | 根因 | 处理 |
 |---|---|---|
-| 服务端 access.log 出现 `invalid user > Not Found` | 两端时钟差超过 90 秒 | 从服务端 HTTP `Date` 头校时，重启客户端 |
-| `Could not resolve host` 或 DNS 超时 | 系统 DNS 不可用（常见于原 LAN DNS 已停） | 活动网卡 DNS 改为 `223.5.5.5,8.8.8.8`，wintun 网卡也设 `223.5.5.5` |
+| 服务端 access.log 出现 `invalid user > Not Found` | 两端时钟差超过 90 秒 | 客户端启动时会自动按服务端 `Date` 校时；若仍出现，手动把系统时间调成服务端时间 |
+| `Could not resolve host` 或 DNS 超时 | 系统 DNS 不可用（常见于原 LAN DNS 已停） | 透明模式会自动给 `InternetProxyPy` 网卡设置 `223.5.5.5`/`8.8.8.8`；被封锁时改 `tun.py` 的 `TUN_DNS` |
 | 没有 `InternetProxyPy` 网卡 / 自动回退 SOCKS5 | 未提权或 wintun 驱动未装 | UAC 提权运行 exe |
-| 10082 不监听 | v2ray 未启动、uuid 错或端口被占 | 看 `v2ray/client-error.log`，确认 uuid 与 10082 占用 |
+| 10082 不监听 | v2ray 未启动、uuid 错或端口被占 | 程序会先检测占用并直接报错；看 `v2ray/client-error.log` 与 `logs/app.log` |
 | HTTPS 报 `schannel 0x80092013` | 证书吊销列表离线 | 临时加 `--ssl-no-revoke`；修好 DNS/路由后再试 |
 | 11081 连不通 | 本机防火墙或 v2ray 未起 | 放行端口，确认服务端进程 |
 | ping 不通 | 不支持 ICMP | 正常，用 TCP/HTTP 验证 |

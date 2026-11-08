@@ -135,12 +135,11 @@ class Controller:
 def run_gui(cfg: Config) -> None:  # pragma: no cover - GUI 入口
     """托盘 + 界面 + 代理引擎 三件套；阻塞到 Tk mainloop 结束."""
     from .config import CONFIG_PATH
+    from .logsetup import setup_logging
     from .tray import TrayIcon
     from .ui import Win95UI
 
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
-    )
+    setup_logging()
     log.info("配置文件: %s", CONFIG_PATH)
 
     ui_holder: dict[str, Win95UI] = {}
@@ -170,7 +169,9 @@ def run_gui(cfg: Config) -> None:  # pragma: no cover - GUI 入口
         handler = UILogHandler()
         handler.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
         logging.getLogger().addHandler(handler)
-        controller.on_log = ui.append_log
+        # 统一走 root logger：既由上面的 handler 显示到界面，也落到 logs/app.log，
+        # 现场排障时 GUI 里看到的信息在日志文件里同样能查到。
+        controller.on_log = lambda text: log.info("%s", text)
         controller.on_state = ui.set_status
         tray = TrayIcon(
             tk=ui.root,
