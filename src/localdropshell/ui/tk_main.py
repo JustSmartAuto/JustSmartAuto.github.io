@@ -452,6 +452,7 @@ def _about_sections(base_url: str, runtime: dict[str, str]) -> list[tuple[str, s
 
 def _show_settings_window(root: tk.Tk) -> None:
     """Win95 风格设置窗口：启动选项."""
+    from localdropshell import autostart
     from localdropshell.settings import load_minimize_to_tray, save_minimize_to_tray
 
     win = tk.Toplevel(root)
@@ -459,7 +460,7 @@ def _show_settings_window(root: tk.Tk) -> None:
     win.configure(bg=Win95_COLORS["chrome"])
     win.transient(root)
     win.resizable(False, False)
-    _center_on_parent(win, root, 340, 120)
+    _center_on_parent(win, root, 340, 170)
 
     body = tk.Frame(win, bg=Win95_COLORS["chrome"], bd=2, relief=tk.GROOVE)
     body.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=8)
@@ -474,7 +475,19 @@ def _show_settings_window(root: tk.Tk) -> None:
         fg=Win95_COLORS["ink"],
         font=Win95_FONT,
         anchor="w",
-    ).pack(side=tk.TOP, fill=tk.X, padx=8, pady=8)
+    ).pack(side=tk.TOP, fill=tk.X, padx=8, pady=(8, 4))
+
+    autostart_var = tk.BooleanVar(value=autostart.is_enabled())
+    tk.Checkbutton(
+        body,
+        text="开机自动启动（在 shell:startup 放置快捷方式）",
+        variable=autostart_var,
+        bg=Win95_COLORS["chrome"],
+        activebackground=Win95_COLORS["chrome"],
+        fg=Win95_COLORS["ink"],
+        font=Win95_FONT,
+        anchor="w",
+    ).pack(side=tk.TOP, fill=tk.X, padx=8, pady=(0, 8))
 
     bar = tk.Frame(win, bg=Win95_COLORS["chrome"])
     bar.pack(side=tk.BOTTOM, fill=tk.X, padx=8, pady=(0, 8))
@@ -484,6 +497,12 @@ def _show_settings_window(root: tk.Tk) -> None:
             save_minimize_to_tray(var.get())
         except OSError as exc:
             logger.warning("保存设置失败: %s", exc)
+        try:
+            autostart.set_enabled(autostart_var.get())
+        except OSError as exc:
+            from tkinter import messagebox
+            messagebox.showerror("开机启动设置失败", str(exc), parent=win)
+            return
         win.destroy()
 
     for text, cmd in (("确定", _ok), ("取消", win.destroy)):
