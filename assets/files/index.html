@@ -527,8 +527,9 @@ tr:hover:not(.sel) td { background: var(--chrome-light); }
             for (var i = 0; i < nChunks; i++) {
               (function (idx) { chain = chain.then(function () { return idbDel(db, "chunk", key + "#" + idx); }); })(i);
             }
-            return chain.then(function () { return idbDel(db, "meta", key); });
+            return chain.then(function () { return idbDel(db, "meta", key); }).then(function () { return "saved"; });
           }
+          return "aborted";  // 取消落盘：块保留，可再次续传
         });
       }
 
@@ -899,6 +900,8 @@ tr:hover:not(.sel) td { background: var(--chrome-light); }
       if (kind === "fountain" && r) {
         setStatus(r.saved === "aborted" ? "已取消落盘"
           : "喷泉下载完成 " + r.name + "（" + r.frames + " 帧 / k=" + r.k + "）");
+      } else if (r === "aborted") {
+        setStatus("已取消落盘（续传进度已保存）");
       } else {
         setStatus("续传下载完成 " + e.name);
       }

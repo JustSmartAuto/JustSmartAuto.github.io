@@ -14,7 +14,7 @@
 | **Web 拖放传文件** | 浏览器 `/drop/` | Win95 风格拖传页（`assets/drop/index.html`）：拖入文件/整个文件夹（保留目录层级）、逐文件进度条；可填「远程地址 ip[:端口]」经 RFB FTP 直推远程，留空则保存到本机目录；支持 `?path=&host=` 预填；Tk「文件」菜单一键打开 |
 | **CLI 交互式 shell** | 纯控制台 | 同进程三角色（`gui` / `server` / `client`），内置 upload / download / rsync / rfb-* 等命令 |
 | **系统托盘** | 托盘图标（drop3.ico） | ctypes + Shell_NotifyIconW 独立消息窗口线程（参考 InternetProxyPy，无第三方依赖）；窗口关闭按钮最小化到托盘，左键唤出、右键菜单「显示窗口 / 退出」；「文件 → 设置...」含「启动时最小化到托盘」开关（默认关闭，持久化 `minimize_to_tray_on_start`） |
-| **Web 文件管理器** | 浏览器 `/files/` | 参考 filebrowser-quantum，Win95 风格（`assets/files/index.html` + `fileman.py`）：匿名可浏览/下载所有盘，根目录列出 C:/ D:/ 等盘符；**C 盘写操作（上传/新建/删除/重命名）需登录**（账号/密码 `justsmart`），会话 Cookie 内存保存；支持双击进入、路径回车、上级回退、拖入上传 |
+| **Web 文件管理器** | 浏览器 `/files/` | 参考 filebrowser-quantum，Win95 风格（`assets/files/index.html` + `fileman.py`）：匿名可浏览/下载所有盘，根目录列出 C:/ D:/ 等盘符；**C 盘写操作（上传/新建/删除/重命名）需登录**（账号/密码 `justsmart`），会话 Cookie 内存保存；支持双击进入、路径回车、上级回退、拖入上传；**分块续传下载**（Range 206 + IndexedDB 块缓存 + showSaveFilePicker 落盘，中断后选中同名文件再点「续传下载」即可继续）与 **LT 喷泉码下载**（无限帧流 + 页面内 JS LT 解码，任意足量帧即可重组，适合弱网/单向场景） |
 
 **混合 UI 架构**：
 - **主窗口（Tkinter + tkinterdnd2）**：负责文件/文件夹拖放、传输列表、进度条、日志输出、批量生成——Windows 95 风格（3D 凸起边框、Teal 标题栏、MS Sans Serif）
@@ -125,6 +125,16 @@ multipart/form-data：`file=@local.bin` + `path=/remote/dir/`（可选）。返�
 // POST /download（本地）
 {"path":"C:/Users/Public/a.bin","offset":0}
 ```
+
+### Web 文件管理器接口（`/api/files/*`）
+
+| 路由 | 说明 |
+| --- | --- |
+| `POST /api/files/login` · `POST logout` · `GET session` | justsmart 会话 Cookie（内存保存；仅 C 盘写操作要求登录） |
+| `GET /api/files/list?path=` | 列目录；`path` 为空返回 C:/ D:/ 等盘符 |
+| `GET /api/files/download?path=` | 下载；支持 `Range: bytes=a-b` 单区间（206 + Content-Range + Accept-Ranges），页面端分块续传用；越界返回 416 |
+| `GET /api/files/fountain?path=&block_size=` | LT 喷泉码 Wire 帧无限流（flags bit0=1），响应头 `X-Lds-Name`（percent-encoded UTF-8 文件名）/ `X-Lds-Size`；客户端收齐 k 块即主动断开，服务端帧数超 20×k 保护性断开；受 Wire 帧 totalLen（u32）限制，单文件 < 4GB |
+| `POST /api/files/upload` · `POST /api/files/op` | multipart 上传；mkdir / delete / rename |
 
 ### Rsync 增量同步接口
 
@@ -424,6 +434,15 @@ UINT8 compressedData[compressedSize]
 ```
 
 设计要点：每帧自描述，接收端可中途锁定；发送端重启产生新 `sessionId`，接收端自动重新开始；gzip 仅在确实变小时启用（≥ 768 字节且非已压缩格式），熵编码媒体跳过；SHA-256 完成校验前不向用户提供文件。
+
+**LT 真喷泉实现**（`fountain.py` 的 `lt_encode_stream` / `LtDecoder`，浏览器端 `assets/files/index.html` 内嵌同构 JS 解码器，二者逐字节对齐）：
+
+- flags bit0=1 表示 LT 帧，`seq` 为编码帧序号（单调递增、无限产生）；
+- 帧种子 = `FNV-1a(sessionId u16le ‖ seq u32le)`，PRNG = xorshift32(13,17,5)；
+- 度分布 = Ideal Soliton 闭式 CDF `1/k + 1 - 1/d` 二分抽样——只用 IEEE754 保证精确舍入的运算（不用 exp/log），保证 JS 端逐位复刻编码决策；源块选择 = Fisher-Yates 部分洗牌；
+- 块长自适应 `pick_block_size`（k ≤ 60000，4KB..1MB）；
+- 接收端置信传播译码，整容器 FNV-1a + 原文件 SHA-256 双重校验后才落盘；
+- 已验证：k=74 约 2.1× 帧开销收齐；30% 随机丢帧仍可译码；Python 编码 → JS 解码逐字节一致。
 
 ### 5. noVNC / WebSocket 代理
 
