@@ -76,10 +76,16 @@ def _resolve(raw: str) -> Path | None:
     """把页面传来的路径解析为本地绝对路径；空串表示盘符根（返回 None）.
 
     拒绝 ``..`` 目录穿越与非法路径时抛 ValueError.
+    注意 ``Path("D:")`` 是**驱动器相对路径**（解析为 D 盘的当前目录），
+    盘符必须补成 ``D:/`` 才是根目录。
     """
-    raw = (raw or "").strip().replace("\\", "/").strip("/")
-    if not raw:
+    raw = (raw or "").strip().replace("\\", "/")
+    if not raw.strip("/"):
         return None  # 盘符根
+    m = re.fullmatch(r"([A-Za-z]):/*", raw)
+    if m:
+        return Path(m.group(1).upper() + ":/")
+    raw = raw.strip("/")
     if ".." in raw.split("/"):
         raise ValueError("路径不允许包含 ..")
     p = Path(raw)
