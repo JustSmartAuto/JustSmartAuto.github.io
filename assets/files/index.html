@@ -132,6 +132,7 @@ tr:hover:not(.sel) td { background: var(--chrome-light); }
 #pv-close { cursor: pointer; }
 </style>
 <link rel="stylesheet" href="monaco/vs/editor/editor.main.css">
+<link rel="stylesheet" href="photoswipe/photoswipe.css">
 </head>
 <body>
 <div class="window">
@@ -148,7 +149,7 @@ tr:hover:not(.sel) td { background: var(--chrome-light); }
       <button id="dlbtn" type="button">下载</button>
       <button id="dlresume" type="button" title="分块续传下载：块存浏览器 IndexedDB，中断后再次点击可继续">续传下载</button>
       <button id="dlfountain" type="button" title="LT 喷泉码流式下载：任意足够帧即可重组，适合弱网/单向场景">喷泉下载</button>
-      <button id="previewbtn" type="button" title="Monaco 只读预览文本/配置/代码文件（本地内置，离线可用）">预览</button>
+      <button id="previewbtn" type="button" title="预览：文本/代码 Monaco 只读；图片 PhotoSwipe 画廊（本地内置，离线可用）">预览</button>
       <button id="loginbtn" type="button">登录</button>
       <input type="file" id="picker" multiple hidden>
     </div>
@@ -255,6 +256,7 @@ tr:hover:not(.sel) td { background: var(--chrome-light); }
       tr.addEventListener("click", function () { sel = i; render(); });
       tr.addEventListener("dblclick", function () {
         if (e.dir) nav(join(cwd, e.name));
+        else if (isImage(e.name)) previewImage(e);
         else if (previewLang(e.name)) previewEntry(e);
         else location.href = "/api/files/download?path=" + encodeURIComponent(join(cwd, e.name));
       });
@@ -481,7 +483,11 @@ tr:hover:not(.sel) td { background: var(--chrome-light); }
     document.getElementById("pv-overlay").style.display = "none";
     if (previewEditor) { previewEditor.dispose(); previewEditor = null; }
   }
-  document.getElementById("previewbtn").addEventListener("click", function () { previewEntry(selected()); });
+  document.getElementById("previewbtn").addEventListener("click", function () {
+    var e = selected();
+    if (e && !e.dir && isImage(e.name)) previewImage(e);
+    else previewEntry(e);
+  });
   document.getElementById("pv-close").addEventListener("click", closePreview);
   document.getElementById("pv-overlay").addEventListener("click", function (e) {
     if (e.target === this) closePreview();
@@ -489,6 +495,92 @@ tr:hover:not(.sel) td { background: var(--chrome-light); }
   document.addEventListener("keydown", function (e) {
     if (e.key === "Escape" && document.getElementById("pv-overlay").style.display !== "none") closePreview();
   });
+
+  // ============================================================
+  // 图片预览（PhotoSwipe v5 本地内置：assets/files/photoswipe/，离线可用）
+  //   双击 / 「预览」打开当前目录图片画廊，支持左右切换、缩放。
+  //   仅预载首图尺寸；其余图片经 contentLoadImage 事件加载后回填真实尺寸，
+  //   无尺寸时 PhotoSwipe 自身回退为视口大小（见 updateContentSize）。
+  // ============================================================
+  var IMAGE_EXT = { jpg: 1, jpeg: 1, png: 1, bmp: 1, avif: 1, svg: 1, gif: 1, webp: 1, ico: 1 };
+  var pswpReady = null;
+
+  function isImage(name) {
+    var idx = name.lastIndexOf(".");
+    if (idx < 0) return false;
+    return !!IMAGE_EXT[name.slice(idx + 1).toLowerCase()];
+  }
+
+  function photoswipeLoad() {
+    if (!pswpReady) {
+      // 动态 import：相对地址基于 /files/ 文档 URL 解析（原生 ESM 必须以 ./ 开头）
+      pswpReady = import("./photoswipe/photoswipe.esm.min.js").then(function (m) { return m.default; });
+    }
+    return pswpReady;
+  }
+
+  function imgUrl(name) {
+    return "/api/files/download?path=" + encodeURIComponent(join(cwd, name));
+  }
+
+  function previewImage(e) {
+    if (!e || e.dir) { setStatus("请选择图片文件"); return; }
+    if (!isImage(e.name)) { setStatus("该类型不支持图片预览"); return; }
+    var imgs = entries.filter(function (x) { return !x.dir && isImage(x.name); });
+    var startIndex = 0;
+    for (var i = 0; i < imgs.length; i++) { if (imgs[i].name === e.name) { startIndex = i; break; } }
+    setStatus("加载图片 " + e.name + " ...");
+    // 先取首图尺寸保证打开动画尺寸正确；SVG 无内在尺寸时 naturalWidth 可能为 0，交给视口回退
+    var first = new Image();
+    first.onload = function () { openGallery(imgs, startIndex, first.naturalWidth, first.naturalHeight); };
+    first.onerror = function () { setStatus("图片加载失败: " + e.name); };
+    first.src = imgUrl(e.name);
+  }
+
+  function openGallery(imgs, startIndex, w0, h0) {
+    photoswipeLoad().then(function (PhotoSwipe) {
+      var items = imgs.map(function (x, i) {
+        return {
+          src: imgUrl(x.name),
+          width: i === startIndex ? w0 : 0,
+          height: i === startIndex ? h0 : 0,
+          alt: x.name,
+        };
+      });
+      var pswp = new PhotoSwipe({
+        dataSource: items,
+        index: startIndex,
+        closeTitle: "关闭", zoomTitle: "缩放",
+        arrowPrevTitle: "上一张", arrowNextTitle: "下一张",
+        errorMsg: "图片无法加载",
+      });
+      // 非首图无预置尺寸：图片加载完成后回填真实尺寸并重算缩放级别
+      pswp.on("contentLoadImage", function (ev) {
+        var content = ev.content;
+        if (content.data.width) return;
+        var el = content.element;
+        if (!el) return;
+        var fix = function () {
+          var w = el.naturalWidth, h = el.naturalHeight;
+          if (!w || !h) return;  // 无内在尺寸（如部分 SVG）：保持视口回退
+          content.data.width = w; content.data.height = h;
+          content.width = w; content.height = h;
+          var slide = content.slide;
+          if (slide) {
+            slide.width = w; slide.height = h;
+            slide.calculateSize();
+            slide.updateContentSize(true);
+          }
+        };
+        if (el.complete && el.naturalWidth) fix();
+        else el.addEventListener("load", fix, { once: true });
+      });
+      pswp.init();
+      setStatus("就绪");
+    }).catch(function (err) {
+      setStatus("图片预览失败: " + (err && err.message ? err.message : err));
+    });
+  }
 
   // ============================================================
   // 高级下载
