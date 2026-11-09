@@ -1,0 +1,239 @@
+import { globalVars } from "@/utils/constants.js";
+import { state, mutations, getters } from "@/store";
+import { router } from "@/router";
+export default {
+  pathsMatch,
+  removeTrailingSlash,
+  removeLeadingSlash,
+  encodeRFC5987ValueChars,
+  removeLastDir,
+  encodePath,
+  removePrefix,
+  getApiPath,
+  extractSourceFromPath,
+  base64Encode,
+  joinPath,
+  goToItem,
+  buildItemUrl,
+  encodedPath,
+  trimSlashes,
+  getPublicApiPath,
+};
+
+export function removeLastDir(url) {
+  var arr = url.split("/");
+  if (arr.pop() === "") {
+    arr.pop();
+  }
+
+  return arr.join("/");
+}
+
+// this code borrow from mozilla
+// https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/encodeURIComponent#Examples
+export function encodeRFC5987ValueChars(str) {
+  return (
+    encodeURIComponent(str)
+      // Note that although RFC3986 reserves "!", RFC5987 does not,
+      // so we do not need to escape it
+      .replace(/['()]/g, escape) // i.e., %27 %28 %29
+      .replace(/\*/g, "%2A")
+      // The following are not required for percent-encoding per RFC5987,
+      // so we can allow for a little better readability over the wire: |`^
+      .replace(/%(?:7C|60|5E)/g, unescape)
+  );
+}
+
+export function encodePath(str) {
+  return str
+    .split("/")
+    .map((v) => encodeURIComponent(v))
+    .join("/");
+}
+
+
+export function pathsMatch(url1, url2) {
+  return removeTrailingSlash(url1) == removeTrailingSlash(url2);
+}
+
+export function removePrefix(path, prefix = "") {
+  if (path === undefined) {
+    return ""
+  }
+  path = removeLeadingSlash(path)
+  if (prefix != "") {
+    prefix = trimSlashes(prefix)
+  }
+  // Remove combined (globalVars.baseURL + prefix) from the start of the path if present
+  if (path.startsWith(prefix)) {
+    path = path.slice(prefix.length);
+  }
+
+  // Ensure path starts with '/'
+  if (!path.startsWith('/')) {
+    path = '/' + path;
+  }
+  return path;
+}
+
+
+// get path with parameters
+// Supports array values for repeated parameters (e.g., file=a&file=b&file=c)
+export function getApiPath(path, params = {}, encode = true) {
+  if (path.startsWith("/")) {
+    path = path.slice(1);
+  }
+  path = `${globalVars.baseURL}${path}`;
+
+  const paramKeys = Object.keys(params);
+  if (paramKeys.length > 0) {
+    if (encode) {
+      const encodedParams = [];
+      for (const key of paramKeys) {
+        const value = params[key];
+        if (value === undefined) continue;
+
+        // Handle array values for repeated parameters
+        if (Array.isArray(value)) {
+          value.forEach(v => {
+            encodedParams.push(`${encodeURIComponent(key)}=${encodeURIComponent(v)}`);
+          });
+        } else {
+          encodedParams.push(`${encodeURIComponent(key)}=${encodeURIComponent(value)}`);
+        }
+      }
+      if (encodedParams.length > 0) {
+        path += `?${encodedParams.join('&')}`;
+      }
+    } else {
+      const queryParams = [];
+      for (const key in params) {
+        const value = params[key];
+        if (value === undefined) continue;
+
+        // Handle array values for repeated parameters
+        if (Array.isArray(value)) {
+          value.forEach(v => {
+            queryParams.push(`${key}=${v}`);
+          });
+        } else {
+          queryParams.push(`${key}=${value}`);
+        }
+      }
+      if (queryParams.length > 0) {
+        path += `?${queryParams.join('&')}`;
+      }
+    }
+  }
+  return path;
+}
+
+// get path with parameters
+// relative path so it can be used behind proxy
+export function getPublicApiPath(path, params = {}, encode = true) {
+  return getApiPath(`/public/api/${path}`, params, encode);
+}
+
+export function removeTrailingSlash(str) {
+  if (str.endsWith('/')) {
+    return str.slice(0, -1);
+  }
+  return str;
+}
+
+export function removeLeadingSlash(str) {
+  if (str.startsWith('/')) {
+    return str.slice(1);
+  }
+  return str;
+}
+
+export function trimSlashes(str) {
+  return removeLeadingSlash(removeTrailingSlash(str))
+}
+
+export function joinPath(basePath, ...segments) {
+  if (!basePath) {
+    basePath = '/'
+  }
+  // Remove trailing slash from base path and leading slashes from segments
+  let result = basePath.replace(/\/$/, '');
+  for (const segment of segments) {
+    if (segment) {
+      result += '/' + segment.replace(/^\/+/, '');
+    }
+  }
+  return result;
+}
+
+export function base64Encode(str) {
+  return btoa(unescape(encodeURIComponent(str)));
+}
+
+// expect url to include /files/ prefix
+export function extractSourceFromPath(url) {
+  let source;
+  let path = url;
+  source = path.split('/')[2];
+  path = removePrefix(path, `/files/${source}`);
+
+  return { source, path };
+}
+
+export function buildItemUrl(source, path, includeBaseURL = false) {
+  path = removeLeadingSlash(path);
+  const encodedPath = encodePath(path);
+  let urlPath;
+  if (getters.isShare()) {
+    urlPath = `public/share/${state.shareInfo.hash}/${encodedPath}`;
+  } else {
+    urlPath = `files/${encodeURIComponent(source)}/${encodedPath}`;
+  }
+  if (includeBaseURL) {
+    return `${globalVars.baseURL}${urlPath}`;
+  }
+  return "/" + urlPath;
+}
+
+export function encodedPath(path) {
+  if (path === undefined) {
+    return "";
+  }
+  // break apart path into parts and url encode each part
+  const parts = path.split("/");
+  const encodedParts = parts.map(part => encodeURIComponent(part));
+  return encodedParts.join("/").replace("//", "/");
+}
+
+// assume non-encoded input path and source
+export function goToItem(source, path, previousHistoryItem, newTab = false) {
+  if (source == state.sources.current && path == state.req.path) {
+    return;
+  }
+  let newPath = encodedPath(path);
+  let fullPath = `/files/${encodeURIComponent(source)}${newPath}`;
+  if (newTab) {
+    window.open(fullPath, '_blank');
+    return;
+  }
+  mutations.setPreviousHistoryItem(previousHistoryItem);
+  mutations.resetAll()
+  if (getters.isShare()) {
+    fullPath = `/public/share/${state.shareInfo?.hash}${newPath}`;
+    if (previousHistoryItem === undefined) {
+      // When undefined will not create browser history
+      router.replace({ path: fullPath });
+      return;
+    }
+    router.push({ path: fullPath });
+    return;
+  }
+
+  if (previousHistoryItem === undefined) {
+    // When undefined will not create browser history
+    router.replace({ path: fullPath });
+    return
+  }
+  router.push({ path: fullPath });
+  return
+}

@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LocalFileDropShell — Web 拖放传文件</title>
+<style>
+/* Windows 95 design tokens — assets/02-windows-95.css */
+:root {
+  --bg: #008080;
+  --chrome: #c0c0c0;
+  --chrome-light: #dfdfdf;
+  --chrome-lighter: #ffffff;
+  --chrome-dark: #808080;
+  --chrome-darker: #000000;
+  --ink: #000;
+  --title: #000080;
+  --title-text: #fff;
+  --select: #000080;
+  --font: "MS Sans Serif", "Pixelated MS Sans Serif", Tahoma, sans-serif;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+  background: var(--bg);
+  font-family: var(--font);
+  font-size: 12px;
+  color: var(--ink);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+.window {
+  width: min(720px, 100%);
+  background: var(--chrome);
+  border: 2px solid;
+  border-color: var(--chrome-lighter) var(--chrome-darker) var(--chrome-darker) var(--chrome-lighter);
+  box-shadow: inset -1px -1px 0 var(--chrome-dark), inset 1px 1px 0 var(--chrome-light);
+  padding: 2px;
+}
+.titlebar {
+  background: linear-gradient(90deg, var(--title), #1084d0);
+  color: var(--title-text);
+  font-weight: bold;
+  padding: 3px 6px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  user-select: none;
+}
+.titlebar .btns span {
+  display: inline-block;
+  width: 16px; height: 14px;
+  line-height: 12px;
+  text-align: center;
+  background: var(--chrome);
+  color: var(--ink);
+  border: 1px solid;
+  border-color: var(--chrome-lighter) var(--chrome-darker) var(--chrome-darker) var(--chrome-lighter);
+  font-size: 10px;
+  margin-left: 2px;
+}
+.body { padding: 10px; }
+
+fieldset {
+  border: 2px solid;
+  border-color: var(--chrome-dark) var(--chrome-lighter) var(--chrome-lighter) var(--chrome-dark);
+  padding: 8px;
+  margin-bottom: 10px;
+}
+legend { padding: 0 4px; }
+.row { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.row:last-child { margin-bottom: 0; }
+.row label { width: 72px; flex: none; }
+input[type=text] {
+  flex: 1;
+  font-family: var(--font);
+  font-size: 12px;
+  padding: 2px 4px;
+  border: 2px solid;
+  border-color: var(--chrome-dark) var(--chrome-lighter) var(--chrome-lighter) var(--chrome-dark);
+  background: #fff;
+  outline: none;
+}
+button {
+  font-family: var(--font);
+  font-size: 12px;
+  padding: 4px 14px;
+  background: var(--chrome);
+  border: 2px solid;
+  border-color: var(--chrome-lighter) var(--chrome-darker) var(--chrome-darker) var(--chrome-lighter);
+  box-shadow: inset -1px -1px 0 var(--chrome-dark), inset 1px 1px 0 var(--chrome-light);
+  cursor: pointer;
+}
+button:active {
+  border-color: var(--chrome-darker) var(--chrome-lighter) var(--chrome-lighter) var(--chrome-darker);
+  box-shadow: none;
+  padding: 5px 13px 3px 15px;
+}
+
+.dropzone {
+  border: 2px dashed var(--chrome-dark);
+  background: var(--chrome-light);
+  min-height: 150px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  text-align: center;
+  padding: 20px;
+  margin-bottom: 10px;
+  cursor: default;
+}
+.dropzone.over {
+  background: #fff;
+  border-color: var(--title);
+}
+.dropzone .big { font-size: 14px; font-weight: bold; }
+.dropzone .hint { color: var(--chrome-dark); }
+
+.queue {
+  border: 2px solid;
+  border-color: var(--chrome-dark) var(--chrome-lighter) var(--chrome-lighter) var(--chrome-dark);
+  background: #fff;
+  height: 180px;
+  overflow-y: auto;
+  padding: 4px;
+}
+.item { display: flex; align-items: center; gap: 6px; padding: 2px 2px; }
+.item .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.item .size { flex: none; color: var(--chrome-dark); width: 80px; text-align: right; }
+.item .pct { flex: none; width: 44px; text-align: right; }
+.progress {
+  flex: none;
+  width: 120px; height: 14px;
+  border: 2px solid;
+  border-color: var(--chrome-dark) var(--chrome-lighter) var(--chrome-lighter) var(--chrome-dark);
+  background: #fff;
+  position: relative;
+}
+.progress > i {
+  display: block; height: 100%;
+  background: repeating-linear-gradient(90deg, var(--title) 0 8px, transparent 8px 10px);
+  width: 0%;
+}
+.item.ok .pct { color: #008000; }
+.item.err .pct { color: #c00000; }
+
+.statusbar {
+  margin-top: 8px;
+  border: 2px solid;
+  border-color: var(--chrome-dark) var(--chrome-lighter) var(--chrome-lighter) var(--chrome-dark);
+  padding: 2px 6px;
+  background: var(--chrome);
+  min-height: 20px;
+}
+</style>
+</head>
+<body>
+<div class="window">
+  <div class="titlebar">
+    <span>LocalFileDropShell — Web 拖放传文件</span>
+    <span class="btns"><span>_</span><span>□</span><span>×</span></span>
+  </div>
+  <div class="body">
+    <fieldset>
+      <legend>目标</legend>
+      <div class="row">
+        <label for="dir">保存到目录</label>
+        <input type="text" id="dir" value="D:/JustSmart/LocalFileDropShell/inbox">
+      </div>
+      <div class="row">
+        <label for="host">远程地址</label>
+        <input type="text" id="host" placeholder="可选，ip[:端口]，留空保存到本机">
+      </div>
+    </fieldset>
+
+    <div class="dropzone" id="dropzone">
+      <div class="big">把文件 / 文件夹拖到这里</div>
+      <div class="hint">支持多选与整个文件夹（保留目录层级）</div>
+      <button id="browse" type="button">浏览...</button>
+      <input type="file" id="picker" multiple hidden>
+    </div>
+
+    <div class="queue" id="queue"></div>
+    <div class="statusbar" id="status">就绪</div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var dz = document.getElementById("dropzone");
+  var picker = document.getElementById("picker");
+  var queue = document.getElementById("queue");
+  var statusEl = document.getElementById("status");
+  var dirInput = document.getElementById("dir");
+  var hostInput = document.getElementById("host");
+
+  // 支持 ?path= &host= 预填
+  var q = new URLSearchParams(location.search);
+  if (q.get("path")) dirInput.value = q.get("path");
+  if (q.get("host")) hostInput.value = q.get("host");
+
+  document.getElementById("browse").addEventListener("click", function () { picker.click(); });
+  picker.addEventListener("change", function () {
+    enqueue(Array.prototype.map.call(picker.files, function (f) {
+      return { file: f, rel: f.webkitRelativePath || f.name };
+    }));
+    picker.value = "";
+  });
+
+  ["dragenter", "dragover"].forEach(function (ev) {
+    dz.addEventListener(ev, function (e) { e.preventDefault(); dz.classList.add("over"); });
+  });
+  ["dragleave", "drop"].forEach(function (ev) {
+    dz.addEventListener(ev, function (e) { e.preventDefault(); dz.classList.remove("over"); });
+  });
+  dz.addEventListener("drop", function (e) {
+    var items = e.dataTransfer.items;
+    if (items && items.length && items[0].webkitGetAsEntry) {
+      var entries = [];
+      for (var i = 0; i < items.length; i++) {
+        var entry = items[i].webkitGetAsEntry();
+        if (entry) entries.push(entry);
+      }
+      collectEntries(entries, []);
+    } else {
+      enqueue(Array.prototype.map.call(e.dataTransfer.files, function (f) {
+        return { file: f, rel: f.name };
+      }));
+    }
+  });
+
+  // 递归遍历拖入的目录，保留层级
+  function collectEntries(entries, out) {
+    var pending = entries.length;
+    if (!pending) { enqueue(out); return; }
+    entries.forEach(function (entry) {
+      if (entry.isFile) {
+        entry.file(function (f) {
+          out.push({ file: f, rel: entry.fullPath.replace(/^\/+/, "") });
+          if (--pending === 0) enqueue(out);
+        }, function () { if (--pending === 0) enqueue(out); });
+      } else if (entry.isDirectory) {
+        var reader = entry.createReader();
+        readAll(reader, [], function (children) {
+          // 目录本身的层级由子项 fullPath 携带，无需额外处理
+          collectEntriesInto(children, out, function () {
+            if (--pending === 0) enqueue(out);
+          });
+        });
+      } else if (--pending === 0) enqueue(out);
+    });
+  }
+  function collectEntriesInto(entries, out, done) {
+    var pending = entries.length;
+    if (!pending) { done(); return; }
+    entries.forEach(function (entry) {
+      if (entry.isFile) {
+        entry.file(function (f) {
+          out.push({ file: f, rel: entry.fullPath.replace(/^\/+/, "") });
+          if (--pending === 0) done();
+        }, function () { if (--pending === 0) done(); });
+      } else if (entry.isDirectory) {
+        readAll(entry.createReader(), [], function (children) {
+          collectEntriesInto(children, out, function () { if (--pending === 0) done(); });
+        });
+      } else if (--pending === 0) done();
+    });
+  }
+  function readAll(reader, acc, done) {
+    reader.readEntries(function (batch) {
+      if (!batch.length) { done(acc); return; }
+      readAll(reader, acc.concat(Array.prototype.slice.call(batch)), done);
+    }, function () { done(acc); });
+  }
+
+  var uploading = false;
+  var backlog = [];
+
+  function enqueue(jobs) {
+    if (!jobs.length) return;
+    jobs.forEach(function (j) {
+      var row = document.createElement("div");
+      row.className = "item";
+      row.innerHTML =
+        '<span class="name" title=""></span>' +
+        '<span class="size"></span>' +
+        '<span class="progress"><i></i></span>' +
+        '<span class="pct">等待</span>';
+      row.querySelector(".name").textContent = j.rel;
+      row.querySelector(".name").title = j.rel;
+      row.querySelector(".size").textContent = fmtSize(j.file.size);
+      queue.appendChild(row);
+      j.row = row;
+      backlog.push(j);
+    });
+    queue.scrollTop = queue.scrollHeight;
+    statusEl.textContent = "队列 " + backlog.length + " 个文件";
+    pump();
+  }
+
+  function pump() {
+    if (uploading) return;
+    var job = backlog.shift();
+    if (!job) { statusEl.textContent = "就绪"; return; }
+    uploading = true;
+    uploadOne(job, function () {
+      uploading = false;
+      statusEl.textContent = backlog.length ? "剩余 " + backlog.length + " 个文件" : "全部完成";
+      pump();
+    });
+  }
+
+  function uploadOne(job, done) {
+    var dir = dirInput.value.trim().replace(/[\\/]+$/, "");
+    if (!dir) { markDone(job, false, "缺目录"); done(); return; }
+
+    var fd = new FormData();
+    var hostRaw = hostInput.value.trim();
+    if (hostRaw) {
+      // 远程模式：host[:port] + dir + 相对路径（服务端 posixpath.join）
+      var host = hostRaw, port = "";
+      var m = hostRaw.match(/^([^:]+):(\d+)$/);
+      if (m) { host = m[1]; port = m[2]; }
+      fd.append("host", host);
+      if (port) fd.append("port", port);
+      fd.append("dir", dir);
+      fd.append("path", job.rel);
+    } else {
+      fd.append("path", dir + "/" + job.rel);
+    }
+    fd.append("overwrite", "1");
+    fd.append("file", job.file, job.file.name);
+
+    var xhr = new XMLHttpRequest();
+    xhr.open("POST", "/upload");
+    xhr.upload.onprogress = function (e) {
+      if (e.lengthComputable) setPct(job, Math.round(e.loaded / e.total * 100));
+    };
+    xhr.onload = function () {
+      var ok = false, msg = xhr.status;
+      try {
+        var resp = JSON.parse(xhr.responseText);
+        ok = xhr.status === 200 && resp.ok !== false;
+        if (!ok && resp.error) msg = resp.error;
+      } catch (_) { ok = xhr.status === 200; }
+      markDone(job, ok, ok ? "完成" : msg);
+      done();
+    };
+    xhr.onerror = function () { markDone(job, false, "网络错误"); done(); };
+    job.row.classList.add("run");
+    xhr.send(fd);
+  }
+
+  function setPct(job, pct) {
+    job.row.querySelector(".progress i").style.width = pct + "%";
+    job.row.querySelector(".pct").textContent = pct + "%";
+  }
+  function markDone(job, ok, text) {
+    job.row.classList.add(ok ? "ok" : "err");
+    if (ok) setPct(job, 100);
+    job.row.querySelector(".pct").textContent = ok ? "完成" : "失败";
+    job.row.querySelector(".name").title = job.rel + (ok ? "" : " — " + text);
+  }
+  function fmtSize(n) {
+    if (n < 1024) return n + " B";
+    if (n < 1048576) return (n / 1024).toFixed(1) + " KB";
+    if (n < 1073741824) return (n / 1048576).toFixed(1) + " MB";
+    return (n / 1073741824).toFixed(2) + " GB";
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,269 @@
+<template>
+  <header v-if="!isOnlyOffice" :class="['flexbar', { 'dark-mode-header': isDarkMode }]">
+    <action
+      v-if="!disableNavButtons"
+      icon="close_back"
+      :label="$t('general.close')"
+      :disabled="isDisabledMultiAction"
+      @action="multiAction"
+    />
+    <search v-if="showSearch" />
+    <title v-else class="topTitle">{{ getTopTitle }}</title>
+    <action
+      v-if="isListingView && !disableNavButtons"
+      class="menu-button"
+      :icon="viewIcon"
+      :label="$t('buttons.switchView')"
+      @action="switchView"
+      :disabled="isDisabled"
+    />
+    <action
+      class="overflow-menu-button"
+      v-else-if="!isListingView && !showQuickSave"
+      :icon="iconName"
+      :disabled="noItems"
+      @click="toggleOverflow"
+    />
+    <action
+      class="save-button"
+      v-else-if="showQuickSave"
+      id="save-button"
+      icon="save"
+      :label="$t('general.save')"
+      @action="save()"
+    />
+  </header>
+</template>
+
+<script>
+import router from "@/router";
+import buttons from "@/utils/buttons";
+import { notify } from "@/notify";
+import { getters, state, mutations } from "@/store";
+import Action from "@/components/Action.vue";
+import Search from "@/components/Search.vue";
+import { globalVars } from "@/utils/constants";
+import { url } from "@/utils";
+
+export default {
+  name: "UnifiedHeader",
+  components: {
+    Action,
+    Search,
+  },
+  data() {
+    return {
+      viewModes: ["list", "normal", "icons"],
+    };
+  },
+  computed: {
+    getTopTitle() {
+      if (getters.isSettings()) {
+        return this.$t("general.settings");
+      }
+      if (getters.isShare()) {
+        if (state.req?.type === "directory" || state.shareInfo?.shareType === "upload") {
+          return state.shareInfo?.title;
+        }
+        return state.shareInfo?.title;
+      }
+      const currentTool = getters.currentTool();
+      if (currentTool) {
+        return currentTool.name;
+      }
+      return state.req.name;
+    },
+    showQuickSave() {
+      if (getters.currentView() != "editor" || !state.user.permissions.modify) {
+        return false;
+      }
+      return state.user.editorQuickSave;
+    },
+    disableNavButtons() {
+      const isShare = getters.isShare();
+      const regularDisabled = globalVars.disableNavButtons && this.isListingView;
+      const shareDisabled = isShare && state.shareInfo?.hideNavButtons && getters.currentView() == "listingView";
+      const uploadShare = isShare && state.shareInfo?.shareType === "upload"
+      return regularDisabled || shareDisabled || uploadShare;
+    },
+    isOnlyOffice() {
+      return getters.currentView() === "onlyOfficeEditor";
+    },
+    isListingView() {
+      return getters.currentView() == "listingView";
+    },
+    iconName() {
+      return getters.currentPromptName() === "OverflowMenu"
+        ? "keyboard_arrow_up"
+        : "more_vert";
+    },
+    viewIcon() {
+      const icons = {
+        list: "view_list",
+        compact: "view_list",
+        normal: "view_module",
+        gallery: "grid_view",
+      };
+      return icons[getters.viewMode()] || "grid_view";
+    },
+    isShare() {
+      return getters.isShare();
+    },
+    noItems() {
+      return !state.contextMenuHasItems;
+    },
+    showEdit() {
+      return window.location.hash != "#edit" && state.user.permissions.modify;
+    },
+    showDelete() {
+      return state.user.permissions.modify && getters.currentView() == "preview";
+    },
+    showSave() {
+      return getters.currentView() == "editor" && state.user.permissions.modify;
+    },
+    showSearch() {
+      return getters.isLoggedIn() && getters.currentView() === "listingView" && !getters.isShare();
+    },
+    isDisabled() {
+      return state.isSearchActive || getters.currentPromptName() != "";
+    },
+    isDisabledMultiAction() {
+      const regularDisabled = getters.isStickySidebar() && getters.multibuttonState() === "menu";
+      const shareDisabled = state.shareInfo?.disableSidebar && getters.multibuttonState() === "menu";
+      return this.isDisabled || regularDisabled || shareDisabled;
+    },
+    showSwitchView() {
+      return getters.currentView() === "listingView";
+    },
+    showSidebarToggle() {
+      return getters.currentView() === "listingView";
+    },
+    req() {
+      return state.req;
+    },
+    isDarkMode() {
+      return getters.isDarkMode();
+    },
+    isSettings() {
+      return getters.isSettings();
+    },
+  },
+  methods: {
+    async save() {
+      const button = "save";
+      buttons.loading("save");
+      try {
+        // Call the editor's save handler directly
+        if (state.editorSaveHandler) {
+          await state.editorSaveHandler();
+          buttons.success(button);
+          // Note: Success notification is shown by the editor
+        } else {
+          const errorMsg = "No editor save handler registered";
+          notify.showError(errorMsg);
+          throw new Error(errorMsg);
+        }
+      } catch (e) {
+        buttons.done(button);
+        // Note: Error notification is already shown by the editor
+        throw e; // Re-throw so caller knows save failed
+      }
+    },
+    toggleOverflow() {
+      if (getters.currentPromptName() === "OverflowMenu") {
+        mutations.closeHovers();
+      } else {
+        mutations.showHover({ name: "OverflowMenu" });
+      }
+    },
+    switchView() {
+      mutations.closeHovers();
+      const index = this.viewModes.indexOf(getters.viewMode());
+      const next = (index + 1) % this.viewModes.length;
+      const newViewMode = this.viewModes[next];
+      mutations.updateDisplayPreferences({ viewMode: newViewMode });
+      mutations.updateCurrentUser({ viewMode: newViewMode });
+    },
+    multiAction() {
+      const cv = getters.currentView();
+
+      // Check for unsaved editor changes before navigation
+      if (cv === "editor" && state.editorDirty) {
+        this.showSaveBeforeExitPrompt(() => this.performNavigation(cv));
+        return;
+      }
+
+      this.performNavigation(cv);
+    },
+    performNavigation(cv) {
+      if (cv == "listingView" || ( getters.isShare() && !getters.multibuttonState() === "close")) {
+        mutations.toggleSidebar();
+      } else if (cv == "settings" && state.isMobile) {
+        mutations.toggleSidebar();
+      } else {
+        mutations.closeHovers();
+        if (cv === "settings") {
+          if (state.previousHistoryItem?.name) {
+            url.goToItem(state.previousHistoryItem.source, state.previousHistoryItem.path, state.previousHistoryItem);
+            return;
+          }
+          router.push({ path: "/files" });
+          return;
+        }
+        if (getters.isPreviewView()) {
+          if (state.previousHistoryItem?.name) {
+            url.goToItem(state.previousHistoryItem.source, state.previousHistoryItem.path, state.previousHistoryItem);
+            return;
+          } else {
+            // navigate to parent directory of current url
+            const parentPath = url.removeLastDir(state.route.path);
+            router.push({ path: parentPath });
+          }
+          return;
+        }
+
+        router.go(-1);
+      }
+    },
+    showSaveBeforeExitPrompt(onConfirmAction) {
+      mutations.showHover({
+        name: "SaveBeforeExit",
+        confirm: async () => {
+          // Save and exit - trigger the save action
+          // If save fails, this will throw and be caught by SaveBeforeExit component
+          await this.save();
+          mutations.setEditorDirty(false);
+          onConfirmAction();
+        },
+        discard: () => {
+          // Discard changes and exit
+          mutations.setEditorDirty(false);
+          onConfirmAction();
+        },
+        cancel: () => {
+          // Keep editing - do nothing
+        },
+      });
+    },
+  },
+};
+</script>
+
+<style scoped>
+header button:hover {
+  box-shadow: unset !important;
+  -webkit-box-shadow: unset !important;
+}
+header {
+  background-color: rgb(37 49 55 / 5%) !important;
+}
+/* Header with backdrop-filter support */
+@supports (backdrop-filter: none) {
+  header {
+    backdrop-filter: blur(16px) invert(0.1);
+  }
+  .dark-mode-header {
+    background-color: rgb(37 49 55 / 33%) !important;
+  }
+}
+</style>

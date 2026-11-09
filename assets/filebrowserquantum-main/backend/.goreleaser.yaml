@@ -1,0 +1,110 @@
+# .goreleaser.yaml
+project_name: filebrowser
+version: 2
+
+builds:
+  # Build configuration for linux amd64
+  - id: linux-amd64
+    env:
+      - CGO_ENABLED=1
+      - CC=zig cc -target x86_64-linux-musl
+    tags:
+      - mupdf
+      - musl
+    ldflags: &ldflags
+      - -s -w -X github.com/gtsteffaniak/filebrowser/backend/common/version.Version=v{{ .Version }} -X github.com/gtsteffaniak/filebrowser/backend/common/version.CommitSHA={{ .ShortCommit }}
+    main: main.go
+    binary: filebrowser
+    goos:
+      - linux
+    goarch:
+      - amd64
+    hooks:
+      post:
+        - upx {{ .Path }}
+
+  # Build configuration for linux arm64
+  - id: linux-arm64
+    ldflags: *ldflags
+    main: main.go
+    binary: filebrowser
+    env:
+      - CGO_ENABLED=1
+      - CC=zig cc -target aarch64-linux-musl
+    tags:
+      - mupdf
+      - musl
+    goos:
+      - linux
+    goarch:
+      - arm64
+    hooks:
+      post:
+        - upx {{ .Path }}
+
+  # Build configuration for linux
+  - id: linux-arm32
+    ldflags: *ldflags
+    main: main.go
+    binary: filebrowser
+    goos:
+      - linux
+    goarch:
+      - arm
+    goarm:
+      - "6"
+      - "7"
+    hooks:
+      post:
+        - upx {{ .Path }}  # Compress the binary with UPX
+
+  # Build configuration for windows without arm
+  - id: windows
+    env:
+      - CGO_ENABLED=1
+      - CC=zig cc -target x86_64-windows
+    tags:
+      - mupdf
+    ldflags: *ldflags
+    main: main.go
+    binary: filebrowser
+    goos:
+      - windows
+    goarch:
+      - amd64
+    hooks:
+      post:
+        - upx {{ .Path }}  # Compress the binary with UPX
+
+  # Build configuration for freebsd without arm & upx
+  - id: freeBSD and freebsd-arm
+    ldflags: *ldflags
+    main: main.go
+    binary: filebrowser
+    goos:
+      - freebsd
+    goarch:
+      - amd64
+
+  # Build configuration for macos without upx
+  - id: macos
+    ldflags: *ldflags
+    main: main.go
+    binary: filebrowser
+    goos:
+      - darwin
+    goarch:
+      - arm64
+      - amd64
+
+archives:
+  - name_template: >
+      {{- if eq .Os "windows" -}}
+      {{.ProjectName}}
+      {{- else -}}
+      {{.Os}}-{{.Arch}}{{if .Arm}}v{{.Arm}}{{end}}-{{.ProjectName}}
+      {{- end -}}
+    formats: [ 'binary' ]
+
+checksum:
+  disable: true

@@ -986,6 +986,22 @@ async def shell_static_handler(request: web.Request) -> web.StreamResponse:
     return web.FileResponse(target)
 
 
+async def drop_static_handler(request: web.Request) -> web.StreamResponse:
+    """GET /drop/{path} — Win95 风格 Web 拖放上传页（assets/drop）."""
+    tail = request.match_info.get("tail", "") or "index.html"
+    base = _vnc.bundle_asset_dir()
+    base = base / "drop" if base is not None else None
+    if base is None or not base.is_dir():
+        return web.Response(
+            status=503,
+            text="拖传页面资源未找到：请准备 assets/drop（或重新打包完整版）",
+        )
+    target = _safe_static_file(base, tail)
+    if target is None:
+        raise web.HTTPNotFound()
+    return web.FileResponse(target)
+
+
 async def _pipe_tcp_to_ws(reader: asyncio.StreamReader, ws: web.WebSocketResponse) -> None:
     """VNC → 浏览器方向转发."""
     try:
@@ -1096,8 +1112,10 @@ def create_app(config: ServerConfig | None = None) -> web.Application:
     # 必须注册在通配路由之前，否则 /shell 会被 /shell/{tail:.*} 抢先命中
     app.router.add_get("/vnc", lambda req: web.HTTPFound("/vnc/?" + req.query_string))
     app.router.add_get("/shell", lambda _req: web.HTTPFound("/shell/"))
+    app.router.add_get("/drop", lambda _req: web.HTTPFound("/drop/"))
     app.router.add_get("/vnc/{tail:.*}", vnc_static_handler)
     app.router.add_get("/shell/{tail:.*}", shell_static_handler)
+    app.router.add_get("/drop/{tail:.*}", drop_static_handler)
 
     return app
 

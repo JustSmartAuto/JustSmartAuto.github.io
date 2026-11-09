@@ -1,0 +1,66 @@
+{
+  "name": "filebrowser-frontend",
+  "version": "3.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "npm": ">=9.0.0",
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "build": "rm -rf ../backend/http/dist/* && rm -rf ../backend/http/embed/* && vite build --outDir ../backend/http/dist && cp -r ../backend/http/dist/* ../backend/http/embed",
+    "build:docker": "vite build",
+    "watch": "vite build --watch --outDir ../backend/http/dist",
+    "typecheck": "vue-tsc -p ./tsconfig.json --noEmit",
+    "lint": "eslint --ext .js,.vue,.ts src/",
+    "lint:fix": "eslint --fix --ext .js,.vue,.ts src/",
+    "i18n:sync": "node ./scripts/sync-translations.js",
+    "i18n:check": "node ./scripts/sync-translations.js --check",
+    "format": "prettier --write .",
+    "test": "vitest run "
+  },
+  "dependencies": {
+    "@onlyoffice/document-editor-vue": "^1.4.0",
+    "ace-builds": "^1.24.2",
+    "axios": "^1.13.5",
+    "clipboard": "^2.0.4",
+    "css-vars-ponyfill": "^2.4.3",
+    "dompurify": "^3.2.4",
+    "epubjs": "^0.3.93",
+    "file-loader": "^6.2.0",
+    "glob": "^9.3.5",
+    "highlight.js": "^11.11.1",
+    "mammoth": "^1.9.1",
+    "marked": "^15.0.6",
+    "normalize.css": "^8.0.1",
+    "plyr": "^3.8.4",
+    "qrcode.vue": "^3.4.1",
+    "srt-support-for-html5-videos": "^2.6.11",
+    "vue": "^3.4.21",
+    "vue-i18n": "^9.10.2",
+    "vue-lazyload": "^3.0.0",
+    "vue-router": "^4.3.0"
+  },
+  "overrides": {
+    "minimatch": "^10.2.1"
+  },
+  "devDependencies": {
+    "@intlify/eslint-plugin-vue-i18n": "^3.2.0",
+    "@intlify/unplugin-vue-i18n": "^4.0.0",
+    "@playwright/test": "^1.54.1",
+    "@types/node": "^24.1.0",
+    "@vitejs/plugin-vue": "^5.0.4",
+    "@vue/eslint-config-typescript": "^13.0.0",
+    "deepl-node": "^1.18.0",
+    "eslint": "^8.57.0",
+    "eslint-config-prettier": "^9.1.0",
+    "eslint-plugin-vue": "^9.24.0",
+    "fs-extra": "^11.3.0",
+    "jsdom": "^25.0.1",
+    "vite": "^6.2.0",
+    "vite-plugin-checker": "^0.10.3",
+    "vite-plugin-compression2": "^1.0.0",
+    "vitest": "^3.0.7",
+    "vue-tsc": "^2.0.7"
+  }
+}

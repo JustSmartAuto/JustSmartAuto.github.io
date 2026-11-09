@@ -476,6 +476,12 @@ def _build_menus(
             logger.warning("打开文件夹失败: %s", exc)
 
     m_file.add_command(label="打开默认文件夹", command=_open_folder)
+
+    def _open_drop_page() -> None:
+        import webbrowser
+        webbrowser.open(f"{base_url}/drop/")
+
+    m_file.add_command(label="打开 Web 拖传页面", command=_open_drop_page)
     m_file.add_separator()
     m_file.add_command(label="退出", command=root.destroy)
 

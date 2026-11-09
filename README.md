@@ -11,6 +11,7 @@
 | **RFB 文件传输** | Tk 主界面 | TightVNC FTP 扩展消息，支持 offset 断点续传、MD5 块校验、目录列表 |
 | **VNC 远程桌面** | pywebview 标签页（VNC） | 自动探测已有 TightVNC / RealVNC / UltraVNC 直接复用；无则可内嵌启动 + noVNC + WebSocket 代理；未安装 TightVNC 时用内嵌 MSI 静默提权安装 |
 | **远程地址 / 收藏夹** | Tk 文件传输页顶栏 + 收藏夹页 | 输入 `ip[:端口]`（省略按 5900）点“连接”直连该远程 VNC；收藏备注名 / ip:port / 传输协议 / 文件传输默认路径 / 多个快捷路径，持久化到 `D:/JustSmart/LocalFileDropShell/favorites.json`（不可写回退 `%APPDATA%/LocalFileDropShell`） |
+| **Web 拖放传文件** | 浏览器 `/drop/` | Win95 风格拖传页（`assets/drop/index.html`）：拖入文件/整个文件夹（保留目录层级）、逐文件进度条；可填「远程地址 ip[:端口]」经 RFB FTP 直推远程，留空则保存到本机目录；支持 `?path=&host=` 预填；Tk「文件」菜单一键打开 |
 | **CLI 交互式 shell** | 纯控制台 | 同进程三角色（`gui` / `server` / `client`），内置 upload / download / rsync / rfb-* 等命令 |
 
 **混合 UI 架构**：
@@ -62,6 +63,7 @@
 │  ─── 无需目标端启动本软件 ───    │ ├─ /rsync/blockset /delta /apply  │
 └─────────────────────┘  │ ├─ /rfb/file/*       RFB FTP 封装        │
                          │ ├─ /vnc/             noVNC 静态页面       │
+                         │ ├─ /drop/            Win95 Web 拖放上传页  │
                          │ ├─ /websockify       WebSocket 代理       │
                          │ │   (浏览器 ↔ 127.0.0.1:5900+/15900+)     │
                          │ └─ /health                                │

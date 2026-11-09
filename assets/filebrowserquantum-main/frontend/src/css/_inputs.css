@@ -1,0 +1,45 @@
+.input {
+  border-radius: 1em;
+  padding: .5em 1em;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  transition: .2s ease all;
+  margin: 0;
+  width: 100%;
+  background: var(--surfaceSecondary);
+  color: var(--textPrimary);
+}
+
+.input:hover,
+.input:focus {
+  border-color: rgba(0, 0, 0, 0.2);
+}
+
+.input--textarea {
+  line-height: 1.15;
+  font-family: monospace;
+  min-height: 10em;
+  resize: vertical;
+}
+
+.input--red {
+  background: #fcd0cd;
+}
+
+.input--green {
+  background: #c9f2da;
+}
+
+/* Autofill hack to maintain style */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus,
+input:-webkit-autofill:active {
+  -webkit-box-shadow: 0 0 0px 1000px var(--surfaceSecondary) inset !important;
+  -webkit-text-fill-color: var(--textPrimary) !important; /* Optional: Change text color to contrast */
+  border-color: unset !important;
+}
+
+/* Style for input sliders */
+input[type="range"] {
+  accent-color: var(--primaryColor);
+}

@@ -1,0 +1,221 @@
+import { mutations, state } from '@/store'
+import { notify } from '@/notify'
+import { globalVars } from '@/utils/constants'
+import { filesApi } from '@/api'
+import i18n from '@/i18n'
+
+let eventSrc = null
+let reconnectTimeout = null
+let isManuallyClosed = false
+let authenticationFailed = false
+let hasShownShutdownMessage = false
+
+async function updateSourceInfo() {
+  try {
+    const sourceinfo = await filesApi.sources()
+    mutations.updateSourceInfo(sourceinfo)
+  } catch (err) {
+    mutations.updateSourceInfo('error')
+  }
+}
+
+function cleanup() {
+  if (eventSrc) {
+    isManuallyClosed = true
+    eventSrc.close()
+    eventSrc = null
+  }
+}
+
+function scheduleReconnect() {
+  // Don't reconnect if authentication has failed
+  if (authenticationFailed) {
+    console.log('🚫 Not reconnecting due to authentication failure')
+    return
+  }
+
+  reconnectTimeout = setTimeout(() => {
+    console.log('🔁 Attempting SSE reconnect...')
+    setupSSE()
+  }, 5000)
+}
+
+function clearReconnect () {
+  if (reconnectTimeout) {
+    clearTimeout(reconnectTimeout)
+    reconnectTimeout = null
+  }
+}
+
+// Test the events endpoint to check for authentication before setting up EventSource
+async function testEventsEndpoint() {
+  const url = `${globalVars.baseURL}api/events?sessionId=${state.sessionId}`
+  try {
+    const response = await fetch(url, {
+      method: 'GET',
+      credentials: 'same-origin', // Ensure cookies are sent for SSE authentication
+      headers: {
+        'Accept': 'text/event-stream',
+        'Cache-Control': 'no-cache'
+      }
+    })
+
+    if (response.status === 401) {
+      console.log('🚫 Events endpoint returned 401, authentication failed')
+      authenticationFailed = true
+      return false
+    }
+
+    // Close the test connection immediately
+    response.body?.cancel()
+    return true
+  } catch (error) {
+    // For network errors (like ERR_CONNECTION_REFUSED), we'll try the EventSource anyway
+    // Only actual 401 responses should stop reconnection
+    return true
+  }
+}
+
+async function setupSSE () {
+  // Only test authentication if we haven't already failed
+  if (!authenticationFailed) {
+    const isAuthenticated = await testEventsEndpoint()
+    if (!isAuthenticated) {
+      console.log('🚫 Authentication failed, not setting up EventSource')
+      authenticationFailed = true
+      notify.showError(i18n.global.t('events.authenticationFailed'))
+      return
+    }
+  }
+
+  const url = `${globalVars.baseURL}api/events?sessionId=${state.sessionId}`
+  eventSrc = new EventSource(url)
+  isManuallyClosed = false
+
+  eventSrc.onopen = () => {
+    if (!state.realtimeActive) {
+      console.log('✅ SSE connected')
+    }
+    if (state.realtimeDownCount > 1) {
+      notify.showSuccessToast(i18n.global.t('events.reconnected'))
+    }
+    clearReconnect()
+    mutations.setRealtimeActive(true)
+    updateSourceInfo()
+    // Reset authentication failure flag on successful connection
+    authenticationFailed = false
+    // Reset shutdown message flag on successful reconnection
+    hasShownShutdownMessage = false
+  }
+
+  eventSrc.onmessage = event => {
+    try {
+      const msg = JSON.parse(event.data)
+      eventRouter(msg.eventType, msg.message)
+    } catch (err) {
+      console.error('Error parsing SSE:', err, event.data)
+    }
+  }
+
+  eventSrc.onerror = e => {
+    console.warn('❌ SSE connection error', e)
+    cleanup()
+    mutations.setRealtimeActive(false)
+    mutations.updateSourceInfo('error')
+
+    // Don't reconnect if authentication has failed
+    if (authenticationFailed) {
+      console.log('🚫 Not reconnecting due to authentication failure')
+      return
+    }
+
+    // Original notification logic - only show error after multiple failures
+    if (state.realtimeDownCount == 2 && !isManuallyClosed) {
+      notify.showErrorToast(i18n.global.t('events.connectionLost'))
+    }
+    scheduleReconnect()
+  }
+}
+
+export function startSSE () {
+  // Reset authentication failure flag when starting SSE
+  authenticationFailed = false
+  setupSSE()
+}
+
+export function startOnlyOfficeSSE () {
+  // Reset authentication failure flag when starting SSE
+  authenticationFailed = false
+  setupSSE()
+}
+
+export function stopSSE () {
+  cleanup()
+}
+
+async function eventRouter (eventType, message) {
+  switch (eventType) {
+    case 'heartbeat':
+      // Ignore heartbeat messages - they're just for keeping the connection alive
+      return
+
+    case 'notification':
+      if (message === 'the server is shutting down') {
+        if (!hasShownShutdownMessage) {
+          notify.showErrorToast(i18n.global.t('events.serverShutdown'))
+          hasShownShutdownMessage = true
+        }
+        mutations.setRealtimeActive(false)
+        cleanup()
+        scheduleReconnect()
+      }
+      break
+
+    case 'watchDirChange':
+      mutations.setWatchDirChangeAvailable(message)
+      break
+
+    case 'sourceUpdate':
+      // Parse the JSON string before passing to updateSourceInfo
+      try {
+        const parsedMessage = JSON.parse(message)
+        mutations.updateSourceInfo(parsedMessage)
+      } catch (err) {
+        console.error('Error parsing sourceUpdate message:', err, message)
+      }
+      break
+
+    case 'acknowledge':
+      if (!state.realtimeActive) {
+        notify.showSuccessToast(i18n.global.t('events.reconnected'))
+      }
+      mutations.setRealtimeActive(true)
+      break
+
+    case 'onlyOfficeLog':
+      // Dispatch custom event for OnlyOffice logs
+      try {
+        // message is already a parsed object, not a JSON string
+        const logData = message
+        window.dispatchEvent(new CustomEvent('onlyOfficeLogEvent', { detail: logData }))
+      } catch (error) {
+        console.error('Error dispatching OnlyOffice log event:', error)
+      }
+      break
+
+    case 'fileWatch':
+      // Dispatch custom event for file watch updates
+      try {
+        // message is a JSON string that needs to be parsed
+        const watchData = typeof message === 'string' ? JSON.parse(message) : message
+        window.dispatchEvent(new CustomEvent('fileWatchEvent', { detail: watchData }))
+      } catch (error) {
+        console.error('Error dispatching file watch event:', error)
+      }
+      break
+
+    default:
+      console.log('Unknown SSE event:', eventType, message)
+  }
+}
+

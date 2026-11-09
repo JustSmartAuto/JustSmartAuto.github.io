@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+  <title>{{ .htmlVars.title }}</title>
+
+  <link rel="icon" type="image/png" sizes="256x256" href="{{ .htmlVars.favicon }}">
+
+  <!-- Preload critical fonts for optimal performance -->
+  <link rel="preload" href="{{ .htmlVars.staticURL }}/fonts/roboto-normal-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="{{ .htmlVars.staticURL }}/fonts/roboto-medium-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="{{ .htmlVars.staticURL }}/fonts/roboto-bold-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="{{ .htmlVars.staticURL }}/fonts/material-icons.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="{{ .htmlVars.staticURL }}/fonts/material-symbols-outlined.woff2" as="font" type="font/woff2" crossorigin>
+
+  <!-- Add to home screen for Android and modern mobile browsers -->
+  <link rel="manifest" href="{{ .htmlVars.manifestURL }}" crossorigin="use-credentials">
+  <meta name="theme-color" content="{{ .htmlVars.color }}">
+
+  <!-- Add to home screen for Safari on iOS/iPadOS -->
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="assets">
+  <link rel="apple-touch-icon" sizes="180x180" href="{{ .htmlVars.appIcon }}">
+
+  <!-- Add to home screen for Windows -->
+  <meta name="msapplication-TileImage" content="{{ .htmlVars.winIcon }}">
+  <meta name="msapplication-TileColor" content="{{ .htmlVars.color }}">
+
+  <meta name="description" content="{{ .htmlVars.description }}">
+
+  <!-- OpenGraph metadata -->
+  <meta property="og:title" content="{{ .htmlVars.title }}">
+  <meta property="og:description" content="{{ .htmlVars.description }}">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="{{ .htmlVars.url }}">
+  <meta property="og:image" content="{{ .htmlVars.image }}">
+  <meta property="og:image:alt" content="{{ .htmlVars.title }}">
+
+  <!-- Twitter Card metadata -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="{{ .htmlVars.title }}">
+  <meta name="twitter:description" content="{{ .htmlVars.description }}">
+  <meta name="twitter:image" content="{{ .htmlVars.image }}">
+
+  <link rel="canonical" href="https://github.com/gtsteffaniak/filebrowser">
+  <link rel="canonical" href="https://github.com/quantumx-apps">
+  <link rel="canonical" href="https://filebrowserquantum.com">
+
+  <!-- Injected variables come from backend server -->
+  <script>
+    window.globalVars = {{ .globalVars }};
+  </script>
+
+  <style>
+    /* Basic Styles */
+    :root {
+      --background: {{ .htmlVars.lightBackground }};
+      --alt-background: #ddd;
+      --surfacePrimary: #ebebeb;
+      --surfaceSecondary: lightgray;
+      --textPrimary: #546e7a;
+      --textSecondary: gray;
+      --iconBackground: #dddddd;
+      --activeWhiteIcon: gray;
+    }
+    .dark-mode {
+      --background: {{ .htmlVars.darkBackground }};
+      --alt-background: #283136;
+      --surfacePrimary: #20292F;
+      --surfaceSecondary: #3A4147;
+      --divider: rgba(255, 255, 255, 0.12);
+      --textPrimary: rgba(255, 255, 255, 0.87);
+      --textSecondary: rgba(255, 255, 255, 0.6);
+      --iconBackground: #1e1f20;
+      --activeWhiteIcon: white;
+    }
+
+    {{ .htmlVars.loadingSpinnersCSS }}
+  </style>
+</head>
+
+<body>
+  <div id="app"></div>
+  <span class="loader loader--medium"></span>
+
+  <script type="module" src="/src/main.ts"></script>
+
+  <style>
+    {{ .htmlVars.customCSS }}
+    {{ .htmlVars.userSelectedTheme }}
+  </style>
+</body>
+
+</html>
