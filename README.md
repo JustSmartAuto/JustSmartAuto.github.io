@@ -66,6 +66,7 @@
 └─────────────────────┘  │ ├─ /rfb/file/*       RFB FTP 封装        │
                          │ ├─ /vnc/             noVNC 静态页面       │
                          │ ├─ /drop/            Win95 Web 拖放上传页  │
+                         │ ├─ /files/ + /api/files/*  Win95 Web 文件管理器 │
                          │ ├─ /websockify       WebSocket 代理       │
                          │ │   (浏览器 ↔ 127.0.0.1:5900+/15900+)     │
                          │ └─ /health                                │

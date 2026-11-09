@@ -1,0 +1,29 @@
+/*!
+ * @zenfs/core — https://npmjs.com/package/@zenfs/core
+ * Copyright © James Prevett and other ZenFS contributors.
+ * SPDX-License-Identifier: LGPL-3.0-or-later
+ */
+export * from './backends/index.js';
+export * from './config.js';
+export * from './context.js';
+export * from './internal/index.js';
+export * from './mixins/index.js';
+export * from './utils.js';
+export { mounts } from './vfs/shared.js';
+import * as fs from './node/compat.js';
+/** @primaryExport */
+export { fs };
+export default fs;
+export * from './node/compat.js';
+export * as vfs from './vfs/index.js';
+
+// eslint-disable-next-line no-shadow-restricted-names
+declare const globalThis: {
+	/**
+	 * Global VFS. Do not use unless absolutely needed.
+	 * @hidden
+	 */
+	__zenfs__: typeof fs;
+};
+
+globalThis.__zenfs__ = Object.create(fs);

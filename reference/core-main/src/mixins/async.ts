@@ -1,0 +1,331 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+import { withErrno } from 'kerium';
+import type { Semaphore } from 'kerium/locks';
+import { crit, debug, err } from 'kerium/log';
+import { StoreFS } from '../backends/store/fs.js';
+import type { CreationOptions, FileSystem, StreamOptions } from '../internal/filesystem.js';
+import { isDirectory, type InodeLike } from '../internal/inode.js';
+import type { IoctlContext } from '../internal/ioctl.js';
+import { join } from '../path.js';
+import { _asyncFSKeys, type _SyncFSKeys, type AsyncFSMethods, type Mixin } from './shared.js';
+
+/**
+ * @internal
+ * @category Internals
+ */
+export type AsyncOperation = {
+	[K in keyof AsyncFSMethods]: [K, ...Parameters<FileSystem[K]>];
+}[keyof AsyncFSMethods];
+
+/**
+ * @internal
+ * @category Internals
+ */
+export interface AsyncMixin extends Pick<FileSystem, Exclude<_SyncFSKeys, 'existsSync'>> {
+	/** @internal @protected */
+	_sync?: FileSystem;
+
+	/** Restrict how many files can be copied across at once @internal @protected */
+	_crossCopySemaphore?: Semaphore;
+
+	/** @deprecated Use {@link sync | `sync`} instead */
+	queueDone(): Promise<void>;
+
+	ready(): Promise<void>;
+
+	sync(): Promise<void>;
+}
+
+/**
+ * Whether the stack of `error` has a patched method or `key`'s sync method below the innermost patched method.
+ */
+function isInLoop(key: string, error: Error = new Error()): boolean {
+	return new RegExp(`__patched__[^]*(__patched__|\\b${key}Sync\\b)`).test(error.stack ?? '');
+}
+
+/**
+ * Whether the stack has a queued replay below the innermost patched method.
+ */
+function isReplay(): boolean {
+	return /__patched__[^]*__replay__/.test(new Error().stack ?? '');
+}
+
+/**
+ * Async() implements synchronous methods on an asynchronous file system
+ *
+ * Implementing classes must define `_sync` for the synchronous file system used as a cache.
+ *
+ * Synchronous methods on an asynchronous FS are implemented by performing operations over the in-memory copy,
+ * while asynchronously pipelining them to the backing store.
+ * During loading, the contents of the async file system are preloaded into the synchronous store.
+ * @category Internals
+ */
+export function Async<const T extends abstract new (...args: any[]) => FileSystem>(FS: T): Mixin<T, AsyncMixin> {
+	abstract class AsyncFS extends FS implements AsyncMixin {
+		/**
+		 * @deprecated Use {@link sync | `sync`} instead
+		 */
+		async done(): Promise<void> {
+			return this.sync();
+		}
+
+		/**
+		 * @deprecated Use {@link sync | `sync`} instead
+		 */
+		public queueDone(): Promise<void> {
+			return this.sync();
+		}
+
+		private _promise: Promise<unknown> = Promise.resolve();
+
+		/** How many queued operations have not finished */
+		private _pending: number = 0;
+
+		/** The async methods before patching, which do not update the sync cache */
+		private _unpatched = {} as AsyncFSMethods;
+
+		protected _async(thunk: () => Promise<unknown>) {
+			this._pending++;
+			const replay = async function __replay__(this: AsyncFS) {
+				try {
+					await thunk();
+				} finally {
+					this._pending--;
+				}
+			};
+			this._promise = this._promise.finally(replay.bind(this));
+		}
+
+		private _isInitialized: boolean = false;
+		/** Tracks how many updates to the sync. cache we skipped during initialization */
+		private _skippedCacheUpdates: number = 0;
+
+		abstract _sync?: FileSystem;
+
+		public constructor(...args: any[]) {
+			super(...args);
+			this._patchAsync();
+		}
+
+		public async ready(): Promise<void> {
+			await super.ready();
+			if (this._isInitialized || this.attributes.has('no_async_preload')) return;
+			await this._promise;
+
+			this.checkSync();
+
+			await this._sync.ready();
+
+			// optimization: for 2 storeFS', we copy at a lower abstraction level.
+			if (this._sync instanceof StoreFS && this instanceof StoreFS) {
+				const sync = this._sync.transaction();
+				const async = this.transaction();
+
+				const promises = [];
+				for (const key of await async.keys()) {
+					promises.push(async.get(key).then(data => sync.setSync(key, data!)));
+				}
+
+				await Promise.all(promises);
+				sync.commitSync();
+
+				this._isInitialized = true;
+				return;
+			}
+
+			try {
+				await this.crossCopy('/');
+				debug(`Skipped ${this._skippedCacheUpdates} updates to the sync cache during initialization`);
+				this._isInitialized = true;
+			} catch (e: any) {
+				this._isInitialized = false;
+				throw crit(e);
+			}
+		}
+
+		protected checkSync(): asserts this is { _sync: FileSystem } {
+			if (this.attributes.has('no_async_preload')) {
+				throw withErrno('ENOTSUP', 'Sync preloading has been disabled for this async file system');
+			}
+			if (!this._sync) {
+				throw crit(withErrno('ENOTSUP', 'No sync cache is attached to this async file system'));
+			}
+		}
+
+		public renameSync(oldPath: string, newPath: string): void {
+			this.checkSync();
+			this._sync.renameSync(oldPath, newPath);
+			this._async(() => this._unpatched.rename(oldPath, newPath));
+		}
+
+		public statSync(path: string): InodeLike {
+			this.checkSync();
+			return this._sync.statSync(path);
+		}
+
+		public touchSync(path: string, metadata: InodeLike): void {
+			this.checkSync();
+			this._sync.touchSync(path, metadata);
+			this._async(() => this._unpatched.touch(path, metadata));
+		}
+
+		public createFileSync(path: string, options: CreationOptions): InodeLike {
+			this.checkSync();
+			const result = this._sync.createFileSync(path, options);
+			this._async(() => this._unpatched.createFile(path, options));
+			return result;
+		}
+
+		public unlinkSync(path: string): void {
+			this.checkSync();
+			this._sync.unlinkSync(path);
+			this._async(() => this._unpatched.unlink(path));
+		}
+
+		public rmdirSync(path: string): void {
+			this.checkSync();
+			this._sync.rmdirSync(path);
+			this._async(() => this._unpatched.rmdir(path));
+		}
+
+		public mkdirSync(path: string, options: CreationOptions): InodeLike {
+			this.checkSync();
+			const result = this._sync.mkdirSync(path, options);
+			this._async(() => this._unpatched.mkdir(path, options));
+			return result;
+		}
+
+		public readdirSync(path: string): string[] {
+			this.checkSync();
+			return this._sync.readdirSync(path);
+		}
+
+		public linkSync(srcpath: string, dstpath: string): void {
+			this.checkSync();
+			this._sync.linkSync(srcpath, dstpath);
+			this._async(() => this._unpatched.link(srcpath, dstpath));
+		}
+
+		public async sync(): Promise<void> {
+			if (!this.attributes.has('no_async_preload') && this._sync) this._sync.syncSync();
+			await this._promise.catch(() => {});
+		}
+
+		public syncSync(): void {
+			this.checkSync();
+			this._sync.syncSync();
+		}
+
+		public existsSync(path: string): boolean {
+			this.checkSync();
+			return this._sync.existsSync(path);
+		}
+
+		public readSync(path: string, buffer: Uint8Array, offset: number, end: number): void {
+			this.checkSync();
+			this._sync.readSync(path, buffer, offset, end);
+		}
+
+		public writeSync(path: string, buffer: Uint8Array, offset: number): void {
+			this.checkSync();
+			this._sync.writeSync(path, buffer, offset);
+			this._async(() => this._unpatched.write(path, buffer, offset));
+		}
+
+		public ioctlSync(context: IoctlContext, command: number, ...args: any[]) {
+			this.checkSync();
+			return this._sync.ioctlSync(context, command, ...args);
+		}
+
+		public streamWrite(path: string, options: StreamOptions): WritableStream {
+			this.checkSync();
+			const sync = this._sync.streamWrite(path, options).getWriter();
+			const async = super.streamWrite(path, options).getWriter();
+
+			return new WritableStream({
+				async write(chunk, controller) {
+					await Promise.all([sync.write(chunk), async.write(chunk)]).catch(controller.error.bind(controller));
+				},
+				async close() {
+					await Promise.all([sync.close(), async.close()]);
+				},
+				async abort(reason) {
+					await Promise.all([sync.abort(reason), async.abort(reason)]);
+				},
+			});
+		}
+
+		/** @internal @protected */
+		_crossCopySemaphore?: Semaphore;
+
+		/** @internal */
+		protected async crossCopy(path: string): Promise<void> {
+			this.checkSync();
+			const stats = await this.stat(path);
+			if (!isDirectory(stats)) {
+				using _ = (await this._crossCopySemaphore?.get()) || { [Symbol.dispose]() {} };
+				this._sync.createFileSync(path, stats);
+				const buffer = new Uint8Array(stats.size);
+				await this.read(path, buffer, 0, stats.size);
+				this._sync.writeSync(path, buffer, 0);
+				this._sync.touchSync(path, stats);
+				return;
+			}
+			if (path !== '/') {
+				this._sync.mkdirSync(path, stats);
+				this._sync.touchSync(path, stats);
+			}
+			const promises = [];
+			for (const file of await this.readdir(path)) {
+				promises.push(this.crossCopy(join(path, file)));
+			}
+			await Promise.all(promises);
+		}
+
+		/**
+		 * @internal
+		 * Patch all async methods to wait for queued operations,
+		 * and methods that change the file system to also call their synchronous counterparts unless called from themselves (either sync or async)
+		 */
+		private _patchAsync(): void {
+			const reads = ['read', 'readdir', 'stat', 'exists'];
+
+			for (const key of _asyncFSKeys) {
+				// TS does not narrow the union based on the key
+				const originalMethod = this[key].bind(this) as (...args: unknown[]) => Promise<unknown>;
+
+				const fn = async function __patched__(this: AsyncFS, ...args: unknown[]) {
+					if (this._pending && !isReplay()) await this._promise.catch(() => {});
+
+					const result = await originalMethod(...args);
+
+					if (reads.includes(key) || isInLoop(key)) return result;
+
+					if (!this._isInitialized) {
+						this._skippedCacheUpdates++;
+						return result;
+					}
+
+					try {
+						// @ts-expect-error 2556 - The type of `args` is not narrowed
+						this._sync?.[`${key}Sync`]?.(...args);
+					} catch (e: any) {
+						if (isInLoop(key, e)) return result;
+						e.message += ' (Out of sync!)';
+						throw err(e);
+					}
+					return result;
+				};
+
+				Object.defineProperty(fn, 'name', { get: () => key });
+
+				(this._unpatched as any)[key] = originalMethod;
+				(this as any)[key] = fn;
+			}
+
+			debug(`Async: patched ${_asyncFSKeys.length} methods`);
+		}
+	}
+
+	return AsyncFS;
+}

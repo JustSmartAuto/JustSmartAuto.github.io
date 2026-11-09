@@ -1,0 +1,904 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+import type { BufferView } from 'node:buffer';
+import type * as fs from 'node:fs';
+import type { V_Context } from '../context.js';
+import type { InodeLike } from '../internal/inode.js';
+import type { FileContents } from '../vfs/shared.js';
+import type { GlobOptionsU, NodeReaddirOptions } from './types.js';
+
+import { Buffer } from 'buffer';
+import { Errno, Exception, setUVMessage, UV } from 'kerium';
+import { encodeUTF8 } from 'utilium';
+import * as constants from '../constants.js';
+import { contextOf } from '../internal/contexts.js';
+import { wrap } from '../internal/error.js';
+import { assertRemovable, hasAccess, isDirectory } from '../internal/inode.js';
+import { _globDescent, dirname, join, matchesGlob, relative, resolve } from '../path.js';
+import { normalizeMode, normalizeOptions, normalizePath, normalizeTime } from '../utils.js';
+import {
+	blobType,
+	cpCheckPaths,
+	cpError,
+	cpSpecialFileError,
+	isNoEntry,
+	mkstempError,
+	readFileBuffer,
+	rmDirectoryError,
+	tempDirName,
+	tempFileName,
+	tempResult,
+	validateData,
+	validateMaxDepth,
+} from './utils.js';
+import { checkAccess } from '../vfs/config.js';
+import { deleteFD, fromFD, toFD } from '../vfs/file.js';
+import * as flags from '../vfs/flags.js';
+import { _statfs, resolveMount } from '../vfs/shared.js';
+import * as _sync from '../vfs/sync.js';
+import { emitChange } from '../vfs/watchers.js';
+import { Dir, Dirent } from './dir.js';
+import { BigIntStats, Stats } from './stats.js';
+
+export function renameSync(this: V_Context, oldPath: fs.PathLike, newPath: fs.PathLike): void {
+	return _sync.rename.call(this, oldPath, newPath);
+}
+renameSync satisfies typeof fs.renameSync;
+
+/**
+ * Test whether or not `path` exists by checking with the file system.
+ */
+export function existsSync(this: V_Context, path: fs.PathLike): boolean {
+	path = normalizePath.call(this, path);
+	try {
+		const { fs, path: resolvedPath } = _sync.resolve(this, path);
+		return fs.existsSync(resolvedPath);
+	} catch (e: any) {
+		if (e.errno == Errno.ENOENT || e.errno == Errno.ENOTDIR || e.errno == Errno.EACCES) return false;
+
+		throw e;
+	}
+}
+existsSync satisfies typeof fs.existsSync;
+
+export function statSync(this: V_Context, path: fs.PathLike, options?: fs.StatOptions & { bigint?: false; throwIfNoEntry?: true }): Stats;
+export function statSync(this: V_Context, path: fs.PathLike, options: fs.StatOptions & { bigint: true; throwIfNoEntry?: true }): BigIntStats;
+export function statSync(this: V_Context, path: fs.PathLike, options: fs.StatOptions & { bigint?: false; throwIfNoEntry: false }): Stats | undefined;
+export function statSync(
+	this: V_Context,
+	path: fs.PathLike,
+	options: fs.StatOptions & { bigint: true; throwIfNoEntry: false },
+): BigIntStats | undefined;
+export function statSync(this: V_Context, path: fs.PathLike, options: fs.StatOptions & { throwIfNoEntry?: true }): Stats | BigIntStats;
+export function statSync(this: V_Context, path: fs.PathLike, options?: fs.StatOptions): Stats | BigIntStats | undefined;
+export function statSync(this: V_Context, path: fs.PathLike, options?: fs.StatOptions): Stats | BigIntStats | undefined {
+	let stats: InodeLike;
+	try {
+		stats = _sync.stat.call(this, path, false);
+	} catch (e) {
+		if (options?.throwIfNoEntry === false && isNoEntry(e)) return;
+		throw e;
+	}
+	return options?.bigint ? new BigIntStats(stats) : new Stats(stats);
+}
+statSync satisfies typeof fs.statSync;
+
+/**
+ * Synchronous `lstat`.
+ * `lstat()` is identical to `stat()`, except that if path is a symbolic link,
+ * then the link itself is stat-ed, not the file that it refers to.
+ */
+export function lstatSync(this: V_Context, path: fs.PathLike, options?: fs.StatOptions & { bigint?: false; throwIfNoEntry?: true }): Stats;
+export function lstatSync(this: V_Context, path: fs.PathLike, options: fs.StatOptions & { bigint: true; throwIfNoEntry?: true }): BigIntStats;
+export function lstatSync(this: V_Context, path: fs.PathLike, options: fs.StatOptions & { bigint?: false; throwIfNoEntry: false }): Stats | undefined;
+export function lstatSync(
+	this: V_Context,
+	path: fs.PathLike,
+	options: fs.StatOptions & { bigint: true; throwIfNoEntry: false },
+): BigIntStats | undefined;
+export function lstatSync(this: V_Context, path: fs.PathLike, options: fs.StatOptions & { throwIfNoEntry?: true }): Stats | BigIntStats;
+export function lstatSync(this: V_Context, path: fs.PathLike, options?: fs.StatOptions): Stats | BigIntStats | undefined;
+export function lstatSync(this: V_Context, path: fs.PathLike, options?: fs.StatOptions): Stats | BigIntStats | undefined {
+	let stats: InodeLike;
+	try {
+		stats = _sync.stat.call(this, path, true);
+	} catch (e) {
+		if (options?.throwIfNoEntry === false && isNoEntry(e)) return;
+		throw e;
+	}
+	return options?.bigint ? new BigIntStats(stats) : new Stats(stats);
+}
+lstatSync satisfies typeof fs.lstatSync;
+
+export function truncateSync(this: V_Context, path: fs.PathLike, len: number | null = 0): void {
+	using file = _sync.open(this, path, { flag: 'r+' });
+	file.truncateSync(Math.max(0, len || 0));
+}
+truncateSync satisfies typeof fs.truncateSync;
+
+export function unlinkSync(this: V_Context, path: fs.PathLike): void {
+	path = normalizePath.call(this, path);
+	const { fs, cache, path: resolved } = _sync.resolve(this, path, true, { syscall: 'unlink', path });
+	try {
+		assertRemovable(this, cache.statSync(dirname(resolved)), cache.statSync(resolved));
+		using _ = cache.lockSync(dirname(resolved), 'rw');
+		fs.unlinkSync(resolved);
+		cache.remove(resolved);
+	} catch (e: any) {
+		throw setUVMessage(Object.assign(e, { syscall: 'unlink', path }));
+	}
+	emitChange(this, 'rename', path.toString());
+}
+unlinkSync satisfies typeof fs.unlinkSync;
+
+/**
+ * Synchronous file open.
+ * @see https://nodejs.org/api/fs.html#fsopensyncpath-flags-mode
+ * @param flag {@link https://nodejs.org/api/fs.html#file-system-flags}
+ */
+export function openSync(this: V_Context, path: fs.PathLike, flag?: fs.OpenMode | null, mode: fs.Mode | null = constants.F_OK): number {
+	return toFD(_sync.open(this, path, { flag: flag ?? 'r', mode }));
+}
+openSync satisfies typeof fs.openSync;
+
+/**
+ * Opens a file or symlink
+ * @internal
+ */
+export function lopenSync(this: V_Context, path: fs.PathLike, flag: string, mode?: fs.Mode | null): number {
+	return toFD(_sync.open(this, path, { flag, mode, preserveSymlinks: true }));
+}
+
+/**
+ * Synchronously reads the entire contents of a file.
+ * @option encoding The string encoding for the file contents. Defaults to `null`.
+ * @option flag Defaults to `'r'`.
+ * @option buffer A view (or a factory taking the file size) the contents are read into,
+ * instead of allocating a new buffer. It must be large enough to hold the entire file.
+ * @returns file contents
+ */
+export function readFileSync<T extends NodeJS.ArrayBufferView>(
+	this: V_Context,
+	path: fs.PathOrFileDescriptor,
+	options: fs.ReadFileSyncOptionsWithBuffer<T>,
+): BufferView<T>;
+export function readFileSync(
+	this: V_Context,
+	path: fs.PathOrFileDescriptor,
+	options?: fs.ReadFileSyncOptionsWithBufferEncoding | null,
+): NonSharedBuffer;
+export function readFileSync(
+	this: V_Context,
+	path: fs.PathOrFileDescriptor,
+	options: fs.ReadFileSyncOptionsWithStringEncoding | BufferEncoding,
+): string;
+export function readFileSync(this: V_Context, path: fs.PathOrFileDescriptor, options: fs.ReadFileSyncOptions): string | NonSharedBuffer;
+export function readFileSync(
+	this: V_Context,
+	path: fs.PathOrFileDescriptor,
+	_options: (fs.ReadFileSyncOptions & { buffer?: ArrayBufferView | ((size: number) => ArrayBufferView) }) | BufferEncoding | null = {},
+): FileContents {
+	const options = normalizeOptions(_options, null, 'r', 0o644);
+	const flag = flags.parse(options.flag);
+	if (flag & constants.O_WRONLY) throw UV('EBADF', 'read', path.toString());
+
+	using opened =
+		typeof path == 'number' ? undefined : _sync.open(this, path.toString(), { flag: options.flag, mode: 0o644, preserveSymlinks: false });
+	const file = opened ?? fromFD(this, path as number);
+	const { size } = file.stat();
+
+	const into = typeof _options == 'object' && _options !== null ? _options.buffer : undefined;
+	const buffer = into === undefined ? Buffer.alloc(size) : readFileBuffer(into, size);
+	const data = buffer.subarray(0, file.readSync(buffer, 0, size, null));
+
+	return options.encoding ? data.toString(options.encoding) : data;
+}
+readFileSync satisfies typeof fs.readFileSync;
+
+export function openAsBlobSync(this: V_Context, path: fs.PathLike, options: fs.OpenAsBlobOptions = {}): Blob {
+	const type = blobType(options);
+	return new Blob([readFileSync.call(this, normalizePath.call(this, path), {})], { type });
+}
+openAsBlobSync satisfies typeof fs.openAsBlobSync;
+
+/**
+ * Synchronously writes data to a file, replacing the file if it already exists.
+ *
+ * The encoding option is ignored if data is a buffer.
+ * @option encoding Defaults to `'utf8'`.
+ * @option mode Defaults to `0644`.
+ * @option flag Defaults to `'w'`.
+ */
+export function writeFileSync(this: V_Context, path: fs.PathOrFileDescriptor, data: FileContents, options?: fs.WriteFileOptions): void;
+export function writeFileSync(this: V_Context, path: fs.PathOrFileDescriptor, data: FileContents, encoding?: BufferEncoding): void;
+export function writeFileSync(
+	this: V_Context,
+	path: fs.PathOrFileDescriptor,
+	data: FileContents,
+	_options: fs.WriteFileOptions | BufferEncoding = {},
+): void {
+	const options = normalizeOptions(_options, 'utf8', 'w+', 0o644);
+	const flag = flags.parse(options.flag);
+	if (!(flag & constants.O_WRONLY || flag & constants.O_RDWR)) {
+		throw new Exception(Errno.EINVAL, 'Flag passed to writeFile must allow for writing');
+	}
+	validateData(data);
+	const encodedData =
+		typeof data == 'string' ? Buffer.from(data, options.encoding!) : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+	if (!encodedData) {
+		throw new Exception(Errno.EINVAL, 'Data not specified');
+	}
+	using opened = typeof path == 'number' ? undefined : _sync.open(this, path.toString(), { flag, mode: options.mode });
+	const file = opened ?? fromFD(this, path as number);
+	file.writeSync(encodedData, 0, encodedData.byteLength);
+	emitChange(this, 'change', file.path);
+}
+writeFileSync satisfies typeof fs.writeFileSync;
+
+/**
+ * Asynchronously append data to a file, creating the file if it not yet exists.
+ * @option encoding Defaults to `'utf8'`.
+ * @option mode Defaults to `0644`.
+ * @option flag Defaults to `'a+'`.
+ */
+export function appendFileSync(this: V_Context, filename: fs.PathOrFileDescriptor, data: FileContents, _options: fs.WriteFileOptions = {}): void {
+	const options = normalizeOptions(_options, 'utf8', 'a+', 0o644);
+	const flag = flags.parse(options.flag);
+	if (!(flag & constants.O_APPEND)) {
+		throw new Exception(Errno.EINVAL, 'Flag passed to appendFile must allow for appending');
+	}
+	validateData(data);
+	const encodedData =
+		typeof data == 'string' ? Buffer.from(data, options.encoding!) : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+
+	using opened = typeof filename == 'number' ? undefined : _sync.open(this, normalizePath.call(this, filename), { flag, mode: options.mode });
+	const file = opened ?? fromFD(this, filename as number);
+	file.writeSync(encodedData, 0, encodedData.byteLength);
+	emitChange(this, 'change', file.path);
+}
+appendFileSync satisfies typeof fs.appendFileSync;
+
+/**
+ * Synchronous `fstat`.
+ * `fstat()` is identical to `stat()`, except that the file to be stat-ed is
+ * specified by the file descriptor `fd`.
+ */
+export function fstatSync(this: V_Context, fd: number, options?: { bigint?: boolean }): Stats;
+export function fstatSync(this: V_Context, fd: number, options: { bigint: true }): BigIntStats;
+export function fstatSync(this: V_Context, fd: number, options?: fs.StatOptions): Stats | BigIntStats {
+	const stats = fromFD(this, fd).stat();
+	return options?.bigint ? new BigIntStats(stats) : new Stats(stats);
+}
+fstatSync satisfies typeof fs.fstatSync;
+
+export function closeSync(this: V_Context, fd: number): void {
+	fromFD(this, fd).closeSync();
+	deleteFD(this, fd);
+}
+closeSync satisfies typeof fs.closeSync;
+
+export function ftruncateSync(this: V_Context, fd: number, len: number | null = 0): void {
+	fromFD(this, fd).truncateSync(Math.max(0, len || 0));
+}
+ftruncateSync satisfies typeof fs.ftruncateSync;
+
+export function fsyncSync(this: V_Context, fd: number): void {
+	fromFD(this, fd).syncSync();
+}
+fsyncSync satisfies typeof fs.fsyncSync;
+
+export function fdatasyncSync(this: V_Context, fd: number): void {
+	fromFD(this, fd).datasyncSync();
+}
+fdatasyncSync satisfies typeof fs.fdatasyncSync;
+
+/**
+ * Write buffer to the file specified by `fd`.
+ * @param data Uint8Array containing the data to write to the file.
+ * @param offset Offset in the buffer to start reading data from.
+ * @param length The amount of bytes to write to the file.
+ * @param position Offset from the beginning of the file where this data should be written.
+ * If position is null, the data will be written at the current position.
+ */
+export function writeSync(
+	this: V_Context,
+	fd: number,
+	data: ArrayBufferView,
+	offset?: number | null,
+	length?: number | null,
+	position?: number | null,
+): number;
+export function writeSync(this: V_Context, fd: number, data: ArrayBufferView, options?: fs.WriteOptions): number;
+export function writeSync(this: V_Context, fd: number, data: string, position?: number | null, encoding?: BufferEncoding | null): number;
+export function writeSync(
+	this: V_Context,
+	fd: number,
+	data: FileContents,
+	posOrOff?: number | fs.WriteOptions | null,
+	lenOrEnc?: BufferEncoding | number | null,
+	pos?: number | null,
+): number {
+	validateData(data, 'buffer');
+	let buffer: Uint8Array, offset: number | undefined, length: number, position: number | null;
+	if (typeof data === 'string') {
+		// Signature 1: (fd, string, [position?, [encoding?]])
+		position = typeof posOrOff === 'number' ? posOrOff : null;
+		const encoding = typeof lenOrEnc === 'string' ? lenOrEnc : ('utf8' as BufferEncoding);
+		offset = 0;
+		buffer = Buffer.from(data, encoding);
+		length = buffer.byteLength;
+	} else if (typeof posOrOff == 'object' && posOrOff !== null) {
+		// Signature 3: (fd, buffer, options?)
+		buffer = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+		offset = posOrOff.offset ?? 0;
+		length = posOrOff.length ?? buffer.byteLength - offset;
+		position = posOrOff.position ?? null;
+	} else {
+		// Signature 2: (fd, buffer, offset?, length?, position?)
+		buffer = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+		offset = posOrOff ?? 0;
+		length = typeof lenOrEnc == 'number' ? lenOrEnc : buffer.byteLength - offset;
+		position = typeof pos === 'number' ? pos : null;
+	}
+
+	const file = fromFD(this, fd);
+	const bytesWritten = file.writeSync(buffer, offset, length, position);
+	emitChange(this, 'change', file.path);
+	return bytesWritten;
+}
+writeSync satisfies typeof fs.writeSync;
+
+export function readSync(this: V_Context, fd: number, buffer: ArrayBufferView, options?: fs.ReadOptions): number;
+export function readSync(
+	this: V_Context,
+	fd: number,
+	buffer: ArrayBufferView,
+	offset: number,
+	length: number,
+	position?: fs.ReadPosition | null,
+): number;
+/**
+ * Read data from the file specified by `fd`.
+ * @param buffer The buffer that the data will be written to.
+ * @param offset The offset within the buffer where writing will start.
+ * @param length An integer specifying the number of bytes to read.
+ * @param position An integer specifying where to begin reading from in the file.
+ * If position is null, data will be read from the current file position.
+ */
+export function readSync(
+	this: V_Context,
+	fd: number,
+	buffer: ArrayBufferView,
+	options?: fs.ReadOptions | number,
+	length?: number,
+	position?: fs.ReadPosition | null,
+): number {
+	const file = fromFD(this, fd);
+	const offset = typeof options == 'object' ? options.offset : options;
+	if (typeof options == 'object') {
+		length = options.length;
+		position = options.position;
+	}
+
+	if (position && position > Number.MAX_SAFE_INTEGER) throw UV('EINVAL');
+	if (typeof position == 'bigint') position = Number(position);
+	position = Number.isSafeInteger(position) ? position! : null;
+	if (length !== undefined) length |= 0;
+	return file.readSync(buffer, offset, length, position);
+}
+readSync satisfies typeof fs.readSync;
+
+export function fchownSync(this: V_Context, fd: number, uid: number, gid: number): void {
+	fromFD(this, fd).chownSync(uid, gid);
+}
+fchownSync satisfies typeof fs.fchownSync;
+
+export function fchmodSync(this: V_Context, fd: number, mode: number | string): void {
+	const numMode = normalizeMode(mode, -1);
+	if (numMode < 0) {
+		throw new Exception(Errno.EINVAL, `Invalid mode.`);
+	}
+	fromFD(this, fd).chmodSync(numMode);
+}
+fchmodSync satisfies typeof fs.fchmodSync;
+
+/**
+ * Change the file timestamps of a file referenced by the supplied file descriptor.
+ */
+export function futimesSync(this: V_Context, fd: number, atime: fs.TimeLike, mtime: fs.TimeLike): void {
+	fromFD(this, fd).utimesSync(normalizeTime(atime), normalizeTime(mtime));
+}
+futimesSync satisfies typeof fs.futimesSync;
+
+export function rmdirSync(this: V_Context, path: fs.PathLike): void {
+	path = normalizePath.call(this, path);
+	const { fs, cache, path: resolved } = _sync.resolve(this, path, true);
+
+	const stats = cache.statSync(resolved, { path, syscall: 'rmdir' });
+	if (!isDirectory(stats)) throw UV('ENOTDIR', 'rmdir', path);
+	assertRemovable(this, cache.statSync(dirname(resolved), { path, syscall: 'rmdir' }), stats, { syscall: 'rmdir', path });
+
+	using _ = cache.lockSync(dirname(resolved), 'rw');
+	wrap(fs, 'rmdirSync', path)(resolved);
+	cache.remove(resolved);
+	emitChange(this, 'rename', path.toString());
+}
+rmdirSync satisfies typeof fs.rmdirSync;
+
+/**
+ * Synchronous `mkdir`. Mode defaults to `o777`.
+ */
+export function mkdirSync(this: V_Context, path: fs.PathLike, options: fs.MakeDirectoryOptions & { recursive: true }): string | undefined;
+export function mkdirSync(this: V_Context, path: fs.PathLike, options?: fs.Mode | (fs.MakeDirectoryOptions & { recursive?: false }) | null): void;
+export function mkdirSync(this: V_Context, path: fs.PathLike, options?: fs.Mode | fs.MakeDirectoryOptions | null): string | undefined;
+export function mkdirSync(this: V_Context, path: fs.PathLike, options?: fs.Mode | fs.MakeDirectoryOptions | null): string | undefined | void {
+	options = typeof options === 'object' ? options : { mode: options };
+	const mode = normalizeMode(options?.mode, 0o777);
+	return _sync.mkdir.call(this, path, { ...options, mode });
+}
+mkdirSync satisfies typeof fs.mkdirSync;
+
+export function readdirSync(
+	this: V_Context,
+	path: fs.PathLike,
+	options?: { encoding: BufferEncoding | null; withFileTypes?: false; recursive?: boolean } | BufferEncoding | null,
+): string[];
+export function readdirSync(
+	this: V_Context,
+	path: fs.PathLike,
+	options: { encoding: 'buffer'; withFileTypes?: false; recursive?: boolean } | 'buffer',
+): NonSharedBuffer[];
+export function readdirSync(
+	this: V_Context,
+	path: fs.PathLike,
+	options?: (fs.ObjectEncodingOptions & { withFileTypes?: false; recursive?: boolean }) | BufferEncoding | null,
+): string[] | NonSharedBuffer[];
+export function readdirSync(
+	this: V_Context,
+	path: fs.PathLike,
+	options: fs.ObjectEncodingOptions & { withFileTypes: true; recursive?: boolean },
+): Dirent[];
+export function readdirSync(
+	this: V_Context,
+	path: fs.PathLike,
+	options: { encoding: 'buffer'; withFileTypes: true; recursive?: boolean },
+): Dirent<NonSharedBuffer>[];
+export function readdirSync(this: V_Context, path: fs.PathLike, options?: NodeReaddirOptions): string[] | Dirent<any>[] | Buffer[];
+export function readdirSync(this: V_Context, path: fs.PathLike, options?: NodeReaddirOptions): string[] | Dirent<any>[] | Buffer[] {
+	options = typeof options === 'object' ? options : { encoding: options };
+	path = normalizePath.call(this, path);
+
+	const entries: (string | Dirent | Buffer)[] = [];
+	const rawEntries = _sync.readdir.call(this, path, options ?? undefined);
+
+	for (const raw of rawEntries) {
+		if (options?.withFileTypes) {
+			entries.push(Dirent.from(raw, options.encoding, path));
+		} else if (options?.encoding == 'buffer') {
+			entries.push(Buffer.from(raw.path));
+		} else {
+			entries.push(raw.path);
+		}
+	}
+
+	return entries as string[] | Dirent[] | Buffer[];
+}
+readdirSync satisfies typeof fs.readdirSync;
+
+export function linkSync(this: V_Context, targetPath: fs.PathLike, linkPath: fs.PathLike): void {
+	return _sync.link.call(this, targetPath, linkPath);
+}
+linkSync satisfies typeof fs.linkSync;
+
+/**
+ * Synchronous `symlink`.
+ * @param target target path
+ * @param path link path
+ * @param type can be either `'dir'` or `'file'` (default is `'file'`)
+ */
+export function symlinkSync(this: V_Context, target: fs.PathLike, path: fs.PathLike, type: fs.symlink.Type | null = 'file'): void {
+	if (type != null && !['file', 'dir', 'junction'].includes(type)) throw new TypeError('Invalid symlink type: ' + type);
+
+	path = normalizePath.call(this, path);
+	target = normalizePath.call(this, target, true);
+
+	try {
+		using file = _sync.open(this, path, { flag: 'wx', mode: 0o644, preserveSymlinks: true });
+		file.writeSync(encodeUTF8(target));
+		file.chmodSync(constants.S_IFLNK | 0o777);
+	} catch (error) {
+		throw setUVMessage(Object.assign(error as Exception, { syscall: 'symlink', path: target, dest: path }));
+	}
+}
+symlinkSync satisfies typeof fs.symlinkSync;
+
+export function readlinkSync(this: V_Context, path: fs.PathLike, options?: fs.EncodingOption): string;
+export function readlinkSync(this: V_Context, path: fs.PathLike, options: fs.BufferEncodingOption): NonSharedBuffer;
+export function readlinkSync(
+	this: V_Context,
+	path: fs.PathLike,
+	options?: fs.EncodingOption | BufferEncoding | fs.BufferEncodingOption,
+): NonSharedBuffer | string;
+export function readlinkSync(
+	this: V_Context,
+	path: fs.PathLike,
+	options?: fs.EncodingOption | BufferEncoding | fs.BufferEncodingOption,
+): Buffer | string {
+	const buf = Buffer.from(_sync.readlink.call(this, path));
+
+	const encoding = typeof options == 'object' ? options?.encoding : options;
+	if (encoding == 'buffer') {
+		return buf;
+	}
+	// always defaults to utf-8 to avoid wrangler (cloudflare) worker "unknown encoding" exception
+	return buf.toString(encoding ?? 'utf-8');
+}
+readlinkSync satisfies typeof fs.readlinkSync;
+
+export function chownSync(this: V_Context, path: fs.PathLike, uid: number, gid: number): void {
+	_sync.chown.call(this, path, uid, gid);
+}
+chownSync satisfies typeof fs.chownSync;
+
+export function lchownSync(this: V_Context, path: fs.PathLike, uid: number, gid: number): void {
+	_sync.chown.call(this, path, uid, gid, true);
+}
+lchownSync satisfies typeof fs.lchownSync;
+
+export function chmodSync(this: V_Context, path: fs.PathLike, mode: fs.Mode): void {
+	_sync.chmod.call(this, path, mode);
+}
+chmodSync satisfies typeof fs.chmodSync;
+
+export function lchmodSync(this: V_Context, path: fs.PathLike, mode: number | string): void {
+	_sync.chmod.call(this, path, mode, true);
+}
+lchmodSync satisfies typeof fs.lchmodSync;
+
+/**
+ * Change file timestamps of the file referenced by the supplied path.
+ */
+export function utimesSync(this: V_Context, path: fs.PathLike, atime: fs.TimeLike, mtime: fs.TimeLike): void {
+	_sync.utimes.call(this, path, atime, mtime);
+}
+utimesSync satisfies typeof fs.utimesSync;
+
+/**
+ * Change file timestamps of the file referenced by the supplied path.
+ */
+export function lutimesSync(this: V_Context, path: fs.PathLike, atime: fs.TimeLike, mtime: fs.TimeLike): void {
+	_sync.utimes.call(this, path, atime, mtime, true);
+}
+lutimesSync satisfies typeof fs.lutimesSync;
+
+export function realpathSync(this: V_Context, path: fs.PathLike, options?: fs.EncodingOption): string;
+export function realpathSync(this: V_Context, path: fs.PathLike, options: fs.BufferEncodingOption): NonSharedBuffer;
+export function realpathSync(this: V_Context, path: fs.PathLike, options?: fs.EncodingOption): string | NonSharedBuffer;
+export function realpathSync(this: V_Context, path: fs.PathLike, options?: fs.EncodingOption | fs.BufferEncodingOption): string | NonSharedBuffer {
+	const encoding = typeof options == 'string' ? options : (options?.encoding ?? 'utf8');
+	path = normalizePath.call(this, path, true);
+
+	const { fullPath } = _sync.resolve(this, path);
+	if (encoding == 'utf8' || encoding == 'utf-8') return fullPath;
+	const buf: NonSharedBuffer = Buffer.from(fullPath, 'utf-8');
+	if (encoding == 'buffer') return buf;
+	return buf.toString(encoding);
+}
+realpathSync.native = realpathSync;
+realpathSync satisfies typeof fs.realpathSync;
+
+export function accessSync(this: V_Context, path: fs.PathLike, mode: number = 0o600): void {
+	if (!checkAccess) return;
+	if (!hasAccess(this, statSync.call<V_Context, [fs.PathLike], InodeLike>(this, path), mode)) {
+		throw new Exception(Errno.EACCES);
+	}
+}
+accessSync satisfies typeof fs.accessSync;
+
+/**
+ * Synchronous `rm`. Removes files or directories (recursively).
+ * @param path The path to the file or directory to remove.
+ */
+export function rmSync(this: V_Context, path: fs.PathLike, options?: fs.RmOptions): void {
+	path = normalizePath.call(this, path);
+
+	let stats: InodeLike | undefined;
+	try {
+		stats = lstatSync.call<V_Context, [fs.PathLike], InodeLike>(this, path);
+	} catch (error) {
+		if ((error as Exception).code != 'ENOENT' || !options?.force) throw error;
+	}
+
+	if (!stats) return;
+
+	switch (stats.mode & constants.S_IFMT) {
+		case constants.S_IFDIR:
+			if (!options?.recursive) throw rmDirectoryError(path);
+			for (const entry of readdirSync.call<V_Context, any, string[]>(this, path)) {
+				rmSync.call(this, join(path, entry), options);
+			}
+
+			rmdirSync.call(this, path);
+			break;
+		case constants.S_IFREG:
+		case constants.S_IFLNK:
+		case constants.S_IFBLK:
+		case constants.S_IFCHR:
+			unlinkSync.call(this, path);
+			break;
+		case constants.S_IFIFO:
+		case constants.S_IFSOCK:
+		default:
+			throw UV('ENOSYS', 'rm', path);
+	}
+}
+rmSync satisfies typeof fs.rmSync;
+
+/**
+ * Synchronous `mkdtemp`. Creates a unique temporary directory.
+ * @param prefix The directory prefix.
+ * @param options The encoding (or an object including `encoding`).
+ * @returns The path to the created temporary directory, encoded as a string or buffer.
+ */
+export function mkdtempSync(this: V_Context, prefix: Buffer, options?: fs.EncodingOption | fs.BufferEncodingOption): NonSharedBuffer;
+export function mkdtempSync(this: V_Context, prefix: fs.PathLike, options: fs.BufferEncodingOption): NonSharedBuffer;
+export function mkdtempSync(this: V_Context, prefix: fs.PathLike, options?: fs.EncodingOption): string;
+export function mkdtempSync(this: V_Context, prefix: fs.PathLike, options?: fs.EncodingOption | fs.BufferEncodingOption): string | NonSharedBuffer;
+export function mkdtempSync(this: V_Context, prefix: fs.PathLike, options?: fs.EncodingOption | fs.BufferEncodingOption): string | NonSharedBuffer {
+	const path = tempDirName(prefix);
+	mkdirSync.call(this, path);
+	return tempResult(path, prefix, options);
+}
+mkdtempSync satisfies typeof fs.mkdtempSync;
+
+/**
+ * Synchronously creates and opens a unique temporary file, named by appending six random characters to `prefix`.
+ */
+export function mkstempSync(this: V_Context, prefix: Buffer, options?: fs.EncodingOption | fs.BufferEncodingOption): fs.TempFile<NonSharedBuffer>;
+export function mkstempSync(this: V_Context, prefix: fs.PathLike, options: fs.BufferEncodingOption): fs.TempFile<NonSharedBuffer>;
+export function mkstempSync(this: V_Context, prefix: fs.PathLike, options?: fs.EncodingOption): fs.TempFile<string>;
+export function mkstempSync(this: V_Context, prefix: fs.PathLike, options?: fs.EncodingOption | fs.BufferEncodingOption): fs.TempFile;
+export function mkstempSync(this: V_Context, prefix: fs.PathLike, options?: fs.EncodingOption | fs.BufferEncodingOption): fs.TempFile {
+	const path = tempFileName(prefix);
+	try {
+		return { path: tempResult(path, prefix, options), fd: openSync.call(this, path, 'wx+', 0o600) };
+	} catch (error) {
+		throw mkstempError(error, prefix);
+	}
+}
+mkstempSync satisfies typeof fs.mkstempSync;
+
+/**
+ * Returns a disposable object whose `path` property holds the created directory path.
+ * When the object is disposed, the directory and its contents will be removed if it still exists.
+ * If the directory cannot be deleted, disposal will throw an error.
+ * The object has a `remove()` method which will perform the same task.
+ */
+export function mkdtempDisposableSync(
+	this: V_Context,
+	prefix: fs.PathLike,
+	options?: fs.EncodingOption | fs.BufferEncodingOption,
+): fs.DisposableTempDir {
+	const path = tempDirName(prefix);
+
+	mkdirSync.call(this, path);
+
+	const remove = () => rmSync(path, { recursive: true, force: true });
+
+	return { path, remove, [Symbol.dispose]: remove };
+}
+mkdtempDisposableSync satisfies typeof fs.mkdtempDisposableSync;
+
+/**
+ * Synchronous `copyFile`. Copies a file.
+ * @param flags Optional flags for the copy operation. Currently supports these flags:
+ * - `fs.constants.COPYFILE_EXCL`: If the destination file already exists, the operation fails.
+ */
+export function copyFileSync(this: V_Context, source: fs.PathLike, destination: fs.PathLike, flags?: number): void {
+	source = normalizePath.call(this, source);
+	destination = normalizePath.call(this, destination);
+
+	if (flags && flags & constants.COPYFILE_EXCL && existsSync.call(this, destination)) throw UV('EEXIST', 'copyFile', destination);
+
+	writeFileSync.call(this, destination, readFileSync.call(this, source, {}));
+	emitChange(this, 'rename', destination.toString());
+}
+copyFileSync satisfies typeof fs.copyFileSync;
+
+/**
+ * Synchronous `readv`. Reads from a file descriptor into multiple buffers.
+ * @param fd The file descriptor.
+ * @param buffers An array of Uint8Array buffers.
+ * @param position The position in the file where to begin reading.
+ * @returns The number of bytes read.
+ */
+export function readvSync(this: V_Context, fd: number, buffers: readonly NodeJS.ArrayBufferView[], position?: number): number {
+	const file = fromFD(this, fd);
+	let bytesRead = 0;
+
+	for (const buffer of buffers) {
+		bytesRead += file.readSync(buffer, 0, buffer.byteLength, typeof position == 'number' ? position + bytesRead : null);
+	}
+
+	return bytesRead;
+}
+readvSync satisfies typeof fs.readvSync;
+
+/**
+ * Synchronous `writev`. Writes from multiple buffers into a file descriptor.
+ * @param fd The file descriptor.
+ * @param buffers An array of Uint8Array buffers.
+ * @param position The position in the file where to begin writing.
+ * @returns The number of bytes written.
+ */
+export function writevSync(this: V_Context, fd: number, buffers: readonly ArrayBufferView[], position?: number): number {
+	const file = fromFD(this, fd);
+	let bytesWritten = 0;
+
+	for (const buffer of buffers) {
+		bytesWritten += file.writeSync(
+			new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength),
+			0,
+			buffer.byteLength,
+			typeof position == 'number' ? position + bytesWritten : null,
+		);
+	}
+
+	return bytesWritten;
+}
+writevSync satisfies typeof fs.writevSync;
+
+/**
+ * Synchronous `opendir`. Opens a directory.
+ * @param path The path to the directory.
+ * @param options Options for opening the directory.
+ * @returns A `Dir` object representing the opened directory.
+ */
+export function opendirSync(this: V_Context, path: fs.PathLike, options?: fs.OpenDirOptions): Dir {
+	path = normalizePath.call(this, path);
+	return new Dir(path, this, options);
+}
+opendirSync satisfies typeof fs.opendirSync;
+
+/**
+ * Synchronous `cp`. Recursively copies a file or directory.
+ * @param source The source file or directory.
+ * @param destination The destination file or directory.
+ * @param opts Options for the copy operation. Currently supports these options from Node.js 'fs.cpSync':
+ * - `dereference`: Dereference symbolic links. *(unconfirmed)*
+ * - `errorOnExist`: Throw an error if the destination file or directory already exists.
+ * - `filter`: A function that takes a source and destination path and returns a boolean, indicating whether to copy `source` element.
+ * - `force`: Overwrite the destination if it exists, and overwrite existing readonly destination files. *(unconfirmed)*
+ * - `preserveTimestamps`: Preserve file timestamps.
+ * - `recursive`: If `true`, copies directories recursively.
+ */
+export function cpSync(this: V_Context, source: fs.PathLike, destination: fs.PathLike, opts?: fs.CopySyncOptions): void {
+	source = normalizePath.call(this, source);
+	destination = normalizePath.call(this, destination);
+
+	if (opts?.filter) {
+		const shouldCopy: unknown = opts.filter(source, destination);
+		if (shouldCopy instanceof Promise)
+			throw Object.assign(new TypeError('Expected boolean to be returned from the "filter" function but got an instance of Promise.'), {
+				code: 'ERR_INVALID_RETURN_VALUE',
+			});
+		if (!shouldCopy) return;
+	}
+
+	const statFn = opts?.dereference ? statSync : lstatSync;
+	const srcStats = statFn.call<V_Context, [fs.PathLike], Stats>(this, source);
+	const destStats = statFn.call(this, destination, { throwIfNoEntry: false }) as Stats | undefined;
+
+	const sameFileSystem = resolveMount(source, this).fs.uuid == resolveMount(destination, this).fs.uuid;
+	cpCheckPaths(source, destination, sameFileSystem, srcStats, destStats);
+
+	if (opts?.errorOnExist && opts.force === false && destStats)
+		throw cpError('ERR_FS_CP_EEXIST', 'EEXIST', `${destination} already exists`, destination);
+
+	switch (srcStats.mode & constants.S_IFMT) {
+		case constants.S_IFDIR: {
+			if (!opts?.recursive) throw cpError('ERR_FS_EISDIR', 'EISDIR', `${source} is a directory (not copied)`, source);
+			const created = mkdirSync.call(this, destination, { recursive: true });
+			for (const dirent of readdirSync.call<V_Context, [string, any], Dirent[]>(this, source, { withFileTypes: true })) {
+				cpSync.call(this, join(source, dirent.name), join(destination, dirent.name), opts);
+			}
+			if (created !== undefined) chmodSync.call(this, destination, srcStats.mode & 0o7777);
+			break;
+		}
+		case constants.S_IFLNK: {
+			const link = readlinkSync.call<V_Context, [string, BufferEncoding], string>(this, source, 'utf8');
+			if (destStats?.isSymbolicLink()) unlinkSync.call(this, destination);
+			symlinkSync.call(this, opts?.verbatimSymlinks ? link : resolve.call(this, dirname(source), link), destination);
+			break;
+		}
+		case constants.S_IFREG: {
+			if (destStats && opts?.force === false) return;
+			if (destStats) unlinkSync.call(this, destination);
+			copyFileSync.call(this, source, destination, opts?.mode);
+			break;
+		}
+		case constants.S_IFBLK:
+		case constants.S_IFCHR:
+			throw UV('ENOSYS', 'cp', source);
+		default:
+			throw cpSpecialFileError(srcStats, destination);
+	}
+
+	// Optionally preserve timestamps
+	if (opts?.preserveTimestamps) {
+		utimesSync.call(this, destination, srcStats.atime, srcStats.mtime);
+	}
+}
+cpSync satisfies typeof fs.cpSync;
+
+/**
+ * Synchronous statfs(2). Returns information about the mounted file system which contains path.
+ * In case of an error, the err.code will be one of Common System Errors.
+ * @param path A path to an existing file or directory on the file system to be queried.
+ */
+export function statfsSync(this: V_Context, path: fs.PathLike, options?: fs.StatFsOptions & { bigint?: false }): fs.StatsFs;
+export function statfsSync(this: V_Context, path: fs.PathLike, options: fs.StatFsOptions & { bigint: true }): fs.BigIntStatsFs;
+export function statfsSync(this: V_Context, path: fs.PathLike, options?: fs.StatFsOptions): fs.StatsFs | fs.BigIntStatsFs;
+export function statfsSync(this: V_Context, path: fs.PathLike, options?: fs.StatFsOptions): fs.StatsFs | fs.BigIntStatsFs {
+	path = normalizePath.call(this, path);
+	const { fs } = _sync.resolve(this, path);
+	return _statfs(fs, options?.bigint);
+}
+
+/**
+ * Retrieves the files matching the specified pattern.
+ */
+export function globSync(this: V_Context, pattern: string | readonly string[]): string[];
+export function globSync(this: V_Context, pattern: string | readonly string[], options: fs.GlobOptionsWithFileTypes): Dirent[];
+export function globSync(this: V_Context, pattern: string | readonly string[], options: fs.GlobOptionsWithoutFileTypes): string[];
+export function globSync(this: V_Context, pattern: string | readonly string[], options: fs.GlobOptions): Dirent[] | string[];
+export function globSync(this: V_Context, pattern: string | readonly string[], options: GlobOptionsU = {}): Dirent[] | string[] {
+	pattern = Array.isArray(pattern) ? pattern : [pattern];
+	const $ = contextOf(this);
+	const { cwd = $.pwd, withFileTypes = false, exclude = () => false, followSymlinks = false, maxDepth = Infinity } = options;
+	validateMaxDepth(maxDepth);
+
+	const base = resolve.call($, cwd instanceof URL ? cwd.pathname : cwd);
+	const normalizedPatterns = pattern.map(p => (p.startsWith('/') ? relative.call($, base, p) : p));
+	type Entries = true extends typeof withFileTypes ? Dirent[] : string[];
+
+	function shouldDescend(path: string, relativePath: string): boolean {
+		const descent = _globDescent(normalizedPatterns, relativePath);
+		if (!descent) return false;
+		try {
+			const stats = lstatSync.call<V_Context, [string], Stats>($, path);
+			if (!stats.isSymbolicLink()) return stats.isDirectory();
+			return (followSymlinks || descent == 'literal') && statSync.call<V_Context, [string], Stats>($, path).isDirectory();
+		} catch {
+			return false;
+		}
+	}
+
+	const results: Dirent[] | string[] = [];
+	function recursiveList(dir: string, depth: number = 1) {
+		if (depth > maxDepth) return;
+		let entries;
+		try {
+			entries = readdirSync.call($, dir, { withFileTypes, encoding: 'utf8' });
+		} catch {
+			return;
+		}
+
+		for (const entry of entries as Entries) {
+			const fullPath = join(dir, withFileTypes ? entry.name : (entry as any));
+			const relPath = relative.call($, base, fullPath);
+
+			if (typeof exclude != 'function' ? exclude.some(p => matchesGlob(relPath, p)) : exclude((withFileTypes ? entry : relPath) as any))
+				continue;
+
+			if (depth < maxDepth && shouldDescend(fullPath, relPath)) recursiveList(fullPath, depth + 1);
+
+			if (normalizedPatterns.some(pattern => matchesGlob(relPath, pattern))) {
+				results.push(withFileTypes ? entry : (relPath as any));
+			}
+		}
+	}
+
+	recursiveList(base);
+	return results;
+}
+globSync satisfies typeof fs.globSync;

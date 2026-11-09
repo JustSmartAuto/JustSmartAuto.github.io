@@ -1,0 +1,16 @@
+node_modules
+dist
+docs
+*.log
+tmp
+build
+tests/coverage
+tmp.*
+*.tsbuildinfo
+
+.*
+!.gitignore
+!.gitattributes
+!.prettierignore
+!.vscode
+!.github

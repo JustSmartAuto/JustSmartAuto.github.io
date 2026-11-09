@@ -1,0 +1,79 @@
+name: CI
+
+on:
+    push:
+        branches:
+            - main
+    workflow_dispatch:
+    workflow_call:
+
+permissions:
+    checks: write
+    contents: read
+
+jobs:
+    ci:
+        name: Continuous Integration
+        runs-on: ubuntu-latest
+        defaults:
+            run:
+                shell: bash
+        env:
+            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v5
+
+            - name: Set up Node.js
+              uses: actions/setup-node@v6
+              with:
+                  node-version: latest
+
+            - name: Install dependencies
+              run: npm install
+
+            - name: Create sub-checks
+              run: npx zci init
+
+            - name: Formatting
+              run: npx zci run format "npm run format:check"
+
+            - name: Build
+              run: npx zci run build "npm run build"
+
+            - name: License Check
+              run: npx zci run license "npm run spdx:check"
+
+            - name: Linting
+              run: npx zci run lint "npm run lint"
+
+            - name: 'Unit tests: common'
+              run: npx zenfs-test -pvC --common
+
+            - name: 'Unit tests: InMemory'
+              run: npx zenfs-test -pvC tests/setup/memory.ts
+
+            - name: 'Unit tests: Copy-On-Write'
+              run: npx zenfs-test -pvC tests/setup/cow.ts
+
+            - name: 'Unit tests: contexts'
+              run: npx zenfs-test -pvC tests/setup/context.ts
+
+            - name: 'Unit tests: Index'
+              run: npx zenfs-test -pvC tests/setup/index.ts
+
+            - name: 'Unit tests: Port'
+              run: npx zenfs-test -pvC tests/setup/port.ts -t '!(scaling)'
+
+            - name: 'Unit tests: SingleBuffer'
+              run: npx zenfs-test -pvC tests/setup/single-buffer.ts
+
+            - name: 'Unit tests: Fetch'
+              run: npx zenfs-test -pvC tests/setup/fetch.ts
+
+            - name: Report coverage
+              run: npx zenfs-test --report-only
+
+            - name: Cleanup sub-checks
+              if: always()
+              run: npx zci cleanup

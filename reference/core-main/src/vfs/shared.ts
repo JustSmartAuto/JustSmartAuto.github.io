@@ -1,0 +1,213 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Utilities and shared data
+
+import type * as fs from 'node:fs';
+import type { V_Context } from '../context.js';
+import type { FileSystem } from '../internal/filesystem.js';
+import type { InodeLike } from '../internal/inode.js';
+
+import { Errno, Exception, UV, withErrno, type ExceptionExtra } from 'kerium';
+import { alert, debug, err, info, notice, warn } from 'kerium/log';
+import { InMemory } from '../backends/memory.js';
+import { size_max } from '../constants.js';
+import { contextOf, defaultContext } from '../internal/contexts.js';
+import { credentialsAllowRoot } from '../internal/credentials.js';
+import { withExceptionContext } from '../internal/error.js';
+import { join, resolve, type AbsolutePath } from '../path.js';
+import { normalizePath } from '../utils.js';
+import { cacheOf, caches, VCache } from './vcache.js';
+
+/**
+ * @internal @hidden
+ */
+export type MountObject = Record<AbsolutePath, FileSystem>;
+
+/**
+ * The map of mount points
+ * @category Backends and Configuration
+ * @internal
+ * @deprecated Use `defaultContext.mounts`.
+ * @todo [breaking] remove this
+ */
+export const mounts = defaultContext.mounts;
+
+// Set a default root.
+mount('/', InMemory.create({ label: 'root' }));
+
+/**
+ * Mounts the file system at `mountPoint`.
+ * @category Backends and Configuration
+ * @internal
+ */
+export function mount(this: V_Context, mountPoint: string, fs: FileSystem): void {
+	const $ = contextOf(this);
+	if (mountPoint[0] != '/') mountPoint = '/' + mountPoint;
+
+	mountPoint = resolve.call($, mountPoint);
+	if ($.mounts.has(mountPoint)) throw err(withErrno('EINVAL', 'Mount point is already in use: ' + mountPoint));
+
+	fs._mountPoint = mountPoint;
+	$.mounts.set(mountPoint, fs);
+	caches.getOrInsertComputed(fs.uuid, () => new VCache(fs));
+	info(`Mounted ${fs.name} on ${mountPoint}`);
+	debug(`${fs.name} attributes: ${[...fs.attributes].map(([k, v]) => (v !== undefined && v !== null ? k + '=' + v : k)).join(', ')}`);
+}
+
+/**
+ * Unmounts the file system at `mountPoint`.
+ * @category Backends and Configuration
+ * @todo [BREAKING] make this `async` and `await` vcache sync
+ */
+export function umount(this: V_Context, mountPoint: string): void {
+	const $ = contextOf(this);
+	if (mountPoint[0] != '/') mountPoint = '/' + mountPoint;
+
+	mountPoint = resolve.call(this, mountPoint);
+	const fs = $.mounts.get(mountPoint);
+	if (!fs) {
+		warn(mountPoint + ' is already unmounted');
+		return;
+	}
+
+	const _done = () => {
+		caches.delete(fs.uuid);
+		info('Synced all changes to ' + mountPoint);
+	};
+
+	try {
+		caches.get(fs.uuid)?.syncSync();
+		_done();
+	} catch {
+		warn(`Could not flush to ${mountPoint} synchronously.`);
+		void caches.get(fs.uuid)?.sync().then(_done);
+	}
+
+	$.mounts.delete(mountPoint);
+	notice('Unmounted ' + mountPoint);
+}
+
+/**
+ * @internal @hidden
+ */
+export interface ResolvedMount {
+	fs: FileSystem;
+	cache: VCache;
+	path: string;
+	mountPoint: string;
+	root: string;
+}
+
+/**
+ * @internal @hidden
+ */
+export interface ResolvedPath extends ResolvedMount {
+	/** The real, absolute path */
+	fullPath: string;
+	/** Stats */
+	stats?: InodeLike;
+}
+
+/**
+ * Gets the internal `FileSystem` for the path, then returns it along with the path relative to the FS' root
+ * @internal @hidden
+ */
+export function resolveMount(path: string, ctx: V_Context, extra?: ExceptionExtra): ResolvedMount {
+	const { root, mounts } = contextOf(ctx);
+	const _exceptionContext = { path, ...extra };
+	path = normalizePath(join(root, path), true);
+	path = resolve.call(ctx, path);
+	const sortedMounts = [...mounts].sort((a, b) => (a[0].length > b[0].length ? -1 : 1)); // descending order of the string length
+	for (const [mountPoint, fs] of sortedMounts) {
+		// We know path is normalized, so it would be a substring of the mount point.
+		if (!_isParentOf(mountPoint, path)) continue;
+		path = path.slice(mountPoint.length > 1 ? mountPoint.length : 0); // Resolve the path relative to the mount point
+		if (path === '') path = '/';
+		const case_fold = fs.attributes.get('case_fold');
+		if (case_fold === 'lower') path = path.toLowerCase();
+		if (case_fold === 'upper') path = path.toUpperCase();
+
+		return { fs: withExceptionContext(fs, _exceptionContext), cache: cacheOf(fs), path, mountPoint, root };
+	}
+
+	throw alert(new Exception(Errno.EIO, 'No file system for ' + path));
+}
+
+/**
+ * @internal @hidden
+ */
+export function _statfs<const T extends boolean>(fs: FileSystem, bigint?: T): T extends true ? fs.BigIntStatsFs : fs.StatsFs {
+	const md = fs.usage();
+	const bs = md.blockSize || 4096;
+	const type = bigint ? BigInt : Number;
+
+	return {
+		type: type(fs.type),
+		bsize: type(bs),
+		frsize: type(bs),
+		ffree: type(md.freeNodes || size_max),
+		files: type(md.totalNodes || size_max),
+		bavail: type(md.freeSpace / bs),
+		bfree: type(md.freeSpace / bs),
+		blocks: type(md.totalSpace / bs),
+	} as T extends true ? fs.BigIntStatsFs : fs.StatsFs;
+}
+
+/**
+ * Change the root path
+ * @category Backends and Configuration
+ */
+export function chroot(this: V_Context, path: string) {
+	const $ = contextOf(this);
+	if (!credentialsAllowRoot($.credentials)) throw withErrno('EPERM', 'Can not chroot() as non-root user');
+
+	$.root ??= '/';
+
+	const newRoot = join($.root, path);
+
+	for (const handle of $.descriptors?.values() ?? []) {
+		if (!handle.path.startsWith($.root)) throw UV('EBUSY', 'chroot', handle.path);
+		(handle as any).path = handle.path.slice($.root.length);
+	}
+
+	if (newRoot.length < $.root.length) throw withErrno('EPERM', 'Can not chroot() outside of current root');
+
+	$.root = newRoot;
+}
+
+/**
+ * @internal @hidden
+ */
+function _isParentOf(parent: string, child: string): boolean {
+	if (parent === '/' || parent === child) return true;
+
+	if (!parent.endsWith('/')) parent += '/';
+
+	return child.startsWith(parent);
+}
+
+export type FileContents = ArrayBufferView | string;
+
+/**
+ * @internal @hidden Used for the internal `_open` functions
+ */
+export interface OpenOptions {
+	flag: fs.OpenMode;
+	mode?: fs.Mode | null;
+	/**
+	 * If true, do not resolve symlinks
+	 */
+	preserveSymlinks?: boolean;
+	/**
+	 * If true, allows opening directories
+	 */
+	allowDirectory?: boolean;
+}
+
+export interface MkdirOptions {
+	mode?: number;
+	recursive?: boolean;
+}
+
+export interface ReaddirOptions {
+	recursive?: boolean;
+}

@@ -1,0 +1,114 @@
+{
+	"flags": {
+		"prep": ["writeFile", "stream"],
+		"sbfs_v2": [true, false]
+	},
+	"tests": [
+		{
+			"path": "stream-read.ts",
+			"name": "Read with createReadStream",
+			"flags": ["prep"],
+			"measure": {
+				"bytes": { "throughput": "s", "aggregate_throughput": "s", "unit": "MB" },
+				"files": { "cost": true, "unit": "file" }
+			},
+			"configurations": [
+				{ "name": "4K x2000", "value": { "size": 4096, "count": 2000, "hwm": 65536 } },
+				{ "name": "256K x200", "value": { "size": 262144, "count": 200, "hwm": 65536 } },
+				{ "name": "8M x8", "cpu": 1, "mem": 1, "value": { "size": 8388608, "count": 8, "hwm": 65536 } },
+				{
+					"name": "8M x8, hwm 1M",
+					"cpu": 1,
+					"mem": 1,
+					"value": { "size": 8388608, "count": 8, "hwm": 1048576 }
+				}
+			]
+		},
+		{
+			"path": "stream-write.ts",
+			"name": "Write with createWriteStream",
+			"measure": {
+				"bytes": { "throughput": "s", "aggregate_throughput": "s", "unit": "MB" },
+				"files": { "cost": true, "unit": "file" }
+			},
+			"configurations": [
+				{ "name": "4K x2000", "value": { "size": 4096, "count": 2000, "hwm": 65536 } },
+				{ "name": "256K x200", "value": { "size": 262144, "count": 200, "hwm": 65536 } },
+				{ "name": "8M x8", "cpu": 1, "mem": 1, "value": { "size": 8388608, "count": 8, "hwm": 65536 } },
+				{
+					"name": "8M x8, hwm 1M",
+					"cpu": 1,
+					"mem": 1,
+					"value": { "size": 8388608, "count": 8, "hwm": 1048576 }
+				}
+			]
+		},
+		{
+			"path": "fragmented-read.ts",
+			"name": "Read across many cached regions",
+			"measure": {
+				"reads": { "cost": true, "aggregate_cost": true, "unit": "read" }
+			},
+			"configurations": [
+				{ "name": "128 regions", "value": { "regions": 128, "reads": 4000 } },
+				{ "name": "512 regions", "value": { "regions": 512, "reads": 4000 } },
+				{ "name": "2048 regions", "cpu": 1, "value": { "regions": 2048, "reads": 4000 } },
+				{ "name": "8192 regions", "cpu": 2, "mem": 1, "value": { "regions": 8192, "reads": 4000 } }
+			]
+		},
+		{
+			"path": "fragmented-write.ts",
+			"name": "Scattered writes into one file",
+			"measure": {
+				"writes": { "cost": true, "aggregate_cost": true, "unit": "write" }
+			},
+			"configurations": [
+				{ "name": "512 writes", "value": { "writes": 512 } },
+				{ "name": "2048 writes", "cpu": 1, "value": { "writes": 2048 } },
+				{ "name": "8192 writes", "cpu": 2, "mem": 1, "value": { "writes": 8192 } }
+			]
+		},
+		{
+			"path": "append.ts",
+			"name": "Append 4 KB at a time",
+			"measure": {
+				"bytes": { "throughput": "s", "unit": "MB" },
+				"writes": { "cost": true, "aggregate_cost": true, "unit": "write" }
+			},
+			"configurations": [
+				{ "name": "500 appends", "value": { "writes": 500 } },
+				{ "name": "2000 appends", "value": { "writes": 2000 } },
+				{ "name": "8000 appends", "cpu": 1, "value": { "writes": 8000 } }
+			]
+		},
+		{
+			"path": "single-buffer-read.ts",
+			"name": "Random 4 KB reads from one file in a SingleBuffer",
+			"flags": ["sbfs_v2"],
+			"measure": {
+				"bytes": { "throughput": "s", "unit": "MB" },
+				"reads": { "cost": true, "unit": "read" }
+			},
+			"configurations": [
+				{ "name": "1 MiB", "value": { "size": 1048576, "count": 256 } },
+				{ "name": "8 MiB", "value": { "size": 8388608, "count": 1024 } },
+				{ "name": "32 MiB", "cpu": 1, "value": { "size": 33554432, "count": 1024 } }
+			]
+		},
+		{
+			"path": "single-buffer-write.ts",
+			"name": "Random 4 KB writes to one file in a SingleBuffer",
+			"flags": ["sbfs_v2"],
+			"measure": {
+				"bytes": { "throughput": "s", "unit": "MB" },
+				"writes": { "cost": true, "unit": "write" }
+			},
+			"configurations": [
+				{ "name": "1 MiB, flushed", "value": { "size": 1048576, "count": 256, "flush": 1, "sync": 0 } },
+				{ "name": "1 MiB, O_SYNC", "value": { "size": 1048576, "count": 256, "flush": 0, "sync": 1 } },
+				{ "name": "8 MiB, flushed", "cpu": 1, "value": { "size": 8388608, "count": 1024, "flush": 1, "sync": 0 } },
+				{ "name": "8 MiB, O_SYNC", "cpu": 1, "value": { "size": 8388608, "count": 1024, "flush": 0, "sync": 1 } }
+			]
+		}
+	]
+}

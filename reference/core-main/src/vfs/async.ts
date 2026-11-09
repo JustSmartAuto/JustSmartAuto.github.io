@@ -1,0 +1,374 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+import type { Mode, PathLike, TimeLike } from 'node:fs';
+import type { V_Context } from '../internal/contexts.js';
+import type { MkdirOptions, OpenOptions, ReaddirOptions, ResolvedPath } from './shared.js';
+
+import { rethrow, setUVMessage, UV, type Exception, type ExceptionExtra } from 'kerium';
+import { decodeUTF8 } from 'utilium';
+import * as constants from '../constants.js';
+import { applyUmask, contextOf } from '../internal/contexts.js';
+import { assertRemovable, assertSearchable, hasAccess, isDirectory, isSymbolicLink, type InodeLike } from '../internal/inode.js';
+import { basename, dirname, join, parse, resolve as resolvePath } from '../path.js';
+import { normalizeMode, normalizePath, normalizeTime } from '../utils.js';
+import { checkAccess, resolveFullWalk } from './config.js';
+import { Dirent, ifToDt } from './dir.js';
+import { Handle } from './file.js';
+import * as flags from './flags.js';
+import { resolveMount } from './shared.js';
+import { cacheOf } from './vcache.js';
+import { emitChange } from './watchers.js';
+
+/**
+ * Resolves the mount and real path for a path.
+ * Additionally, any stats fetched will be returned for de-duplication
+ * @internal @hidden
+ */
+export async function resolve($: V_Context, path: string, preserveSymlinks?: boolean, extra?: ExceptionExtra): Promise<ResolvedPath> {
+	path = resolvePath.call($, path);
+
+	/* Try to resolve it directly. If this works,
+	that means we don't need to perform any resolution for parent directories. */
+	if (!resolveFullWalk)
+		try {
+			const resolved = resolveMount(path, $);
+
+			const stats = await resolved.cache.stat(resolved.path);
+
+			if (!isSymbolicLink(stats) || preserveSymlinks) {
+				return { ...resolved, fullPath: path, stats };
+			}
+
+			const target = resolvePath.call($, dirname(path), await readlink.call($, path));
+			return await resolve($, target, preserveSymlinks, extra);
+		} catch {
+			// Go the long way
+		}
+
+	const { base, dir } = parse(path);
+	const $ex = { syscall: 'stat', path, ...extra };
+
+	let realDir = '/';
+	if (dir != '/') {
+		const parent = await resolve($, dir, false, extra);
+		if (parent.stats && isDirectory(parent.stats)) assertSearchable($, parent.stats, $ex);
+		realDir = parent.fullPath;
+	} else if (base && checkAccess) {
+		const root = resolveMount('/', $);
+		assertSearchable($, await root.cache.stat(root.path), $ex);
+	}
+
+	const maybePath = join(realDir, base);
+	const resolved = resolveMount(maybePath, $);
+
+	const stats = await resolved.cache.stat(resolved.path).catch((e: Exception) => {
+		if (e.code == 'ENOENT') return;
+		throw setUVMessage(Object.assign(e, { syscall: 'stat', path: maybePath, ...extra }));
+	});
+
+	if (!stats) return { ...resolved, fullPath: maybePath };
+	if (!isSymbolicLink(stats) || preserveSymlinks) {
+		return { ...resolved, fullPath: maybePath, stats };
+	}
+
+	const target = resolvePath.call($, realDir, await readlink.call($, maybePath));
+	return await resolve($, target, false, extra);
+}
+
+/**
+ * Opens a file. This helper handles the complexity of file flags.
+ * @internal
+ */
+export async function open($: V_Context, path: PathLike, opt: OpenOptions): Promise<Handle> {
+	path = normalizePath.call($, path);
+	const mode = normalizeMode(opt.mode, 0o644),
+		flag = flags.parse(opt.flag);
+
+	const $ex = { syscall: 'open', path };
+	// eslint-disable-next-line prefer-const
+	let { fs, cache, path: resolved, stats } = await resolve($, path, opt.preserveSymlinks, $ex);
+
+	if (!stats) {
+		if (!(flag & constants.O_CREAT)) throw UV('ENOENT', $ex);
+
+		// Create the file
+		const parentPath = dirname(resolved);
+		const parentStats = await cache.stat(parentPath, $ex);
+		if (checkAccess && !hasAccess($, parentStats, constants.W_OK | constants.X_OK)) throw UV('EACCES', 'open', dirname(path));
+
+		if (!isDirectory(parentStats)) throw UV('ENOTDIR', 'open', dirname(path));
+
+		if (!opt.allowDirectory && isDirectory({ mode })) throw UV('EISDIR', 'open', path);
+
+		// Serialize entry creation with other operations on the parent directory
+		using _ = await cache.lock(parentPath, 'rw', parentStats);
+
+		stats = await cache.stat(resolved).catch(() => undefined);
+
+		if (!stats) {
+			const { euid: uid, egid: gid } = contextOf($).credentials;
+
+			const inode = await fs.createFile(resolved, {
+				mode: applyUmask($, mode),
+				uid: parentStats.mode & constants.S_ISUID ? parentStats.uid : uid,
+				gid: parentStats.mode & constants.S_ISGID ? parentStats.gid : gid,
+			});
+
+			emitChange($, 'rename', path);
+
+			return new Handle($, path, resolved, flag, cache.ref(resolved, inode));
+		}
+	}
+
+	if (checkAccess && !hasAccess($, stats, flags.toMode(flag))) throw UV('EACCES', $ex);
+	if (flag & constants.O_EXCL) throw UV('EEXIST', $ex);
+	if (!opt.allowDirectory && isDirectory(stats)) throw UV('EISDIR', 'open', path);
+
+	const handle = new Handle($, path, resolved, flag, cache.ref(resolved, stats));
+
+	if (flag & constants.O_TRUNC) await handle.truncate(0);
+
+	return handle;
+}
+
+export async function readlink(this: V_Context, path: PathLike): Promise<string> {
+	path = normalizePath.call(this, path);
+
+	const $ex = { syscall: 'readlink', path };
+	const { fs, stats, path: resolved } = await resolve(this, path, true, $ex);
+
+	if (!stats) throw UV('ENOENT', $ex);
+	if (checkAccess && !hasAccess(this, stats, constants.R_OK)) throw UV('EACCES', $ex);
+	if (!isSymbolicLink(stats)) throw UV('EINVAL', $ex);
+	const size = stats.size;
+	const data = new Uint8Array(size);
+	await fs.read(resolved, data, 0, size);
+	return decodeUTF8(data);
+}
+
+export async function mkdir(this: V_Context, path: PathLike, options: MkdirOptions = {}): Promise<string | void> {
+	const original = normalizePath.call(this, path);
+	const { euid: uid, egid: gid } = contextOf(this).credentials;
+	const { recursive } = options;
+	const mode = applyUmask(this, options.mode ?? 0o777);
+
+	const $ex = { syscall: 'mkdir', path: original };
+
+	const { fullPath: realParent } = await resolve(this, dirname(original), false, $ex);
+	const { fs, cache, path: target } = resolveMount(join(realParent, basename(original)), this, $ex);
+
+	const followed = realParent != dirname(original);
+
+	let firstCreated: string | undefined;
+
+	const __create = async (path: string, resolved: string): Promise<InodeLike> => {
+		const parentPath = dirname(resolved);
+
+		const parent = recursive && parentPath != '/' ? await __create(dirname(path), parentPath) : await cache.stat(parentPath, $ex);
+
+		using _ = await cache.lock(parentPath, 'rw', parent);
+
+		if (recursive) {
+			const existing = await cache.stat(resolved).catch(() => null);
+
+			if (existing) {
+				const stats = isSymbolicLink(existing) ? (await resolve(this, path, false, $ex)).stats : existing;
+
+				if (!stats) throw UV('ENOENT', $ex);
+				if (!isDirectory(stats)) throw UV(resolved == target ? 'EEXIST' : 'ENOTDIR', $ex);
+				return existing;
+			}
+
+			// Node reports the link itself with ENOTDIR here, while `mkdirSync` reports the requested path with ENOENT
+			if (followed && (await fs.exists(join(parentPath, basename(path))))) throw UV('ENOTDIR', 'mkdir', path);
+		}
+
+		if (checkAccess && !hasAccess(this, parent, constants.W_OK | constants.X_OK)) throw UV('EACCES', 'mkdir', path);
+
+		const inode = await fs
+			.mkdir(resolved, {
+				mode,
+				uid: parent.mode & constants.S_ISUID ? parent.uid : uid,
+				gid: parent.mode & constants.S_ISGID ? parent.gid : gid,
+			})
+			.catch(rethrow({ syscall: 'mkdir', path }));
+
+		if (recursive) firstCreated ??= path;
+		emitChange(this, 'rename', path);
+		return inode;
+	};
+
+	await __create(original, target);
+	return firstCreated;
+}
+
+export async function readdir(this: V_Context, path: PathLike, options: ReaddirOptions = {}): Promise<Dirent[]> {
+	path = normalizePath.call(this, path);
+
+	const $ex = { syscall: 'scandir', path };
+	const { fs, cache, path: resolved, stats } = await resolve(this, path, false, $ex);
+
+	if (!stats) throw UV('ENOENT', $ex);
+
+	if (checkAccess && !hasAccess(this, stats, constants.R_OK)) throw UV('EACCES', $ex);
+
+	if (!isDirectory(stats)) throw UV('ENOTDIR', $ex);
+
+	let entries: string[];
+	{
+		using _ = await cache.lock(resolved, 'ro', stats);
+		entries = await fs.readdir(resolved);
+	}
+
+	const values: Dirent[] = [];
+	const addEntry = async (entry: string) => {
+		const entryStats = await cache.stat(join(resolved, entry), $ex).catch((e: Exception) => {
+			if (e.code == 'ENOENT') return;
+			throw e;
+		});
+
+		if (!entryStats) return;
+
+		const ent = new Dirent();
+		ent.ino = entryStats.ino;
+		ent.type = ifToDt(entryStats.mode);
+		ent.path = entry;
+		ent.name = basename(entry);
+		values.push(ent);
+
+		if (!options.recursive || !isDirectory(entryStats)) return;
+
+		const children = await fs.readdir(join(resolved, entry));
+		for (const child of children) await addEntry(join(entry, child));
+	};
+	await Promise.all(entries.map(addEntry));
+	return values;
+}
+
+export async function rename(this: V_Context, oldPath: PathLike, newPath: PathLike): Promise<void> {
+	oldPath = normalizePath.call(this, oldPath);
+	newPath = normalizePath.call(this, newPath);
+	const $ex = { syscall: 'rename', path: oldPath, dest: newPath };
+	const src = await resolve(this, oldPath, true, $ex);
+	const dst = await resolve(this, newPath, true, $ex);
+
+	if (src.fs.uuid !== dst.fs.uuid) throw UV('EXDEV', $ex);
+	// A directory can not be moved inside itself
+	if (dst.path.startsWith(src.path + '/')) throw UV('EINVAL', $ex);
+	if (!src.stats) throw UV('ENOENT', $ex);
+
+	const srcDir = dirname(src.path);
+	const dstDir = dirname(dst.path);
+
+	const oldParent = await src.cache.stat(srcDir, $ex);
+	const newParent = await src.cache.stat(dstDir, $ex);
+	const newStats = await src.cache.stat(dst.path, $ex).catch((e: Exception) => {
+		if (e.code == 'ENOENT') return null;
+		throw e;
+	});
+
+	assertRemovable(this, oldParent, src.stats, $ex);
+	if (newStats) assertRemovable(this, newParent, newStats, $ex);
+	if (checkAccess && !hasAccess(this, newParent, constants.W_OK | constants.X_OK)) throw UV('EACCES', $ex);
+	if (checkAccess && isDirectory(src.stats) && srcDir != dstDir && !hasAccess(this, src.stats, constants.W_OK)) throw UV('EACCES', $ex);
+
+	if (newStats && !isDirectory(src.stats) && isDirectory(newStats)) throw UV('EISDIR', $ex);
+	if (newStats && isDirectory(src.stats) && !isDirectory(newStats)) throw UV('ENOTDIR', $ex);
+
+	// Lock both parent directories, ordered by inode number to avoid ABBA deadlocks (like Linux's `lock_two_nondirectories`)
+	const parents: [string, InodeLike][] = [
+		[srcDir, oldParent],
+		[dstDir, newParent],
+	];
+	if (oldParent.ino > newParent.ino) parents.reverse();
+
+	using _first = await src.cache.lock(parents[0][0], 'rw', parents[0][1]);
+	using _second = oldParent.ino == newParent.ino ? null : await src.cache.lock(parents[1][0], 'rw', parents[1][1]);
+
+	await src.fs.rename(src.path, dst.path);
+	src.cache.rename(src.path, dst.path);
+
+	emitChange(this, 'rename', oldPath);
+	emitChange(this, 'rename', newPath);
+}
+
+export async function link(this: V_Context, target: PathLike, link: PathLike): Promise<void> {
+	target = normalizePath.call(this, target);
+	link = normalizePath.call(this, link);
+
+	const $ex = { syscall: 'link', path: target, dest: link };
+	const { fs, cache, path: resolved } = await resolve(this, target, true, $ex);
+	const dst = await resolve(this, link, true, $ex);
+
+	if (fs.uuid != dst.fs.uuid) throw UV('EXDEV', $ex);
+
+	const stats = await cache.stat(resolved, $ex);
+
+	if (checkAccess) {
+		if (!hasAccess(this, stats, constants.R_OK)) throw UV('EACCES', $ex);
+
+		const dirStats = await cache.stat(dirname(resolved), $ex);
+		if (!hasAccess(this, dirStats, constants.R_OK)) throw UV('EACCES', $ex);
+
+		const destStats = await cache.stat(dirname(dst.path), $ex);
+		if (!hasAccess(this, destStats, constants.W_OK)) throw UV('EACCES', $ex);
+	}
+
+	using _ = await cache.lock(dirname(dst.path), 'rw');
+	await fs.link(resolved, dst.path);
+	cache.link(resolved, dst.path);
+}
+
+export async function stat(this: V_Context, path: PathLike, lstat: boolean): Promise<InodeLike> {
+	path = normalizePath.call(this, path);
+
+	const extra = { syscall: lstat ? 'lstat' : 'stat', path };
+
+	let stats: InodeLike | undefined;
+	if (!lstat) stats = (await resolve(this, path, false, extra)).stats;
+	else {
+		const { base, dir } = parse(path);
+		const parent = await resolve(this, dir, false, extra);
+		if (parent.stats && isDirectory(parent.stats)) assertSearchable(this, parent.stats, extra);
+		const { root, mounts } = contextOf(this);
+		const mounted = base && mounts.get(join(root, parent.fullPath, base));
+		const fs = mounted || parent.fs;
+		const target = mounted ? '/' : join(parent.path, base);
+		stats = await cacheOf(fs).stat(target).catch(rethrow(extra));
+	}
+
+	if (!stats) throw UV('ENOENT', extra);
+
+	return stats;
+}
+
+/**
+ * Opens a handle for changing metadata, which does not need read or write access to the file.
+ */
+async function _openMetadata($: V_Context, path: string, syscall: string, noFollow?: boolean): Promise<Handle> {
+	const { fullPath, cache, path: resolved, stats } = await resolve($, path, noFollow, { syscall });
+	if (!stats) throw UV('ENOENT', syscall, path);
+	return new Handle($, fullPath, resolved, constants.O_RDONLY, cache.ref(resolved, stats));
+}
+
+export async function chmod(this: V_Context, path: PathLike, mode: Mode, noFollow?: boolean): Promise<void> {
+	path = normalizePath.call(this, path);
+	const numMode = normalizeMode(mode, -1);
+	if (numMode < 0) throw UV('EINVAL', 'chmod', path);
+	await using handle = await _openMetadata(this, path, 'chmod', noFollow);
+	await handle.chmod(numMode);
+	emitChange(this, 'change', handle.path);
+}
+
+export async function chown(this: V_Context, path: PathLike, uid: number, gid: number, noFollow?: boolean): Promise<void> {
+	path = normalizePath.call(this, path);
+	await using handle = await _openMetadata(this, path, 'chown', noFollow);
+	await handle.chown(uid, gid);
+	emitChange(this, 'change', handle.path);
+}
+
+export async function utimes(this: V_Context, path: PathLike, atime: TimeLike, mtime: TimeLike, noFollow?: boolean): Promise<void> {
+	path = normalizePath.call(this, path);
+	await using handle = await _openMetadata(this, path, 'utimes', noFollow);
+	await handle.utimes(normalizeTime(atime), normalizeTime(mtime));
+	emitChange(this, 'change', handle.path);
+}

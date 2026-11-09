@@ -1,0 +1,17 @@
+{
+	"compilerOptions": {
+		"declaration": true,
+		"lib": ["ESNext"],
+		"module": "NodeNext",
+		"moduleResolution": "NodeNext",
+		"outDir": "dist",
+		"resolveJsonModule": true,
+		"rootDir": "src",
+		"strict": true,
+		"target": "ES2022",
+		"verbatimModuleSyntax": true,
+		"useDefineForClassFields": true,
+		"types": ["node"]
+	},
+	"include": ["src/**/*.ts"]
+}

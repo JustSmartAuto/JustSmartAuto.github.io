@@ -1,0 +1,1538 @@
+/* eslint-disable @typescript-eslint/no-misused-promises */
+// SPDX-License-Identifier: LGPL-3.0-or-later
+/* eslint-disable @typescript-eslint/no-redundant-type-constituents */
+import type { BufferView } from 'node:buffer';
+import type { Abortable } from 'node:events';
+import type * as fs from 'node:fs';
+import type * as promises from 'node:fs/promises';
+import type { Stream } from 'node:stream';
+import type { ByteReadableStream, SyncByteReadableStream, SyncTransform, Transform, Writer } from 'node:stream/iter';
+import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
+import type { V_Context } from '../context.js';
+import type { StreamOptions } from '../internal/filesystem.js';
+import type { InodeLike } from '../internal/inode.js';
+import type { FileContents } from '../vfs/shared.js';
+import type { Interface as ReadlineInterface } from './readline.js';
+import type { GlobOptionsU, NodeReaddirOptions } from './types.js';
+
+import { Buffer } from 'buffer';
+import { Exception, rethrow, setUVMessage, UV } from 'kerium';
+import { warn } from 'kerium/log';
+import { encodeUTF8 } from 'utilium';
+import * as constants from '../constants.js';
+import { contextOf } from '../internal/contexts.js';
+import { assertRemovable, hasAccess, InodeFlags, isDirectory } from '../internal/inode.js';
+import { _globDescent, dirname, join, matchesGlob, relative, resolve } from '../path.js';
+import '../polyfills.js';
+import { normalizeMode, normalizeOptions, normalizePath, normalizeTime, validateFD } from '../utils.js';
+import {
+	cpCheckPaths,
+	cpError,
+	checkAborted,
+	cpSpecialFileError,
+	isIterableData,
+	isNoEntry,
+	mkstempError,
+	raceSignal,
+	readFileBuffer,
+	rmDirectoryError,
+	tempDirName,
+	tempFileName,
+	tempResult,
+	validateData,
+	validateMaxDepth,
+	type WriteFileData,
+	invalidArgumentValue,
+	outOfRange,
+	validateType,
+} from './utils.js';
+import * as _async from '../vfs/async.js';
+import { checkAccess } from '../vfs/config.js';
+import type { Handle } from '../vfs/file.js';
+import { deleteFD, fromFD, toFD } from '../vfs/file.js';
+import * as flags from '../vfs/flags.js';
+import { _statfs, resolveMount } from '../vfs/shared.js';
+import { emitChange, FSWatcher } from '../vfs/watchers.js';
+import { Dir, Dirent } from './dir.js';
+import { createInterface } from './readline.js';
+import { BigIntStats, Stats } from './stats.js';
+import { ReadStream, WriteStream } from './streams.js';
+export * as constants from '../constants.js';
+
+/** Queue options for `watch`, where Node accepts `'error'` for `overflow` */
+interface WatchQueueOptions {
+	maxQueue?: number;
+	overflow?: 'ignore' | 'error' | 'throw';
+}
+
+/**
+ * Throws Node's errors for invalid `maxQueue` and `overflow` options of `watch`.
+ */
+function _validateWatchQueue(maxQueue: unknown, overflow: unknown): void {
+	validateType(maxQueue, 'options.maxQueue', 'number');
+	if (!Number.isInteger(maxQueue)) throw outOfRange('options.maxQueue', 'an integer', maxQueue);
+	if (overflow != 'ignore' && overflow != 'error') throw invalidArgumentValue('options.overflow', overflow, "must be one of: 'ignore', 'error'");
+}
+
+/**
+ * Creates an iterator that throws `error` when iterated, like an async generator that throws before its first `yield`.
+ */
+// eslint-disable-next-line require-yield
+async function* rejectOnIteration(error: unknown): AsyncGenerator<never, undefined> {
+	throw error;
+}
+
+/** Options for `readFile`, including the buffer the contents are read into */
+type ReadFileOptions = fs.ObjectEncodingOptions & Abortable & { buffer?: NodeJS.ArrayBufferView | ((size: number) => NodeJS.ArrayBufferView) };
+
+/** Coerce a `stream/iter` transform result into a flat array of `Uint8Array` chunks. */
+async function* normalizeTransformResult(result: unknown): AsyncGenerator<Uint8Array> {
+	if (result == null) return;
+	if (typeof result == 'string') {
+		yield encodeUTF8(result);
+		return;
+	}
+	if (result instanceof Uint8Array) {
+		yield result;
+		return;
+	}
+	if (ArrayBuffer.isView(result)) {
+		yield new Uint8Array(result.buffer, result.byteOffset, result.byteLength);
+		return;
+	}
+	if (result instanceof ArrayBuffer || (typeof SharedArrayBuffer != 'undefined' && result instanceof SharedArrayBuffer)) {
+		yield new Uint8Array(result);
+		return;
+	}
+	if (
+		typeof (result as AsyncIterable<unknown>)[Symbol.asyncIterator] == 'function'
+		|| typeof (result as Iterable<unknown>)[Symbol.iterator] == 'function'
+	) {
+		for await (const part of result as AsyncIterable<unknown>) yield* normalizeTransformResult(part);
+		return;
+	}
+	throw new TypeError('Invalid transform result');
+}
+
+/** Ponyfill for `node:stream/iter`'s `pull()` transform application */
+async function* applyTransform(source: ByteReadableStream, transform: Transform, signal?: AbortSignal): ByteReadableStream {
+	const options = { signal: signal! };
+
+	if (typeof transform == 'function') {
+		for await (const chunks of source) {
+			signal?.throwIfAborted();
+			const out: Uint8Array[] = [];
+			for await (const chunk of normalizeTransformResult(await transform(chunks, options))) out.push(chunk);
+			if (out.length) yield out;
+		}
+		const out: Uint8Array[] = [];
+		for await (const chunk of normalizeTransformResult(await transform(null, options))) out.push(chunk);
+		if (out.length) yield out;
+		return;
+	}
+
+	// Stateful transform: feed it the source (with a trailing `null` to signal EOF).
+	async function* withFlush(): AsyncGenerator<Uint8Array[] | null> {
+		for await (const chunks of source) yield chunks;
+		yield null;
+	}
+	for await (const result of transform.transform(withFlush(), options)) {
+		signal?.throwIfAborted();
+		const out: Uint8Array[] = [];
+		for await (const chunk of normalizeTransformResult(result)) out.push(chunk);
+		if (out.length) yield out;
+	}
+}
+
+/** Coerce a synchronous `stream/iter` transform result into `Uint8Array` chunks. */
+function* normalizeTransformResultSync(result: unknown): Generator<Uint8Array> {
+	if (result === null) return;
+	if (typeof result == 'string') {
+		yield encodeUTF8(result);
+		return;
+	}
+	if (ArrayBuffer.isView(result)) {
+		yield new Uint8Array(result.buffer, result.byteOffset, result.byteLength);
+		return;
+	}
+	if (result instanceof ArrayBuffer || (typeof SharedArrayBuffer != 'undefined' && result instanceof SharedArrayBuffer)) {
+		yield new Uint8Array(result);
+		return;
+	}
+	if (typeof (result as Iterable<unknown>)[Symbol.iterator] == 'function') {
+		for (const part of result as Iterable<unknown>) yield* normalizeTransformResultSync(part);
+		return;
+	}
+	throw new TypeError('Invalid transform result');
+}
+
+/** Ponyfill for `node:stream/iter`'s `pullSync()` transform application */
+function* applyTransformSync(source: SyncByteReadableStream, transform: SyncTransform): SyncByteReadableStream {
+	if (typeof transform == 'function') {
+		for (const chunks of source) {
+			const out = [...normalizeTransformResultSync(transform(chunks))];
+			if (out.length) yield out;
+		}
+		const out = [...normalizeTransformResultSync(transform(null))];
+		if (out.length) yield out;
+		return;
+	}
+
+	function* withFlush(): Generator<Uint8Array[] | null> {
+		yield* source;
+		yield null;
+	}
+	for (const result of transform.transform(withFlush())) {
+		const out = [...normalizeTransformResultSync(result)];
+		if (out.length) yield out;
+	}
+}
+
+/**
+ * Splits `pull` and `pullSync` arguments into transforms and the trailing options object, if any.
+ */
+function parsePullArgs<T, O extends object>(args: unknown[]): { transforms: T[]; options: O } {
+	const last = args.at(-1);
+	const hasOptions = last != null && typeof last == 'object' && typeof (last as { transform?: unknown }).transform != 'function';
+	const options = (hasOptions ? args.at(-1) : {}) as O;
+	return { transforms: (hasOptions ? args.slice(0, -1) : args) as T[], options };
+}
+
+export class FileHandle implements promises.FileHandle {
+	protected vfs: Handle;
+
+	protected _fd: number;
+
+	/** The file descriptor, or -1 once the handle has been closed */
+	public get fd(): number {
+		return this._fd;
+	}
+
+	public constructor(
+		protected context: V_Context,
+		fd: number,
+	) {
+		this._fd = fd;
+		this.vfs = fromFD(context, fd);
+	}
+
+	private _emitChange() {
+		emitChange(this.context, 'change', this.vfs.path);
+	}
+
+	/**
+	 * Asynchronous fchown(2) - Change ownership of a file.
+	 */
+	public async chown(uid: number, gid: number): Promise<void> {
+		await this.vfs.chown(uid, gid);
+		this._emitChange();
+	}
+
+	/**
+	 * Asynchronous fchmod(2) - Change permissions of a file.
+	 * @param mode A file mode. If a string is passed, it is parsed as an octal integer.
+	 */
+	public async chmod(mode: fs.Mode): Promise<void> {
+		const numMode = normalizeMode(mode, -1);
+		if (numMode < 0) throw UV('EINVAL', 'chmod', this.vfs.path);
+		await this.vfs.chmod(numMode);
+		this._emitChange();
+	}
+
+	/**
+	 * Asynchronous fdatasync(2) - synchronize a file's in-core state with storage device.
+	 */
+	public datasync(): Promise<void> {
+		return this.sync();
+	}
+
+	/**
+	 * Asynchronous fsync(2) - synchronize a file's in-core state with the underlying storage device.
+	 */
+	public async sync(): Promise<void> {
+		await this.vfs.sync();
+	}
+
+	/**
+	 * Asynchronous ftruncate(2) - Truncate a file to a specified length.
+	 * @param length If not specified, defaults to `0`. Negative lengths are treated as `0`.
+	 */
+	public async truncate(length: number = 0): Promise<void> {
+		await this.vfs.truncate(Math.max(0, length || 0));
+		this._emitChange();
+	}
+
+	/**
+	 * Asynchronously change file timestamps of the file.
+	 * @param atime The last access time. If a string is provided, it will be coerced to number.
+	 * @param mtime The last modified time. If a string is provided, it will be coerced to number.
+	 */
+	public async utimes(atime: fs.TimeLike, mtime: fs.TimeLike): Promise<void> {
+		atime = normalizeTime(atime);
+		mtime = normalizeTime(mtime);
+		await this.vfs.utimes(atime, mtime);
+		this._emitChange();
+	}
+
+	/**
+	 * Asynchronously append data to a file, creating the file if it does not exist. The underlying file will _not_ be closed automatically.
+	 * The `FileHandle` must have been opened for appending.
+	 * @param data The data to write. If something other than a `Buffer` or `Uint8Array` is provided, the value is coerced to a string.
+	 * @param _options Either the encoding for the file, or an object optionally specifying the encoding, file mode, and flag.
+	 * - `encoding` defaults to `'utf8'`.
+	 * - `mode` defaults to `0o666`.
+	 * - `flag` defaults to `'a'`.
+	 */
+	public async appendFile(
+		data: WriteFileData | Stream,
+		_options: (fs.ObjectEncodingOptions & promises.FlagAndOpenMode & Abortable) | BufferEncoding = {},
+	): Promise<void> {
+		if (!isIterableData(data)) validateData(data);
+		const options = normalizeOptions(_options, 'utf8', 'a', 0o644);
+		const flag = flags.parse(options.flag);
+		if (!(flag & constants.O_APPEND)) throw UV('EBADF', 'write', this.vfs.path);
+
+		await this._writeData(data, options.encoding!, typeof _options == 'object' ? _options.signal : undefined);
+	}
+
+	/**
+	 * Writes `data` at the current position, encoding strings with `encoding`.
+	 * Iterables are written one chunk at a time, and `signal` is checked before each write.
+	 */
+	private async _writeData(data: WriteFileData | Stream, encoding: BufferEncoding, signal?: AbortSignal | null): Promise<void> {
+		const chunks = isIterableData(data) ? data : [data as string | ArrayBufferView];
+		for await (const chunk of chunks) {
+			checkAborted(signal);
+			validateData(chunk);
+			const encoded =
+				typeof chunk == 'string' ? Buffer.from(chunk, encoding) : new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+			await this.vfs.write(encoded, 0, encoded.byteLength);
+		}
+		this._emitChange();
+	}
+
+	/**
+	 * Asynchronously reads data from the file.
+	 * The `FileHandle` must have been opened for reading.
+	 * @param buffer The buffer that the data will be written to.
+	 * @param offset The offset in the buffer at which to start writing.
+	 * @param length The number of bytes to read.
+	 * @param position The offset from the beginning of the file from which data should be read. If `null`, data will be read from the current position.
+	 */
+	public async read<T extends NodeJS.ArrayBufferView>(
+		buffer: T,
+		offset?: number,
+		length?: number,
+		position?: number | null,
+	): Promise<promises.FileReadResult<T>>;
+	public async read<T extends NodeJS.ArrayBufferView = Buffer>(
+		buffer: T,
+		options?: promises.FileReadOptions<T>,
+	): Promise<promises.FileReadResult<T>>;
+	public async read<T extends NodeJS.ArrayBufferView = Buffer>(options?: promises.FileReadOptions<T>): Promise<promises.FileReadResult<T>>;
+	public async read<T extends NodeJS.ArrayBufferView = Buffer>(
+		buffer?: T | promises.FileReadOptions<T>,
+		offset?: number | null | promises.FileReadOptions<T>,
+		length?: number | null,
+		position?: fs.ReadPosition | null,
+	): Promise<promises.FileReadResult<T>> {
+		if (typeof offset == 'object' && offset != null) {
+			position = offset.position;
+			length = offset.length;
+			offset = offset.offset;
+		}
+
+		if (!ArrayBuffer.isView(buffer) && typeof buffer == 'object') {
+			position = buffer.position;
+			length = buffer.length;
+			offset = buffer.offset;
+			buffer = buffer.buffer;
+		}
+
+		if (position && position > Number.MAX_SAFE_INTEGER) throw UV('EINVAL');
+		if (typeof position == 'bigint') position = Number(position);
+		position = Number.isSafeInteger(position) ? position! : null;
+		buffer ||= Buffer.alloc(16384) as unknown as T;
+		offset ??= 0;
+		length = (length ?? buffer.byteLength - offset) | 0;
+		const bytesRead = await this.vfs.read(buffer, offset, length, position);
+		return { bytesRead, buffer };
+	}
+
+	public async readFile<T extends NodeJS.ArrayBufferView>(options: Omit<fs.ReadFileOptionsWithBuffer<T>, 'flag'>): Promise<BufferView<T>>;
+	public async readFile(options?: ({ encoding?: null } & Abortable) | null): Promise<NonSharedBuffer>;
+	public async readFile(options: ({ encoding: BufferEncoding } & Abortable & Pick<ReadFileOptions, 'buffer'>) | BufferEncoding): Promise<string>;
+	public async readFile(_options?: (fs.ObjectEncodingOptions & Abortable) | BufferEncoding | null): Promise<string | NonSharedBuffer>;
+	public async readFile(_options?: ReadFileOptions | BufferEncoding | null): Promise<string | Buffer> {
+		const options = normalizeOptions(_options, null, 'r', 0o444);
+		const flag = flags.parse(options.flag);
+		if (flag & constants.O_WRONLY) throw UV('EBADF', 'read', this.vfs.path);
+
+		const { signal, buffer: into } = typeof _options == 'object' && _options !== null ? _options : {};
+		checkAborted(signal);
+		const { size } = await this.stat();
+		const data = into === undefined ? Buffer.alloc(size) : readFileBuffer(into, size);
+		checkAborted(signal);
+		const buffer = data.subarray(0, await this.vfs.read(data, 0, size, null));
+		checkAborted(signal);
+		return options.encoding ? buffer.toString(options.encoding) : buffer;
+	}
+
+	/**
+	 * Read file data using a `ReadableStream`.
+	 * The handle is closed when the stream ends or is cancelled if `autoClose` is set.
+	 */
+	public readableWebStream(options: StreamOptions = {}): NodeReadableStream<Uint8Array> {
+		if (this.vfs.isClosed) throw UV('EBADF', 'readableWebStream', this.vfs.path);
+		const stream = this.vfs.streamRead(options);
+		if (!options.autoClose) return stream;
+
+		const reader = stream.getReader();
+		const handle = this;
+		return new ReadableStream({
+			type: 'bytes',
+			async pull(controller) {
+				const { done, value } = await reader.read();
+				if (!done) return controller.enqueue(value);
+				await handle.close();
+				controller.close();
+			},
+			async cancel(reason) {
+				await reader.cancel(reason);
+				await handle.close();
+			},
+		});
+	}
+
+	/**
+	 * Not part of the Node.js API!
+	 *
+	 * Write file data using a `WritableStream`.
+	 * The handle will not be closed automatically.
+	 * @internal
+	 */
+	public writableWebStream(options: StreamOptions = {}): WritableStream {
+		if (this.vfs.isClosed) throw UV('EBADF', 'writableWebStream', this.vfs.path);
+		if (this.vfs.inode.flags! & InodeFlags.Immutable) throw UV('EPERM', 'writableWebStream', this.vfs.path);
+		return this.vfs.streamWrite(options);
+	}
+
+	/**
+	 * Creates a readline Interface object that allows reading the file line by line
+	 * @param options Options for creating a read stream
+	 * @returns A readline interface for reading the file line by line
+	 */
+	public readLines(options?: promises.CreateReadStreamOptions): ReadlineInterface {
+		if (this.vfs.isClosed || this.vfs.flag & constants.O_WRONLY) throw UV('EBADF', 'read', this.vfs.path);
+
+		return createInterface({ input: this.createReadStream(options), crlfDelay: Infinity });
+	}
+
+	public [Symbol.asyncDispose](): Promise<void> {
+		return this.close();
+	}
+
+	/**
+	 * Asynchronous fstat(2) - Get file status.
+	 */
+	public async stat(opts: fs.BigIntOptions): Promise<BigIntStats>;
+	public async stat(opts?: fs.StatOptions & { bigint?: false }): Promise<Stats>;
+	public async stat(opts?: fs.StatOptions): Promise<Stats | BigIntStats> {
+		if (this.vfs.isClosed) throw UV('EBADF', 'stat', this.vfs.path);
+
+		if (checkAccess && !hasAccess(this.context, this.vfs.inode, constants.R_OK)) throw UV('EACCES', 'stat', this.vfs.path);
+
+		return opts?.bigint ? new BigIntStats(this.vfs.inode) : new Stats(this.vfs.inode);
+	}
+
+	/**
+	 * Asynchronously writes `string` to the file.
+	 * The `FileHandle` must have been opened for writing.
+	 * It is unsafe to call `write()` multiple times on the same file without waiting for the `Promise`
+	 * to be resolved (or rejected). For this scenario, `createWriteStream` is strongly recommended.
+	 */
+	public async write<T extends FileContents>(
+		data: T,
+		options?: number | null | { offset?: number; length?: number; position?: number },
+		lenOrEnc?: BufferEncoding | number | null,
+		position?: number | null,
+	): Promise<{ bytesWritten: number; buffer: T }> {
+		validateData(data, 'buffer');
+		let buffer: Uint8Array, offset: number | null | undefined, length: number;
+		if (typeof options == 'object' && options != null) {
+			lenOrEnc = options.length;
+			position = options.position;
+			options = options.offset;
+		}
+		if (typeof data === 'string') {
+			position = typeof options === 'number' ? options : null;
+			offset = 0;
+			buffer = Buffer.from(data, typeof lenOrEnc === 'string' ? lenOrEnc : 'utf8');
+			length = buffer.length;
+		} else {
+			buffer = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+			offset = options ?? 0;
+			length = typeof lenOrEnc == 'number' ? lenOrEnc : buffer.byteLength;
+			position = typeof position === 'number' ? position : null;
+		}
+		const bytesWritten = await this.vfs.write(buffer, offset, length, position);
+		this._emitChange();
+		return { buffer: data, bytesWritten };
+	}
+
+	/**
+	 * Asynchronously writes data to a file, replacing the file if it already exists. The underlying file will _not_ be closed automatically.
+	 * The `FileHandle` must have been opened for writing.
+	 * It is unsafe to call `writeFile()` multiple times on the same file without waiting for the `Promise` to be resolved (or rejected).
+	 * @param data The data to write. If something other than a `Buffer` or `Uint8Array` is provided, the value is coerced to a string.
+	 * @param _options Either the encoding for the file, or an object optionally specifying the encoding, file mode, and flag.
+	 * - `encoding` defaults to `'utf8'`.
+	 * - `mode` defaults to `0o666`.
+	 * - `flag` defaults to `'w'`.
+	 */
+	public async writeFile(data: WriteFileData | Stream, _options: fs.WriteFileOptions = {}): Promise<void> {
+		if (!isIterableData(data)) validateData(data);
+		const options = normalizeOptions(_options, 'utf8', 'w', 0o644);
+		const flag = flags.parse(options.flag);
+		if (!(flag & constants.O_WRONLY || flag & constants.O_RDWR)) throw UV('EBADF', 'writeFile', this.vfs.path);
+		await this._writeData(data, options.encoding!, typeof _options == 'object' ? _options?.signal : undefined);
+	}
+
+	/**
+	 * Asynchronous close(2) - close a `FileHandle`.
+	 */
+	/** @internal */
+	public _closeSync(): void {
+		if (this._fd == -1) return;
+		this.vfs.closeSync();
+		deleteFD(this.context, this._fd);
+		this._fd = -1;
+	}
+
+	public async close(): Promise<void> {
+		if (this._fd == -1) return;
+		await this.vfs.close();
+		deleteFD(this.context, this._fd);
+		// Like Node, the descriptor is invalidated so later use fails validation
+		this._fd = -1;
+	}
+
+	/**
+	 * Asynchronous `writev`. Writes from multiple buffers.
+	 * @param buffers An array of Uint8Array buffers.
+	 * @param position The position in the file where to begin writing.
+	 * @returns The number of bytes written.
+	 */
+	public async writev<TBuffers extends readonly NodeJS.ArrayBufferView[]>(
+		buffers: TBuffers,
+		position?: number,
+	): Promise<fs.WriteVResult<TBuffers>> {
+		let bytesWritten = 0;
+
+		for (const buffer of buffers) {
+			const at = typeof position == 'number' ? position + bytesWritten : null;
+			bytesWritten += (await this.write(buffer, 0, buffer.byteLength, at)).bytesWritten;
+		}
+
+		return { bytesWritten, buffers };
+	}
+
+	/**
+	 * Asynchronous `readv`. Reads into multiple buffers.
+	 * @param buffers An array of Uint8Array buffers.
+	 * @param position The position in the file where to begin reading.
+	 * @returns The number of bytes read.
+	 */
+	public async readv<TBuffers extends readonly NodeJS.ArrayBufferView[]>(buffers: TBuffers, position?: number): Promise<fs.ReadVResult<TBuffers>> {
+		let bytesRead = 0;
+
+		for (const buffer of buffers) {
+			const at = typeof position == 'number' ? position + bytesRead : null;
+			bytesRead += (await this.read(buffer, 0, buffer.byteLength, at)).bytesRead;
+		}
+
+		return { bytesRead, buffers };
+	}
+
+	/**
+	 * Creates a stream for reading from the file.
+	 * @param options Options for the readable stream
+	 */
+	public createReadStream(options: promises.CreateReadStreamOptions = {}): ReadStream {
+		validateFD(this._fd);
+		if (this.vfs.isClosed || this.vfs.flag & constants.O_WRONLY) throw UV('EBADF', 'createReadStream', this.vfs.path);
+		return new ReadStream(options, this);
+	}
+
+	/**
+	 * Creates a stream for writing to the file.
+	 * @param options Options for the writeable stream.
+	 */
+	public createWriteStream(options: promises.CreateWriteStreamOptions = {}): WriteStream {
+		validateFD(this._fd);
+		if (this.vfs.isClosed) throw UV('EBADF', 'createWriteStream', this.vfs.path);
+		if (this.vfs.inode.flags! & InodeFlags.Immutable) throw UV('EPERM', 'createWriteStream', this.vfs.path);
+		if (this.vfs.fs.attributes.has('readonly')) throw UV('EROFS', 'createWriteStream', this.vfs.path);
+		return new WriteStream(options, this);
+	}
+
+	/**
+	 * Return the file contents as an async iterable using the `node:stream/iter` pull model.
+	 * Reads are performed in `chunkSize`-byte chunks (default 128 KiB), from `start` or else the current position.
+	 * If transforms are provided, they are applied via `stream/iter`'s `pull()`.
+	 * The handle is closed when iteration completes if `autoClose` is set.
+	 * @experimental
+	 */
+	public pull(...transforms: Transform[]): ByteReadableStream;
+	public pull(...args: [...transforms: Transform[], options: promises.PullOptions]): ByteReadableStream;
+	public pull(...args: Array<Transform | promises.PullOptions>): ByteReadableStream {
+		if (this.vfs.isClosed || this.vfs.flag & constants.O_WRONLY) throw UV('EBADF', 'read', this.vfs.path);
+
+		const { transforms, options } = parsePullArgs<Transform, promises.PullOptions>(args);
+		const { autoClose, start, limit, chunkSize = 131072, signal } = options;
+
+		const handle = this;
+		async function* source(): ByteReadableStream {
+			let position = typeof start == 'number' ? start : null;
+			let remaining = typeof limit == 'number' ? limit : Infinity;
+			try {
+				while (remaining > 0) {
+					signal?.throwIfAborted();
+					const size = Math.min(chunkSize, remaining);
+					const buffer = new Uint8Array(size);
+					const bytesRead = await handle.vfs.read(buffer, 0, size, position);
+					if (bytesRead <= 0) break;
+					if (position !== null) position += bytesRead;
+					remaining -= bytesRead;
+					yield [buffer.subarray(0, bytesRead)];
+				}
+			} finally {
+				if (autoClose) await handle.close();
+			}
+		}
+
+		let stream = source();
+		for (const transform of transforms) stream = applyTransform(stream, transform, signal);
+		return stream;
+	}
+
+	/**
+	 * Return the file contents as an iterable using the `node:stream/iter` pull model and synchronous reads.
+	 * Reads are performed in `chunkSize`-byte chunks (default 128 KiB), from `start` or else the current position.
+	 * If transforms are provided, they are applied like `stream/iter`'s `pullSync()`.
+	 * The handle is closed when iteration completes if `autoClose` is set.
+	 * @experimental
+	 */
+	public pullSync(...transforms: SyncTransform[]): SyncByteReadableStream;
+	public pullSync(...args: [...transforms: SyncTransform[], options: promises.PullSyncOptions]): SyncByteReadableStream;
+	public pullSync(...args: Array<SyncTransform | promises.PullSyncOptions>): SyncByteReadableStream {
+		if (this.vfs.isClosed || this.vfs.flag & constants.O_WRONLY) throw UV('EBADF', 'read', this.vfs.path);
+
+		const { transforms, options } = parsePullArgs<SyncTransform, promises.PullSyncOptions>(args);
+		const { autoClose, start, limit, chunkSize = 131072 } = options;
+
+		const handle = this;
+		function* source(): SyncByteReadableStream {
+			let position = typeof start == 'number' ? start : null;
+			let remaining = typeof limit == 'number' ? limit : Infinity;
+			try {
+				while (remaining > 0) {
+					const size = Math.min(chunkSize, remaining);
+					const buffer = new Uint8Array(size);
+					const bytesRead = handle.vfs.readSync(buffer, 0, size, position);
+					if (bytesRead <= 0) break;
+					if (position !== null) position += bytesRead;
+					remaining -= bytesRead;
+					yield [buffer.subarray(0, bytesRead)];
+				}
+			} finally {
+				if (autoClose) handle._closeSync();
+			}
+		}
+
+		let stream = source();
+		for (const transform of transforms) stream = applyTransformSync(stream, transform);
+		return stream;
+	}
+
+	/**
+	 * Return a `node:stream/iter` writer backed by this file handle.
+	 * @experimental
+	 */
+	public writer(options: promises.WriterOptions = {}): Writer {
+		if (this.vfs.isClosed) throw UV('EBADF', 'write', this.vfs.path);
+		if (this.vfs.inode.flags! & InodeFlags.Immutable) throw UV('EPERM', 'write', this.vfs.path);
+		if (this.vfs.fs.attributes.has('readonly')) throw UV('EROFS', 'write', this.vfs.path);
+
+		const { autoClose, start, limit } = options;
+
+		const handle = this;
+		let position = typeof start == 'number' ? start : null;
+		let written = 0;
+		// Tracks whether the writer has been ended or failed, so disposal and `autoClose` don't double-close.
+		let done = false;
+		let failed = false;
+		let queue: Promise<unknown> = Promise.resolve();
+
+		/** Runs `task` once every previously queued write has settled. */
+		function enqueue(task: () => Promise<void>, signal?: AbortSignal): Promise<void> {
+			const operation = queue.then(() => {
+				if (failed) throw UV('EBADF', 'write', handle.vfs.path);
+				signal?.throwIfAborted();
+				return task();
+			});
+			queue = operation.catch(() => {});
+			return operation;
+		}
+
+		async function finish(): Promise<void> {
+			if (done) return;
+			done = true;
+			if (autoClose) await handle.close();
+		}
+
+		const toBuffer = (chunk: Uint8Array | string): Uint8Array =>
+			typeof chunk == 'string' ? Buffer.from(chunk, 'utf8') : new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+
+		async function writeChunk(chunk: Uint8Array | string): Promise<void> {
+			const buffer = toBuffer(chunk);
+			if (typeof limit == 'number' && written + buffer.byteLength > limit) {
+				throw new RangeError(`Writer limit of ${limit} bytes exceeded`);
+			}
+			const bytesWritten = await handle.vfs.write(buffer, 0, buffer.byteLength, position);
+			if (position !== null) position += bytesWritten;
+			written += bytesWritten;
+			handle._emitChange();
+		}
+
+		return {
+			get canWrite() {
+				if (done || handle.vfs.isClosed) return null;
+				return typeof limit != 'number' || written < limit;
+			},
+			async write(chunk, opts) {
+				opts?.signal?.throwIfAborted();
+				await enqueue(() => writeChunk(chunk), opts?.signal);
+			},
+			async writev(chunks, opts) {
+				opts?.signal?.throwIfAborted();
+				await enqueue(async () => {
+					for (const chunk of chunks) await writeChunk(chunk);
+				}, opts?.signal);
+			},
+			writeSync() {
+				// Synchronous writes are not supported by the async handle.
+				throw UV('ENOSYS', 'writeSync', handle.vfs.path);
+			},
+			writevSync() {
+				throw UV('ENOSYS', 'writevSync', handle.vfs.path);
+			},
+			async end() {
+				await queue;
+				await finish();
+				return written;
+			},
+			endSync() {
+				throw UV('ENOSYS', 'endSync', handle.vfs.path);
+			},
+			fail() {
+				failed = true;
+				void finish();
+			},
+			[Symbol.dispose]() {
+				// `using w = fh.writer()` fails the writer unconditionally.
+				failed = true;
+				void finish();
+			},
+			async [Symbol.asyncDispose]() {
+				// `await using w = fh.writer()` only finishes if still open.
+				await queue;
+				await finish();
+			},
+		};
+	}
+}
+
+export async function rename(this: V_Context, oldPath: fs.PathLike, newPath: fs.PathLike): Promise<void> {
+	await _async.rename.call(this, oldPath, newPath);
+}
+rename satisfies typeof promises.rename;
+
+/**
+ * Test whether or not `path` exists by checking with the file system.
+ */
+export async function exists(this: V_Context, path: fs.PathLike): Promise<boolean> {
+	path = normalizePath.call(this, path);
+	try {
+		const { fs, path: resolved } = await _async.resolve(this, path);
+		return await fs.exists(resolved);
+	} catch (e) {
+		if (e instanceof Exception && (e.code == 'ENOENT' || e.code == 'ENOTDIR' || e.code == 'EACCES')) {
+			return false;
+		}
+
+		throw e;
+	}
+}
+
+export async function stat(this: V_Context, path: fs.PathLike, options: fs.BigIntOptions & { throwIfNoEntry?: true }): Promise<BigIntStats>;
+export async function stat(this: V_Context, path: fs.PathLike, options?: fs.StatOptions & { bigint?: false; throwIfNoEntry?: true }): Promise<Stats>;
+export async function stat(
+	this: V_Context,
+	path: fs.PathLike,
+	options: fs.StatOptions & { bigint?: false; throwIfNoEntry: false },
+): Promise<Stats | undefined>;
+export async function stat(
+	this: V_Context,
+	path: fs.PathLike,
+	options: fs.StatOptions & { bigint: true; throwIfNoEntry: false },
+): Promise<BigIntStats | undefined>;
+export async function stat(this: V_Context, path: fs.PathLike, options: fs.StatOptions & { throwIfNoEntry?: true }): Promise<Stats | BigIntStats>;
+export async function stat(this: V_Context, path: fs.PathLike, options?: fs.StatOptions): Promise<Stats | BigIntStats | undefined>;
+export async function stat(this: V_Context, path: fs.PathLike, options?: fs.StatOptions): Promise<Stats | BigIntStats | undefined> {
+	let stats: InodeLike;
+	try {
+		stats = await raceSignal(() => _async.stat.call(this, path, false), options?.signal);
+	} catch (e) {
+		if (options?.throwIfNoEntry === false && isNoEntry(e)) return;
+		throw e;
+	}
+	return options?.bigint ? new BigIntStats(stats) : new Stats(stats);
+}
+stat satisfies typeof promises.stat;
+
+/**
+ * `lstat`.
+ * `lstat()` is identical to `stat()`, except that if path is a symbolic link,
+ * then the link itself is stat-ed, not the file that it refers to.
+ */
+export async function lstat(this: V_Context, path: fs.PathLike, options?: fs.StatOptions & { bigint?: false }): Promise<Stats>;
+export async function lstat(this: V_Context, path: fs.PathLike, options: fs.StatOptions & { bigint: true }): Promise<BigIntStats>;
+export async function lstat(this: V_Context, path: fs.PathLike, options?: fs.StatOptions): Promise<Stats | BigIntStats>;
+export async function lstat(this: V_Context, path: fs.PathLike, options?: fs.StatOptions): Promise<Stats | BigIntStats> {
+	const stats = await raceSignal(() => _async.stat.call(this, path, true), options?.signal);
+	return options?.bigint ? new BigIntStats(stats) : new Stats(stats);
+}
+lstat satisfies typeof promises.lstat;
+
+export async function truncate(this: V_Context, path: fs.PathLike, len: number = 0): Promise<void> {
+	await using handle = await open.call(this, path, 'r+');
+	await handle.truncate(len);
+}
+truncate satisfies typeof promises.truncate;
+
+export async function unlink(this: V_Context, path: fs.PathLike): Promise<void> {
+	path = normalizePath.call(this, path);
+	const $ex = { syscall: 'unlink', path };
+	const { fs, cache, path: resolved } = await _async.resolve(this, path, true, $ex);
+
+	const stats = await cache.stat(resolved).catch(rethrow($ex));
+	assertRemovable(this, await cache.stat(dirname(resolved)).catch(rethrow($ex)), stats, $ex);
+
+	using _ = await cache.lock(dirname(resolved), 'rw');
+	await fs.unlink(resolved).catch(rethrow($ex));
+	cache.remove(resolved);
+	emitChange(this, 'rename', path.toString());
+}
+unlink satisfies typeof promises.unlink;
+
+/**
+ * Asynchronous file open.
+ * @see https://nodejs.org/api/fs.html#fspromisesopenpath-flags-mode
+ * @param flag {@link https://nodejs.org/api/fs.html#file-system-flags}
+ * @param mode Mode to use to open the file. Can be ignored if the filesystem doesn't support permissions.
+ */
+export async function open(this: V_Context, path: fs.PathLike, flag?: fs.OpenMode | null, mode: fs.Mode = 0o644): Promise<FileHandle> {
+	const handle = await _async.open(this, path, { flag: flag ?? 'r', mode });
+	return new FileHandle(this, toFD(handle));
+}
+open satisfies typeof promises.open;
+
+/**
+ * Asynchronously reads the entire contents of a file.
+ * @option encoding The string encoding for the file contents. Defaults to `null`.
+ * @option flag Defaults to `'r'`.
+ * @returns the file data
+ */
+export async function readFile<T extends NodeJS.ArrayBufferView>(
+	this: V_Context,
+	path: fs.PathLike | promises.FileHandle,
+	options: fs.ReadFileOptionsWithBuffer<T>,
+): Promise<BufferView<T>>;
+export async function readFile(
+	this: V_Context,
+	path: fs.PathLike | promises.FileHandle,
+	options?: ({ encoding?: null; flag?: fs.OpenMode } & Abortable) | null,
+): Promise<NonSharedBuffer>;
+export async function readFile(
+	this: V_Context,
+	path: fs.PathLike | promises.FileHandle,
+	options: ({ encoding: BufferEncoding; flag?: fs.OpenMode } & Abortable & Pick<ReadFileOptions, 'buffer'>) | BufferEncoding,
+): Promise<string>;
+export async function readFile(
+	this: V_Context,
+	path: fs.PathLike | promises.FileHandle,
+	_options?: (fs.ObjectEncodingOptions & Abortable & { flag?: fs.OpenMode }) | BufferEncoding | null,
+): Promise<string | NonSharedBuffer>;
+export async function readFile(
+	this: V_Context,
+	path: fs.PathLike | promises.FileHandle,
+	_options?: (ReadFileOptions & { flag?: fs.OpenMode }) | BufferEncoding | null,
+): Promise<Buffer | string> {
+	const options = normalizeOptions(_options, null, 'r', 0o444);
+	checkAborted(typeof _options == 'object' ? _options?.signal : undefined);
+	await using opened = typeof path == 'object' && 'fd' in path ? undefined : await open.call(this, path, options.flag, options.mode);
+	const handle = opened ?? (path as FileHandle);
+	return await handle.readFile(_options as ReadFileOptions);
+}
+readFile satisfies typeof promises.readFile;
+
+/**
+ * Asynchronously writes data to a file, replacing the file if it already exists.
+ *
+ * The encoding option is ignored if data is a buffer.
+ * @option encoding Defaults to `'utf8'`.
+ * @option mode Defaults to `0644`.
+ * @option flag Defaults to `'w'`.
+ */
+export async function writeFile(
+	this: V_Context,
+	path: fs.PathLike | promises.FileHandle,
+	data: FileContents | Stream | Iterable<string | ArrayBufferView> | AsyncIterable<string | ArrayBufferView>,
+	_options?: (fs.ObjectEncodingOptions & Abortable & { mode?: fs.Mode; flag?: fs.OpenMode; flush?: boolean }) | BufferEncoding | null,
+): Promise<void> {
+	if (!isIterableData(data)) validateData(data);
+	const signal = typeof _options == 'object' ? _options?.signal : undefined;
+	checkAborted(signal);
+	const options = normalizeOptions(_options, 'utf8', 'w+', 0o644);
+	await using opened = path instanceof FileHandle ? undefined : await open.call(this, (path as fs.PathLike).toString(), options.flag, options.mode);
+	const handle = opened ?? (path as FileHandle);
+	await handle.writeFile(data, { ...options, signal });
+}
+writeFile satisfies typeof promises.writeFile;
+
+/**
+ * Asynchronously append data to a file, creating the file if it not yet exists.
+ * @option encoding Defaults to `'utf8'`.
+ * @option mode Defaults to `0644`.
+ * @option flag Defaults to `'a'`.
+ */
+export async function appendFile(
+	this: V_Context,
+	path: fs.PathLike | promises.FileHandle,
+	data: FileContents | Iterable<string | ArrayBufferView> | AsyncIterable<string | ArrayBufferView>,
+	_options?: BufferEncoding | (fs.EncodingOption & { mode?: fs.Mode; flag?: fs.OpenMode }) | null,
+): Promise<void> {
+	const options = normalizeOptions(_options, 'utf8', 'a', 0o644);
+	const flag = flags.parse(options.flag);
+	const $ex = { syscall: 'write', path: path instanceof FileHandle ? path['vfs'].path : path.toString() };
+
+	if (!(flag & constants.O_APPEND)) throw UV('EBADF', $ex);
+
+	if (!isIterableData(data)) validateData(data);
+
+	await using opened = typeof path == 'object' && 'fd' in path ? undefined : await open.call(this, path as string, options.flag, options.mode);
+	const handle = opened ?? (path as FileHandle);
+
+	await handle.appendFile(data, options);
+}
+appendFile satisfies typeof promises.appendFile;
+
+export async function rmdir(this: V_Context, path: fs.PathLike): Promise<void> {
+	path = normalizePath.call(this, path);
+
+	const { fs, cache, path: resolved } = await _async.resolve(this, path, true);
+	const $ex = { syscall: 'rmdir', path };
+
+	const stats = await cache.stat(resolved).catch(rethrow($ex));
+
+	if (!stats) throw UV('ENOENT', $ex);
+
+	if (!isDirectory(stats)) throw UV('ENOTDIR', $ex);
+
+	assertRemovable(this, await cache.stat(dirname(resolved)).catch(rethrow($ex)), stats, $ex);
+
+	using _ = await cache.lock(dirname(resolved), 'rw');
+	await fs.rmdir(resolved).catch(rethrow($ex));
+	cache.remove(resolved);
+	emitChange(this, 'rename', path.toString());
+}
+rmdir satisfies typeof promises.rmdir;
+
+/**
+ * Asynchronous mkdir(2) - create a directory.
+ * @param path A path to a file. If a URL is provided, it must use the `file:` protocol.
+ * @param options Either the file mode, or an object optionally specifying the file mode and whether parent folders
+ * should be created. If a string is passed, it is parsed as an octal integer. If not specified, defaults to `0o777`.
+ */
+export async function mkdir(this: V_Context, path: fs.PathLike, options: fs.MakeDirectoryOptions & { recursive: true }): Promise<string | undefined>;
+export async function mkdir(
+	this: V_Context,
+	path: fs.PathLike,
+	options?: fs.Mode | (fs.MakeDirectoryOptions & { recursive?: false | undefined }) | null,
+): Promise<void>;
+export async function mkdir(this: V_Context, path: fs.PathLike, options?: fs.Mode | fs.MakeDirectoryOptions | null): Promise<string | undefined>;
+export async function mkdir(
+	this: V_Context,
+	path: fs.PathLike,
+	options?: fs.Mode | fs.MakeDirectoryOptions | null,
+): Promise<string | undefined | void> {
+	options = typeof options === 'object' ? options : { mode: options };
+	const mode = normalizeMode(options?.mode, 0o777);
+
+	return await _async.mkdir.call(this, path, { ...options, mode });
+}
+mkdir satisfies typeof promises.mkdir;
+
+/**
+ * Asynchronous readdir(3) - read a directory.
+ *
+ * Note: The order of entries is not guaranteed
+ * @param path A path to a file. If a URL is provided, it must use the `file:` protocol.
+ * @param options The encoding (or an object specifying the encoding), used as the encoding of the result. If not provided, `'utf8'`.
+ */
+
+export async function readdir(
+	this: V_Context,
+	path: fs.PathLike,
+	options?: (fs.ObjectEncodingOptions & { withFileTypes?: false; recursive?: boolean }) | BufferEncoding | null,
+): Promise<string[]>;
+export async function readdir(
+	this: V_Context,
+	path: fs.PathLike,
+	options: { encoding: 'buffer'; withFileTypes?: false; recursive?: boolean } | 'buffer',
+): Promise<NonSharedBuffer[]>;
+export async function readdir(
+	this: V_Context,
+	path: fs.PathLike,
+	options?: (fs.ObjectEncodingOptions & { withFileTypes?: false; recursive?: boolean }) | BufferEncoding | null,
+): Promise<string[] | NonSharedBuffer[]>;
+export async function readdir(
+	this: V_Context,
+	path: fs.PathLike,
+	options: fs.ObjectEncodingOptions & { withFileTypes: true; recursive?: boolean },
+): Promise<Dirent[]>;
+export async function readdir(
+	this: V_Context,
+	path: fs.PathLike,
+	options: { encoding: 'buffer'; withFileTypes: true; recursive?: boolean },
+): Promise<Dirent<NonSharedBuffer>[]>;
+export async function readdir(this: V_Context, path: fs.PathLike, options?: NodeReaddirOptions): Promise<string[] | Dirent<any>[] | Buffer[]>;
+export async function readdir(this: V_Context, path: fs.PathLike, options?: NodeReaddirOptions): Promise<string[] | Dirent<any>[] | Buffer[]> {
+	path = normalizePath.call(this, path);
+	const opt = typeof options === 'object' && options != null ? { ...options } : { encoding: options, withFileTypes: false, recursive: false };
+
+	const rawEntries = await _async.readdir.call(this, path, opt);
+	const values: (string | Buffer | Dirent<any>)[] = [];
+
+	for (const entry of rawEntries) {
+		if (opt.withFileTypes) {
+			values.push(Dirent.from(entry, opt.encoding, path));
+		} else if (opt.encoding == 'buffer') {
+			values.push(Buffer.from(entry.path));
+		} else {
+			values.push(entry.path);
+		}
+	}
+
+	return values as string[] | Dirent[];
+}
+readdir satisfies typeof promises.readdir;
+
+export async function link(this: V_Context, path: fs.PathLike, dest: fs.PathLike): Promise<void> {
+	return await _async.link.call(this, path, dest);
+}
+link satisfies typeof promises.link;
+
+/**
+ * `symlink`.
+ * @param dest target path
+ * @param path link path
+ * @param type can be either `'dir'` or `'file'` (default is `'file'`)
+ */
+export async function symlink(
+	this: V_Context,
+	target: fs.PathLike,
+	path: fs.PathLike,
+	type: fs.symlink.Type | string | null = 'file',
+): Promise<void> {
+	if (type != null && !['file', 'dir', 'junction'].includes(type)) throw new TypeError('Invalid symlink type: ' + type);
+
+	path = normalizePath.call(this, path);
+	target = normalizePath.call(this, target, true);
+
+	try {
+		await using handle = await _async.open(this, path, { flag: 'wx', mode: 0o644, preserveSymlinks: true });
+		const encoded = encodeUTF8(target);
+		await handle.write(encoded, 0, encoded.length, 0);
+		await handle.chmod(constants.S_IFLNK | 0o777);
+	} catch (error) {
+		throw setUVMessage(Object.assign(error as Exception, { syscall: 'symlink', path: target, dest: path }));
+	}
+}
+symlink satisfies typeof promises.symlink;
+
+export async function readlink(this: V_Context, path: fs.PathLike, options: fs.BufferEncodingOption): Promise<NonSharedBuffer>;
+export async function readlink(this: V_Context, path: fs.PathLike, options?: fs.EncodingOption | null): Promise<string>;
+export async function readlink(
+	this: V_Context,
+	path: fs.PathLike,
+	options?: fs.BufferEncodingOption | fs.EncodingOption | string | null,
+): Promise<string | NonSharedBuffer>;
+export async function readlink(
+	this: V_Context,
+	path: fs.PathLike,
+	options?: fs.BufferEncodingOption | fs.EncodingOption | string | null,
+): Promise<string | Buffer> {
+	path = normalizePath.call(this, path);
+
+	const buf = Buffer.from(await _async.readlink.call(this, path), 'utf-8');
+
+	const encoding = typeof options == 'object' ? options?.encoding : options;
+	// always defaults to utf-8 to avoid wrangler (cloudflare) worker "unknown encoding" exception
+	return encoding == 'buffer' ? buf : buf.toString((encoding ?? 'utf-8') as BufferEncoding);
+}
+readlink satisfies typeof promises.readlink;
+
+export async function chown(this: V_Context, path: fs.PathLike, uid: number, gid: number): Promise<void> {
+	await _async.chown.call(this, path, uid, gid, false);
+}
+chown satisfies typeof promises.chown;
+
+export async function lchown(this: V_Context, path: fs.PathLike, uid: number, gid: number): Promise<void> {
+	await _async.chown.call(this, path, uid, gid, true);
+}
+lchown satisfies typeof promises.lchown;
+
+export async function chmod(this: V_Context, path: fs.PathLike, mode: fs.Mode): Promise<void> {
+	await _async.chmod.call(this, path, mode, false);
+}
+chmod satisfies typeof promises.chmod;
+
+export async function lchmod(this: V_Context, path: fs.PathLike, mode: fs.Mode): Promise<void> {
+	await _async.chmod.call(this, path, mode, true);
+}
+lchmod satisfies typeof promises.lchmod;
+
+/**
+ * Change file timestamps of the file referenced by the supplied path.
+ */
+export async function utimes(this: V_Context, path: fs.PathLike, atime: fs.TimeLike, mtime: fs.TimeLike): Promise<void> {
+	await _async.utimes.call(this, path, atime, mtime, false);
+}
+utimes satisfies typeof promises.utimes;
+
+/**
+ * Change file timestamps of the file referenced by the supplied path.
+ */
+export async function lutimes(this: V_Context, path: fs.PathLike, atime: fs.TimeLike, mtime: fs.TimeLike): Promise<void> {
+	await _async.utimes.call(this, path, atime, mtime, true);
+}
+lutimes satisfies typeof promises.lutimes;
+
+/**
+ * Asynchronous realpath(3) - return the canonicalized absolute pathname.
+ * @param path A path to a file. If a URL is provided, it must use the `file:` protocol.
+ * @param options The encoding (or an object specifying the encoding), used as the encoding of the result. Defaults to `'utf8'`.
+ * @todo handle options
+ */
+export async function realpath(this: V_Context, path: fs.PathLike, options: fs.BufferEncodingOption): Promise<NonSharedBuffer>;
+export async function realpath(this: V_Context, path: fs.PathLike, options?: fs.EncodingOption | BufferEncoding): Promise<string>;
+export async function realpath(
+	this: V_Context,
+	path: fs.PathLike,
+	options?: fs.EncodingOption | fs.BufferEncodingOption,
+): Promise<string | NonSharedBuffer>;
+export async function realpath(
+	this: V_Context,
+	path: fs.PathLike,
+	options?: fs.EncodingOption | BufferEncoding | fs.BufferEncodingOption,
+): Promise<string | Buffer> {
+	const encoding = typeof options == 'string' ? options : (options?.encoding ?? 'utf8');
+	path = normalizePath.call(this, path);
+
+	const { fullPath } = await _async.resolve(this, path);
+	if (encoding == 'utf8' || encoding == 'utf-8') return fullPath;
+	const buf = Buffer.from(fullPath, 'utf-8');
+	if (encoding == 'buffer') return buf;
+	return buf.toString(encoding);
+}
+realpath satisfies typeof promises.realpath;
+
+export function watch(
+	this: V_Context,
+	filename: fs.PathLike,
+	options?: fs.WatchOptions | BufferEncoding,
+): AsyncIteratorObject<promises.FileChangeInfo<string>, undefined>;
+export function watch(
+	this: V_Context,
+	filename: fs.PathLike,
+	options: fs.WatchOptions | fs.BufferEncodingOption,
+): AsyncIteratorObject<promises.FileChangeInfo<NonSharedBuffer>, undefined>;
+export function watch(
+	this: V_Context,
+	filename: fs.PathLike,
+	options?: fs.WatchOptions | string,
+): AsyncIteratorObject<promises.FileChangeInfo<string>, undefined> | AsyncIteratorObject<promises.FileChangeInfo<NonSharedBuffer>, undefined>;
+export function watch<T extends string | Buffer>(
+	this: V_Context,
+	filename: fs.PathLike,
+	options: fs.WatchOptions | string = {},
+): AsyncIteratorObject<promises.FileChangeInfo<T>, undefined> {
+	const opts = typeof options !== 'string' ? options : ({ encoding: options as BufferEncoding | 'buffer' } satisfies fs.WatchOptions);
+
+	const { maxQueue = 2048, overflow = 'ignore' } = opts as WatchQueueOptions;
+	_validateWatchQueue(maxQueue, overflow);
+
+	let watcher: FSWatcher<T>;
+	try {
+		watcher = new FSWatcher<T>(this, filename.toString(), opts);
+	} catch (error) {
+		return rejectOnIteration(error);
+	}
+
+	type Result = IteratorResult<promises.FileChangeInfo<T>, undefined>;
+
+	const queue: (promises.FileChangeInfo<T> | Error)[] = [];
+	const waiting: PromiseWithResolvers<Result>[] = [];
+	let done = false;
+
+	watcher.on('change', (eventType: promises.FileChangeInfo<T>['eventType'], filename: T) => {
+		const event = { eventType, filename };
+		const next = waiting.shift();
+		if (next) return next.resolve({ value: event, done: false });
+
+		if (queue.length < maxQueue) {
+			queue.push(event);
+			return;
+		}
+
+		if (overflow != 'error') return warn('fs.watch maxQueue exceeded');
+
+		queue.length = 0;
+		queue.push(Object.assign(new Error(`fs.watch() queued more than ${maxQueue} events`), { code: 'ERR_FS_WATCH_QUEUE_OVERFLOW' }));
+	});
+
+	function cleanup(): Promise<IteratorReturnResult<undefined>> {
+		done = true;
+		watcher.close();
+		opts.signal?.removeEventListener('abort', cleanup);
+		for (const { resolve } of waiting) resolve({ value: undefined, done });
+		waiting.length = 0;
+		return Promise.resolve({ value: undefined, done: true as const });
+	}
+
+	if (opts.signal?.aborted) void cleanup();
+	else opts.signal?.addEventListener('abort', cleanup, { once: true });
+
+	return {
+		async next(): Promise<Result> {
+			const item = queue.shift();
+			if (item instanceof Error) {
+				await cleanup();
+				throw item;
+			}
+			if (item) return { value: item, done: false };
+			if (done) return { value: undefined, done };
+			const next = Promise.withResolvers<Result>();
+			waiting.push(next);
+			return next.promise;
+		},
+		return: cleanup,
+		throw: cleanup,
+		async [Symbol.asyncDispose]() {
+			await cleanup();
+		},
+		[Symbol.asyncIterator](): AsyncIteratorObject<promises.FileChangeInfo<T>, undefined> {
+			return this;
+		},
+	};
+}
+watch satisfies typeof promises.watch;
+
+export async function access(this: V_Context, path: fs.PathLike, mode: number = constants.F_OK): Promise<void> {
+	if (!checkAccess) return;
+	const stats = await stat.call<V_Context, [fs.PathLike], Promise<Stats>>(this, path);
+	if (!stats.hasAccess(mode, this)) throw UV('EACCES', 'access', path.toString());
+}
+access satisfies typeof promises.access;
+
+/**
+ * Asynchronous `rm`. Removes files or directories (recursively).
+ * @param path The path to the file or directory to remove.
+ */
+export async function rm(this: V_Context, path: fs.PathLike, options?: fs.RmOptions) {
+	path = normalizePath.call(this, path);
+
+	const stats = await lstat.call<V_Context, [string], Promise<Stats>>(this, path).catch((error: Exception) => {
+		if (error.code == 'ENOENT' && options?.force) return undefined;
+		throw error;
+	});
+
+	if (!stats) return;
+
+	switch (stats.mode & constants.S_IFMT) {
+		case constants.S_IFDIR:
+			if (!options?.recursive) throw rmDirectoryError(path);
+			for (const entry of await readdir.call<V_Context, any, Promise<string[]>>(this, path)) {
+				await rm.call(this, join(path, entry), options);
+			}
+
+			await rmdir.call(this, path);
+			break;
+		case constants.S_IFREG:
+		case constants.S_IFLNK:
+		case constants.S_IFBLK:
+		case constants.S_IFCHR:
+			await unlink.call(this, path);
+			break;
+		case constants.S_IFIFO:
+		case constants.S_IFSOCK:
+		default:
+			throw UV('ENOSYS', 'rm', path);
+	}
+}
+rm satisfies typeof promises.rm;
+
+/**
+ * Asynchronous `mkdtemp`. Creates a unique temporary directory.
+ * @param prefix The directory prefix.
+ * @param options The encoding (or an object including `encoding`).
+ * @returns The path to the created temporary directory, encoded as a string or buffer.
+ */
+export async function mkdtemp(this: V_Context, prefix: Buffer, options?: fs.EncodingOption | fs.BufferEncodingOption): Promise<NonSharedBuffer>;
+export async function mkdtemp(this: V_Context, prefix: fs.PathLike, options?: fs.EncodingOption): Promise<string>;
+export async function mkdtemp(this: V_Context, prefix: fs.PathLike, options?: fs.BufferEncodingOption): Promise<NonSharedBuffer>;
+export async function mkdtemp(
+	this: V_Context,
+	prefix: fs.PathLike,
+	options?: fs.EncodingOption | fs.BufferEncodingOption,
+): Promise<string | NonSharedBuffer>;
+export async function mkdtemp(
+	this: V_Context,
+	prefix: fs.PathLike,
+	options?: fs.EncodingOption | fs.BufferEncodingOption,
+): Promise<string | NonSharedBuffer> {
+	const path = tempDirName(prefix);
+	await mkdir.call(this, path);
+	return tempResult(path, prefix, options);
+}
+mkdtemp satisfies typeof promises.mkdtemp;
+
+/**
+ * Creates and opens a unique temporary file, named by appending six random characters to `prefix`.
+ */
+export async function mkstemp(
+	this: V_Context,
+	prefix: Buffer,
+	options?: fs.EncodingOption | fs.BufferEncodingOption,
+): Promise<promises.TempFile<NonSharedBuffer>>;
+export async function mkstemp(this: V_Context, prefix: fs.PathLike, options: fs.BufferEncodingOption): Promise<promises.TempFile<NonSharedBuffer>>;
+export async function mkstemp(this: V_Context, prefix: fs.PathLike, options?: fs.EncodingOption): Promise<promises.TempFile<string>>;
+export async function mkstemp(
+	this: V_Context,
+	prefix: fs.PathLike,
+	options?: fs.EncodingOption | fs.BufferEncodingOption,
+): Promise<promises.TempFile>;
+export async function mkstemp(
+	this: V_Context,
+	prefix: fs.PathLike,
+	options?: fs.EncodingOption | fs.BufferEncodingOption,
+): Promise<promises.TempFile> {
+	const path = tempFileName(prefix);
+	const handle = await open.call(this, path, 'wx+', 0o600).catch((error: unknown) => {
+		throw mkstempError(error, prefix);
+	});
+	return { path: tempResult(path, prefix, options), handle };
+}
+mkstemp satisfies typeof promises.mkstemp;
+
+/**
+ * The resulting Promise holds an async-disposable object whose `path` property holds the created directory path.
+ * When the object is disposed, the directory and its contents will be removed asynchronously if it still exists.
+ * If the directory cannot be deleted, disposal will throw an error.
+ * The object has an async `remove()` method which will perform the same task.
+ */
+export async function mkdtempDisposable(
+	this: V_Context,
+	prefix: fs.PathLike,
+	options?: fs.EncodingOption | fs.BufferEncodingOption,
+): Promise<promises.DisposableTempDir> {
+	const path = tempDirName(prefix);
+
+	await mkdir.call(this, path);
+
+	const remove = () => rm(path, { recursive: true, force: true });
+
+	return { path, remove, [Symbol.asyncDispose]: remove };
+}
+mkdtempDisposable satisfies typeof promises.mkdtempDisposable;
+
+/**
+ * Asynchronous `copyFile`. Copies a file.
+ * @param src The source file.
+ * @param dest The destination file.
+ * @param mode Optional flags for the copy operation. Currently supports these flags:
+ *    * `fs.constants.COPYFILE_EXCL`: If the destination file already exists, the operation fails.
+ */
+export async function copyFile(this: V_Context, src: fs.PathLike, dest: fs.PathLike, mode?: number): Promise<void> {
+	src = normalizePath.call(this, src);
+	dest = normalizePath.call(this, dest);
+
+	if (mode && mode & constants.COPYFILE_EXCL && (await exists.call(this, dest))) throw UV('EEXIST', 'copyFile', dest);
+
+	await writeFile.call(this, dest, await readFile.call(this, src));
+	emitChange(this, 'rename', dest.toString());
+}
+copyFile satisfies typeof promises.copyFile;
+
+/**
+ * Asynchronous `opendir`. Opens a directory.
+ * @param path The path to the directory.
+ * @param options Options for opening the directory.
+ * @returns A `Dir` object representing the opened directory.
+ */
+export function opendir(this: V_Context, path: fs.PathLike, options?: fs.OpenDirOptions): Promise<Dir> {
+	path = normalizePath.call(this, path);
+	return Promise.resolve(new Dir(path, this, options));
+}
+opendir satisfies typeof promises.opendir;
+
+/**
+ * Asynchronous `cp`. Recursively copies a file or directory.
+ * @param source The source file or directory.
+ * @param destination The destination file or directory.
+ * @param opts Options for the copy operation. Currently supports these options from Node.js 'fs.await cp':
+ *   * `dereference`: Dereference symbolic links.
+ *   * `errorOnExist`: Throw an error if the destination file or directory already exists.
+ *   * `filter`: A function that takes a source and destination path and returns a boolean, indicating whether to copy `source` element.
+ *   * `force`: Overwrite the destination if it exists, and overwrite existing readonly destination files.
+ *   * `preserveTimestamps`: Preserve file timestamps.
+ *   * `recursive`: If `true`, copies directories recursively.
+ */
+export async function cp(this: V_Context, source: fs.PathLike, destination: fs.PathLike, opts?: fs.CopyOptions): Promise<void> {
+	source = normalizePath.call(this, source);
+	destination = normalizePath.call(this, destination);
+
+	if (opts?.filter && !(await opts.filter(source, destination))) return;
+
+	const statFn = opts?.dereference ? stat : lstat;
+	const srcStats = await statFn.call<V_Context, [string], Promise<Stats>>(this, source);
+	const destStats = await statFn.call<V_Context, [string], Promise<Stats>>(this, destination).catch((error: Exception) => {
+		if (!isNoEntry(error)) throw error;
+	});
+
+	const sameFileSystem = resolveMount(source, this).fs.uuid == resolveMount(destination, this).fs.uuid;
+	cpCheckPaths(source, destination, sameFileSystem, srcStats, destStats);
+
+	if (opts?.errorOnExist && opts.force === false && destStats)
+		throw cpError('ERR_FS_CP_EEXIST', 'EEXIST', `${destination} already exists`, destination);
+
+	switch (srcStats.mode & constants.S_IFMT) {
+		case constants.S_IFDIR: {
+			if (!opts?.recursive) throw cpError('ERR_FS_EISDIR', 'EISDIR', `${source} is a directory (not copied)`, source);
+
+			const [entries, created] = await Promise.all(
+				[
+					readdir.call<V_Context, [string, any], Promise<Dirent[]>>(this, source, { withFileTypes: true }),
+					mkdir.call(this, destination, { recursive: true }),
+				], // Ensure the destination directory exists
+			);
+
+			const _cp = async (dirent: Dirent) => {
+				await cp.call(this, join(source, dirent.name), join(destination, dirent.name), opts);
+			};
+			await Promise.all(entries.map(_cp));
+			if (created !== undefined) await chmod.call(this, destination, srcStats.mode & 0o7777);
+			break;
+		}
+		case constants.S_IFLNK: {
+			const link = await readlink.call<V_Context, [string], Promise<string>>(this, source);
+			if (destStats?.isSymbolicLink()) await unlink.call(this, destination);
+			await symlink.call(this, opts?.verbatimSymlinks ? link : resolve.call(this, dirname(source), link), destination);
+			break;
+		}
+		case constants.S_IFREG: {
+			if (destStats && opts?.force === false) return;
+			if (destStats) await unlink.call(this, destination);
+			await copyFile.call(this, source, destination, opts?.mode);
+			break;
+		}
+		case constants.S_IFBLK:
+		case constants.S_IFCHR:
+			throw UV('ENOSYS', 'cp', source);
+		default:
+			throw cpSpecialFileError(srcStats, destination);
+	}
+
+	// Optionally preserve timestamps
+	if (opts?.preserveTimestamps) {
+		await utimes.call(this, destination, srcStats.atime, srcStats.mtime);
+	}
+}
+cp satisfies typeof promises.cp;
+
+/**
+ * @since Node v18.15.0
+ * @returns Fulfills with an {fs.StatFs} for the file system.
+ */
+export async function statfs(this: V_Context, path: fs.PathLike, opts?: fs.StatFsOptions & { bigint?: false }): Promise<fs.StatsFs>;
+export async function statfs(this: V_Context, path: fs.PathLike, opts: fs.StatFsOptions & { bigint: true }): Promise<fs.BigIntStatsFs>;
+export async function statfs(this: V_Context, path: fs.PathLike, opts?: fs.StatFsOptions): Promise<fs.StatsFs | fs.BigIntStatsFs>;
+export async function statfs(this: V_Context, path: fs.PathLike, opts?: fs.StatFsOptions): Promise<fs.StatsFs | fs.BigIntStatsFs> {
+	path = normalizePath.call(this, path);
+	const { fs } = await _async.resolve(this, path);
+	return _statfs(fs, opts?.bigint);
+}
+
+/**
+ * Retrieves the files matching the specified pattern.
+ */
+export function glob(this: V_Context, pattern: string | readonly string[]): NodeJS.AsyncIterator<string>;
+export function glob(this: V_Context, pattern: string | readonly string[], opt: fs.GlobOptionsWithFileTypes): NodeJS.AsyncIterator<Dirent>;
+export function glob(this: V_Context, pattern: string | readonly string[], opt: fs.GlobOptionsWithoutFileTypes): NodeJS.AsyncIterator<string>;
+export function glob(this: V_Context, pattern: string | readonly string[], opt: fs.GlobOptions): NodeJS.AsyncIterator<Dirent | string>;
+export function glob(this: V_Context, pattern: string | readonly string[], opt?: GlobOptionsU): NodeJS.AsyncIterator<Dirent | string> {
+	pattern = Array.isArray(pattern) ? pattern : [pattern];
+	const $ = contextOf(this);
+	const { cwd = $.pwd, withFileTypes = false, exclude = () => false, followSymlinks = false, maxDepth = Infinity } = opt || {};
+	validateMaxDepth(maxDepth);
+
+	const base = resolve.call($, cwd instanceof URL ? cwd.pathname : cwd);
+	const normalizedPatterns = pattern.map(p => (p.startsWith('/') ? relative.call($, base, p) : p));
+	type Entries = true extends typeof withFileTypes ? Dirent[] : string[];
+
+	async function shouldDescend(path: string, relativePath: string): Promise<boolean> {
+		const descent = _globDescent(normalizedPatterns, relativePath);
+		if (!descent) return false;
+		try {
+			const stats = await lstat.call<V_Context, [string], Promise<Stats>>($, path);
+			if (!stats.isSymbolicLink()) return stats.isDirectory();
+			return (followSymlinks || descent == 'literal') && (await stat.call<V_Context, [string], Promise<Stats>>($, path)).isDirectory();
+		} catch {
+			return false;
+		}
+	}
+
+	async function* recursiveList(dir: string, depth: number = 1): AsyncGenerator<string | Dirent> {
+		if (depth > maxDepth) return;
+		const entries = await readdir.call($, dir, { withFileTypes, encoding: 'utf8' }).catch(() => []);
+
+		for (const entry of entries as Entries) {
+			const fullPath = join(dir, withFileTypes ? entry.name : (entry as any));
+			const relPath = relative.call($, base, fullPath);
+
+			if (typeof exclude != 'function' ? exclude.some(p => matchesGlob(relPath, p)) : exclude((withFileTypes ? entry : relPath) as any))
+				continue;
+
+			if (depth < maxDepth && (await shouldDescend(fullPath, relPath))) yield* recursiveList(fullPath, depth + 1);
+
+			if (normalizedPatterns.some(pattern => matchesGlob(relPath, pattern))) {
+				yield withFileTypes ? entry : relPath;
+			}
+		}
+	}
+
+	return recursiveList(base);
+}
+glob satisfies typeof promises.glob;

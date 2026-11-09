@@ -1,0 +1,42 @@
+name: Bug Report
+description: Report a bug
+type: Bug
+body:
+    - type: input
+      attributes:
+          label: '@zenfs/core version'
+          description: The latest version of @zenfs/core the issue occurs on. You can also put a commit hash here for bugs with unreleased code.
+          placeholder: 1.2.3
+      validations:
+          required: true
+
+    - type: input
+      attributes:
+          label: Host
+          description: What [host(s)](https://262.ecma-international.org/#host) the issue occurs on
+          placeholder: Node.js 22.0.0, Chrome 121, etc.
+      validations:
+          required: true
+
+    - type: textarea
+      attributes:
+          label: Minimal reproduction
+          description: 'A [minimal reproducible example](https://en.wikipedia.org/wiki/Minimal_reproducible_example)'
+          render: typescript
+
+    - type: textarea
+      attributes:
+          label: Logs
+          description: 'Including logs can be very helpful. [tests/logs.js](https://github.com/zen-fs/core/blob/v2.4.1/tests/logs.js) has a good configuration. See [log.Configuration](https://zenfs.dev/core/interfaces/index.log.Configuration.html) for more info.'
+
+    - type: textarea
+      attributes:
+          label: Expected behavior
+
+    - type: textarea
+      attributes:
+          label: Actual behavior
+
+    - type: textarea
+      attributes:
+          label: Additional context

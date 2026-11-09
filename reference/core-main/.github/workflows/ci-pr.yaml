@@ -1,0 +1,68 @@
+name: CI
+
+on:
+    workflow_dispatch:
+    workflow_call:
+    pull_request:
+
+permissions:
+    checks: write
+    contents: read
+
+jobs:
+    ci:
+        name: Continuous Integration
+        runs-on: ubuntu-latest
+        defaults:
+            run:
+                shell: bash
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v5
+
+            - name: Set up Node.js
+              uses: actions/setup-node@v6
+              with:
+                  node-version: latest
+
+            - name: Install dependencies
+              run: npm install
+
+            - name: Formatting
+              run: npm run format:check
+
+            - name: Build
+              run: npm run build
+
+            - name: Linting
+              run: npm run lint
+
+            - name: SPDX License Check
+              run: npm run spdx:check
+
+            - name: 'Unit tests: common'
+              run: npx zenfs-test -pv --common
+
+            - name: 'Unit tests: InMemory'
+              run: npx zenfs-test -pv tests/setup/memory.ts
+
+            - name: 'Unit tests: contexts'
+              run: npx zenfs-test -pv tests/setup/context.ts
+
+            - name: 'Unit tests: Copy-on-Write'
+              run: npx zenfs-test -pv tests/setup/cow.ts
+
+            - name: 'Unit tests: Index'
+              run: npx zenfs-test -pv tests/setup/index.ts
+
+            - name: 'Unit tests: Port'
+              run: npx zenfs-test -pv tests/setup/port.ts -t '!(scaling)'
+
+            - name: 'Unit tests: SingleBuffer'
+              run: npx zenfs-test -pv tests/setup/single-buffer.ts
+
+            - name: 'Unit tests: Fetch'
+              run: npx zenfs-test -pv tests/setup/fetch.ts
+
+            - name: Report coverage
+              run: npx zenfs-test --report-only

@@ -1,0 +1,107 @@
+{
+	"name": "@zenfs/core",
+	"version": "2.9.0",
+	"description": "A filesystem, anywhere",
+	"funding": {
+		"type": "individual",
+		"url": "https://github.com/sponsors/james-pre"
+	},
+	"main": "dist/index.js",
+	"types": "dist/index.d.ts",
+	"keywords": [
+		"filesystem",
+		"node",
+		"storage",
+		"fs",
+		"browser"
+	],
+	"bin": {
+		"make-index": "scripts/make-index.js",
+		"zenfs-test": "scripts/test.js",
+		"zci": "scripts/ci-cli.js"
+	},
+	"files": [
+		"dist",
+		"tests",
+		"scripts/deprecated.js",
+		"license.md",
+		"eslint.shared.js"
+	],
+	"type": "module",
+	"homepage": "https://zenfs.dev/core",
+	"author": "James Prevett <jp@jamespre.dev> (https://jamespre.dev)",
+	"contributors": [
+		"John Vilk <jvilk@cs.umass.edu>"
+	],
+	"license": "LGPL-3.0-or-later",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/zen-fs/core.git"
+	},
+	"bugs": {
+		"url": "https://github.com/zen-fs/core/issues"
+	},
+	"engines": {
+		"node": ">= 18"
+	},
+	"exports": {
+		".": "./dist/index.js",
+		"./*.js": "./dist/*.js",
+		"./*": "./dist/*.js",
+		"./emulation/*": "./dist/node/*",
+		"./promises": "./dist/node/promises.js",
+		"./readline": "./dist/node/readline.js",
+		"./eslint": "./eslint.shared.js",
+		"./tests/*.ts": "./tests/*.ts",
+		"./tests/*.js": "./tests/*.js",
+		"./tests/*": "./tests/*.js",
+		"./types/*": "./types/*"
+	},
+	"publishConfig": {
+		"access": "public",
+		"provenance": true
+	},
+	"scripts": {
+		"format": "prettier --write .",
+		"format:check": "prettier --check .",
+		"spdx:check": "npx lice -a src tests/*.ts tests/**/*.test.ts",
+		"spdx:fix": "npx lice -aw src tests/*.ts tests/**/*.test.ts",
+		"lint": "eslint src tests",
+		"test": "npx -s zenfs-test -abc --report",
+		"test:native": "npx -s zenfs-test tests/native-setup.ts --verbose",
+		"test:perf": "zbench",
+		"build": "tsc --build",
+		"dev": "tsc --build --watch",
+		"prepublishOnly": "npm run build"
+	},
+	"dependencies": {
+		"@types/node": "^26.6.0",
+		"@zenfs/streams": "^1.0.2",
+		"buffer": "^6.0.3",
+		"eventemitter3": "^5.0.1",
+		"kerium": "^1.5.0",
+		"memium": "^1.1.0",
+		"utilium": "^3.7.0"
+	},
+	"devDependencies": {
+		"@zenfs/devel": "^1.1.0",
+		"eslint": "^10.1.0",
+		"prettier": "^3.2.5",
+		"typedoc": "^0.28.18",
+		"typescript": "^6.0.0",
+		"zbench-js": "^0.2.0"
+	},
+	"overrides": {
+		"@zenfs/devel": {
+			"@zenfs/core": "file:../../.."
+		}
+	},
+	"prettier": {
+		"singleQuote": true,
+		"useTabs": true,
+		"tabWidth": 4,
+		"printWidth": 150,
+		"arrowParens": "avoid",
+		"experimentalOperatorPosition": "start"
+	}
+}

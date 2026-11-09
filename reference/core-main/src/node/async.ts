@@ -1,0 +1,914 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+import type { BufferView } from 'node:buffer';
+import type { Abortable } from 'node:events';
+import type * as fs from 'node:fs';
+import type { V_Context } from '../context.js';
+import type { Callback } from '../utils.js';
+import type { FileContents } from '../vfs/shared.js';
+import type { Dir, Dirent } from './dir.js';
+import type { Stats } from './stats.js';
+import type { GlobOptionsU } from './types.js';
+
+import { Buffer } from 'buffer';
+import { UV, type Exception } from 'kerium';
+import { R_OK } from '../constants.js';
+import { normalizeMode, normalizePath } from '../utils.js';
+import { blobType, promisifyResults, setPromisified, validateData } from './utils.js';
+import { FSWatcher, StatWatcher } from '../vfs/watchers.js';
+import * as promises from './promises.js';
+import { BigIntStats } from './stats.js';
+import {
+	OperationsHandle,
+	ReadStream,
+	validateOperations,
+	WriteStream,
+	type ReadStreamOptions,
+	type StreamOperations,
+	type WriteStreamOptions,
+} from './streams.js';
+
+const nop = () => {};
+
+/**
+ * Asynchronous rename. No arguments other than a possible exception are given to the completion callback.
+ */
+export function rename(this: V_Context, oldPath: fs.PathLike, newPath: fs.PathLike, cb: Callback = nop): void {
+	promises.rename.call(this, oldPath, newPath).then(() => cb(null), cb);
+}
+rename satisfies Omit<typeof fs.rename, '__promisify__'>;
+
+/**
+ * Test whether or not `path` exists by checking with the file system.
+ * Then call the callback argument with either true or false.
+ * According to Node.js: deprecated Use {@link stat} or {@link access} instead.
+ */
+export function exists(this: V_Context, path: fs.PathLike, cb: (exists: boolean) => unknown = nop): void {
+	promises.exists.call(this, path).then(cb, () => cb(false));
+}
+exists satisfies Omit<typeof fs.exists, '__promisify__'>;
+export declare namespace exists {
+	const __promisify__: typeof fs.exists.__promisify__;
+}
+setPromisified(exists, function (this: V_Context, path: fs.PathLike) {
+	return new Promise<boolean>(resolve => exists.call(this, path, resolve));
+});
+
+export function stat(this: V_Context, path: fs.PathLike, callback: Callback<[Stats]>): void;
+export function stat(this: V_Context, path: fs.PathLike, options: { bigint?: false; throwIfNoEntry?: true }, callback: Callback<[Stats]>): void;
+export function stat(this: V_Context, path: fs.PathLike, options: { bigint: true; throwIfNoEntry?: true }, callback: Callback<[BigIntStats]>): void;
+export function stat(
+	this: V_Context,
+	path: fs.PathLike,
+	options: { bigint?: false; throwIfNoEntry: false },
+	callback: Callback<[Stats | undefined]>,
+): void;
+export function stat(
+	this: V_Context,
+	path: fs.PathLike,
+	options: { bigint: true; throwIfNoEntry: false },
+	callback: Callback<[BigIntStats | undefined]>,
+): void;
+export function stat(this: V_Context, path: fs.PathLike, options: fs.StatOptions, callback: Callback<[Stats | BigIntStats | undefined]>): void;
+export function stat(
+	this: V_Context,
+	path: fs.PathLike,
+	options?: fs.StatOptions | Callback<[Stats]>,
+	callback: Callback<[Stats]> | Callback<[BigIntStats]> = nop,
+): void {
+	callback = typeof options == 'function' ? options : callback;
+	promises.stat
+		.call(this, path, typeof options != 'function' ? options : {})
+		.then(stats => (callback as Callback<[Stats] | [BigIntStats]>)(null, stats as any), callback);
+}
+stat satisfies Omit<typeof fs.stat, '__promisify__'>;
+
+/**
+ * Asynchronous `lstat`.
+ * `lstat()` is identical to `stat()`, except that if path is a symbolic link,
+ * then the link itself is stat-ed, not the file that it refers to.
+ */
+export function lstat(this: V_Context, path: fs.PathLike, callback: Callback<[Stats]>): void;
+export function lstat(this: V_Context, path: fs.PathLike, options: fs.StatOptions & { bigint?: false }, callback: Callback<[Stats]>): void;
+export function lstat(this: V_Context, path: fs.PathLike, options: fs.StatOptions & { bigint: true }, callback: Callback<[BigIntStats]>): void;
+export function lstat(this: V_Context, path: fs.PathLike, options: fs.StatOptions, callback: Callback<[Stats | BigIntStats]>): void;
+export function lstat(
+	this: V_Context,
+	path: fs.PathLike,
+	options?: fs.StatOptions | Callback<[Stats]>,
+	callback: Callback<[Stats]> | Callback<[BigIntStats]> = nop,
+): void {
+	callback = typeof options == 'function' ? options : callback;
+	promises.lstat
+		.call<V_Context, [fs.PathLike, fs.StatOptions?], Promise<Stats | BigIntStats>>(this, path, typeof options != 'function' ? options : {})
+		.then(stats => (callback as Callback<[Stats | BigIntStats]>)(null, stats), callback);
+}
+lstat satisfies Omit<typeof fs.lstat, '__promisify__'>;
+
+export function truncate(this: V_Context, path: fs.PathLike, cb?: Callback): void;
+export function truncate(this: V_Context, path: fs.PathLike, len: number, cb?: Callback): void;
+export function truncate(this: V_Context, path: fs.PathLike, cbLen: number | Callback = 0, cb: Callback = nop): void {
+	cb = typeof cbLen === 'function' ? cbLen : cb;
+	const len = typeof cbLen === 'number' ? cbLen : 0;
+	promises.truncate.call(this, path, len).then(() => cb(null), cb);
+}
+truncate satisfies Omit<typeof fs.truncate, '__promisify__'>;
+
+export function unlink(this: V_Context, path: fs.PathLike, cb: Callback = nop): void {
+	promises.unlink.call(this, path).then(() => cb(null), cb);
+}
+unlink satisfies Omit<typeof fs.unlink, '__promisify__'>;
+
+/**
+ * Asynchronous file open.
+ * Exclusive mode ensures that path is newly created.
+ * Mode defaults to `0644`
+ *
+ * @see https://nodejs.org/api/fs.html#fsopenpath-flags-mode-callback
+ * @param flags {@link https://nodejs.org/api/fs.html#file-system-flags}
+ */
+export function open(this: V_Context, path: fs.PathLike, cb: Callback<[number]>): void;
+export function open(this: V_Context, path: fs.PathLike, flag: fs.OpenMode | undefined, cb?: Callback<[number]>): void;
+export function open(
+	this: V_Context,
+	path: fs.PathLike,
+	flag: fs.OpenMode | undefined,
+	mode: fs.Mode | null | undefined,
+	cb?: Callback<[number]>,
+): void;
+export function open(
+	this: V_Context,
+	path: fs.PathLike,
+	flag?: fs.OpenMode | Callback<[number]>,
+	cbMode?: fs.Mode | null | Callback<[number]>,
+	cb: Callback<[number]> = nop,
+): void {
+	if (typeof flag == 'function') [cb, flag] = [flag, undefined];
+	if (typeof cbMode == 'function') [cb, cbMode] = [cbMode, undefined];
+	promises.open.call(this, path, flag, normalizeMode(cbMode, 0o644)).then(handle => cb(null, handle.fd), cb);
+}
+open satisfies Omit<typeof fs.open, '__promisify__'>;
+
+/**
+ * Asynchronously reads the entire contents of a file.
+ * @option encoding The string encoding for the file contents. Defaults to `null`.
+ * @option flag Defaults to `'r'`.
+ * @param cb If no encoding is specified, then the raw buffer is returned.
+ */
+export function readFile(this: V_Context, filename: fs.PathOrFileDescriptor, cb: Callback<[Uint8Array]>): void;
+export function readFile<T extends NodeJS.ArrayBufferView>(
+	this: V_Context,
+	filename: fs.PathOrFileDescriptor,
+	options: fs.ReadFileOptionsWithBuffer<T>,
+	cb: Callback<[BufferView<T>]>,
+): void;
+export function readFile(
+	this: V_Context,
+	filename: fs.PathOrFileDescriptor,
+	options: { encoding?: null; flag?: string } & Abortable,
+	callback?: Callback<[Uint8Array]>,
+): void;
+export function readFile(
+	this: V_Context,
+	filename: fs.PathOrFileDescriptor,
+	options: ({ encoding: BufferEncoding; flag?: string } & Abortable) | BufferEncoding,
+	cb: Callback<[string]>,
+): void;
+export function readFile(
+	this: V_Context,
+	filename: fs.PathOrFileDescriptor,
+	options?: fs.WriteFileOptions | fs.ReadFileOptionsWithBuffer<NodeJS.ArrayBufferView> | BufferEncoding | Callback<[Uint8Array]>,
+	cb: Callback<[string]> | Callback<[Uint8Array]> | Callback<[BufferView<any>]> = nop,
+) {
+	cb = typeof options === 'function' ? options : cb;
+
+	promises.readFile
+		.call<V_Context, [fs.PathLike | promises.FileHandle, fs.ReadFileOptions | BufferEncoding | null], Promise<string | Buffer>>(
+			this,
+			typeof filename == 'number' ? new promises.FileHandle(this, filename) : filename,
+			typeof options === 'function' ? null : (options as fs.ReadFileOptions),
+		)
+		.then(data => (cb as Callback<[string | Uint8Array]>)(null, data), cb);
+}
+readFile satisfies Omit<typeof fs.readFile, '__promisify__'>;
+
+/**
+ * Asynchronously writes data to a file, replacing the file if it already
+ * exists.
+ *
+ * The encoding option is ignored if data is a buffer.
+ *
+ * @option encoding Defaults to `'utf8'`.
+ * @option mode Defaults to `0644`.
+ * @option flag Defaults to `'w'`.
+ */
+export function writeFile(this: V_Context, filename: fs.PathOrFileDescriptor, data: FileContents, cb?: Callback): void;
+export function writeFile(this: V_Context, filename: fs.PathOrFileDescriptor, data: FileContents, encoding?: BufferEncoding, cb?: Callback): void;
+export function writeFile(this: V_Context, filename: fs.PathOrFileDescriptor, data: FileContents, options?: fs.WriteFileOptions, cb?: Callback): void;
+export function writeFile(
+	this: V_Context,
+	filename: fs.PathOrFileDescriptor,
+	data: FileContents,
+	cbEncOpts?: fs.WriteFileOptions | Callback,
+	cb: Callback = nop,
+): void {
+	cb = typeof cbEncOpts === 'function' ? cbEncOpts : cb;
+	promises.writeFile
+		.call(
+			this,
+			typeof filename == 'number' ? new promises.FileHandle(this, filename) : filename,
+			data,
+			typeof cbEncOpts != 'function' ? cbEncOpts : null,
+		)
+		.then(() => cb(null), cb);
+}
+writeFile satisfies Omit<typeof fs.writeFile, '__promisify__'>;
+
+/**
+ * Asynchronously append data to a file, creating the file if it not yet
+ * exists.
+ *
+ * @option encoding Defaults to `'utf8'`.
+ * @option mode Defaults to `0644`.
+ * @option flag Defaults to `'a'`.
+ */
+export function appendFile(this: V_Context, filename: fs.PathOrFileDescriptor, data: FileContents, cb?: Callback): void;
+export function appendFile(
+	this: V_Context,
+	filename: fs.PathOrFileDescriptor,
+	data: FileContents,
+	options?: fs.EncodingOption & { mode?: fs.Mode; flag?: fs.OpenMode },
+	cb?: Callback,
+): void;
+export function appendFile(this: V_Context, filename: fs.PathOrFileDescriptor, data: FileContents, encoding?: BufferEncoding, cb?: Callback): void;
+export function appendFile(
+	this: V_Context,
+	filename: fs.PathOrFileDescriptor,
+	data: FileContents,
+	cbEncOpts?: (fs.EncodingOption & { mode?: fs.Mode; flag?: fs.OpenMode }) | Callback,
+	cb: Callback = nop,
+): void {
+	const optionsOrEncoding = typeof cbEncOpts != 'function' ? cbEncOpts : undefined;
+	cb = typeof cbEncOpts === 'function' ? cbEncOpts : cb;
+	promises.appendFile
+		.call(this, typeof filename == 'number' ? new promises.FileHandle(this, filename) : filename, data, optionsOrEncoding)
+		.then(() => cb(null), cb);
+}
+appendFile satisfies Omit<typeof fs.appendFile, '__promisify__'>;
+
+/**
+ * Asynchronous `fstat`.
+ * `fstat()` is identical to `stat()`, except that the file to be stat-ed is specified by the file descriptor `fd`.
+ */
+export function fstat(this: V_Context, fd: number, cb: Callback<[Stats]>): void;
+export function fstat(this: V_Context, fd: number, options: fs.StatOptions & { bigint?: false }, cb: Callback<[Stats]>): void;
+export function fstat(this: V_Context, fd: number, options: fs.StatOptions & { bigint: true }, cb: Callback<[BigIntStats]>): void;
+export function fstat(
+	this: V_Context,
+	fd: number,
+	options?: fs.StatOptions | Callback<[Stats]>,
+	cb: Callback<[Stats]> | Callback<[BigIntStats]> = nop,
+): void {
+	cb = typeof options == 'function' ? options : cb;
+
+	new promises.FileHandle(this, fd)
+		.stat()
+		.then(
+			stats => (cb as Callback<[Stats | BigIntStats]>)(null, typeof options == 'object' && options?.bigint ? new BigIntStats(stats) : stats),
+			cb,
+		);
+}
+fstat satisfies Omit<typeof fs.fstat, '__promisify__'>;
+
+export function close(this: V_Context, fd: number, cb: Callback = nop): void {
+	new promises.FileHandle(this, fd).close().then(() => cb(null), cb);
+}
+close satisfies Omit<typeof fs.close, '__promisify__'>;
+
+export function ftruncate(this: V_Context, fd: number, cb?: Callback): void;
+export function ftruncate(this: V_Context, fd: number, len?: number, cb?: Callback): void;
+export function ftruncate(this: V_Context, fd: number, lenOrCB?: number | Callback, cb: Callback = nop): void {
+	const length = typeof lenOrCB === 'number' ? lenOrCB : 0;
+	cb = typeof lenOrCB === 'function' ? lenOrCB : cb;
+	new promises.FileHandle(this, fd).truncate(length).then(() => cb(null), cb);
+}
+ftruncate satisfies Omit<typeof fs.ftruncate, '__promisify__'>;
+
+export function fsync(this: V_Context, fd: number, cb: Callback = nop): void {
+	new promises.FileHandle(this, fd).sync().then(() => cb(null), cb);
+}
+fsync satisfies Omit<typeof fs.fsync, '__promisify__'>;
+
+export function fdatasync(this: V_Context, fd: number, cb: Callback = nop): void {
+	new promises.FileHandle(this, fd).datasync().then(() => cb(null), cb);
+}
+fdatasync satisfies Omit<typeof fs.fdatasync, '__promisify__'>;
+
+/**
+ * Write buffer to the file specified by `fd`.
+ * Note that it is unsafe to use fs.write multiple times on the same file without waiting for the callback.
+ * @param buffer Uint8Array containing the data to write to the file.
+ * @param offset Offset in the buffer to start reading data from.
+ * @param length The amount of bytes to write to the file.
+ * @param position Offset from the beginning of the file where this data should be written.
+ * If position is null, the data will be written at the current position.
+ * @param cb The number specifies the number of bytes written into the file.
+ */
+export function write(this: V_Context, fd: number, buffer: Uint8Array, offset: number, length: number, cb?: Callback<[number, Uint8Array]>): void;
+export function write(
+	this: V_Context,
+	fd: number,
+	buffer: Uint8Array,
+	offset: number,
+	length: number,
+	position?: number,
+	cb?: Callback<[number, Uint8Array]>,
+): void;
+export function write(this: V_Context, fd: number, buffer: Uint8Array, options: fs.WriteOptions, cb?: Callback<[number, Uint8Array]>): void;
+export function write(this: V_Context, fd: number, data: FileContents, cb?: Callback<[number, string]>): void;
+export function write(this: V_Context, fd: number, data: FileContents, position?: number, cb?: Callback<[number, string]>): void;
+export function write(
+	this: V_Context,
+	fd: number,
+	data: FileContents,
+	position: number | null,
+	encoding: BufferEncoding,
+	cb?: Callback<[number, string]>,
+): void;
+export function write(
+	this: V_Context,
+	fd: number,
+	data: FileContents,
+	cbPosOff?: number | fs.WriteOptions | Callback<[number, string]> | null,
+	cbLenEnc?: number | BufferEncoding | Callback<[number, Uint8Array]> | Callback<[number, string]>,
+	cbPosEnc?: number | BufferEncoding | Callback<[number, Uint8Array]> | Callback<[number, string]>,
+	cb: Callback<[number, Uint8Array]> | Callback<[number, string]> = nop,
+): void {
+	validateData(data, 'buffer');
+	let buffer: Buffer, offset: number, length: number, position: number | null, encoding: BufferEncoding;
+	const handle = new promises.FileHandle(this, fd);
+
+	const _cb = ([cbPosOff, cbLenEnc, cbPosEnc].find(arg => typeof arg === 'function') ?? cb) as Callback<[number, FileContents]>;
+
+	if (typeof data === 'string') {
+		// (fd, string, [position?, [encoding?]], cb?)
+		position = typeof cbPosOff === 'number' ? cbPosOff : null;
+		encoding = typeof cbLenEnc === 'string' ? cbLenEnc : 'utf8';
+		buffer = Buffer.from(data, encoding);
+		offset = 0;
+		length = buffer.byteLength;
+	} else if (typeof cbPosOff == 'object' && cbPosOff !== null) {
+		// (fd, buffer, options, cb?)
+		buffer = Buffer.from(data.buffer, data.byteOffset, data.byteLength);
+		offset = cbPosOff.offset ?? 0;
+		length = cbPosOff.length ?? buffer.byteLength - offset;
+		position = cbPosOff.position ?? null;
+	} else {
+		// (fd, buffer, [offset?, [length?, [position?]]], cb?)
+		buffer = Buffer.from(data.buffer, data.byteOffset, data.byteLength);
+		offset = typeof cbPosOff === 'number' ? cbPosOff : 0;
+		length = typeof cbLenEnc === 'number' ? cbLenEnc : buffer.byteLength - offset;
+		position = typeof cbPosEnc === 'number' ? cbPosEnc : null;
+	}
+
+	handle.write(buffer, offset, length, position).then(({ bytesWritten }) => _cb(null, bytesWritten, data), _cb);
+}
+write satisfies Omit<typeof fs.write, '__promisify__'>;
+export declare namespace write {
+	const __promisify__: typeof fs.write.__promisify__;
+}
+promisifyResults(write, 'bytesWritten', 'buffer');
+
+/**
+ * Read data from the file specified by `fd`.
+ * @param buffer The buffer that the data will be written to.
+ * @param offset The offset within the buffer where writing will start.
+ * @param length An integer specifying the number of bytes to read.
+ * @param position An integer specifying where to begin reading from in the file.
+ * If position is null, data will be read from the current file position.
+ * @param cb The number is the number of bytes read
+ */
+export function read(this: V_Context, fd: number, cb: Callback<[number, NonSharedBuffer]>): void;
+export function read<T extends NodeJS.ArrayBufferView = NonSharedBuffer>(
+	this: V_Context,
+	fd: number,
+	options: fs.ReadOptionsWithBuffer<T>,
+	cb: Callback<[number, T]>,
+): void;
+export function read<T extends NodeJS.ArrayBufferView>(
+	this: V_Context,
+	fd: number,
+	buffer: T,
+	options: fs.ReadOptions,
+	cb: Callback<[number, T]>,
+): void;
+export function read<T extends NodeJS.ArrayBufferView>(this: V_Context, fd: number, buffer: T, cb: Callback<[number, T]>): void;
+export function read(
+	this: V_Context,
+	fd: number,
+	buffer: NodeJS.ArrayBufferView,
+	offset: number,
+	length: number,
+	position?: fs.ReadPosition | null,
+	cb?: Callback<[number, NodeJS.ArrayBufferView]>,
+): void;
+export function read(this: V_Context, fd: number, ...args: unknown[]): void {
+	const cb = (typeof args.at(-1) == 'function' ? args.pop() : nop) as Callback<[number, NodeJS.ArrayBufferView]>;
+	new promises.FileHandle(this, fd)
+		.read(...(args as [NodeJS.ArrayBufferView, number?, number?, number?]))
+		.then(({ bytesRead, buffer }) => cb(null, bytesRead, buffer), cb);
+}
+read satisfies Omit<typeof fs.read, '__promisify__'>;
+export declare namespace read {
+	const __promisify__: typeof fs.read.__promisify__;
+}
+promisifyResults(read, 'bytesRead', 'buffer');
+
+export function fchown(this: V_Context, fd: number, uid: number, gid: number, cb: Callback = nop): void {
+	new promises.FileHandle(this, fd).chown(uid, gid).then(() => cb(null), cb);
+}
+fchown satisfies Omit<typeof fs.fchown, '__promisify__'>;
+
+export function fchmod(this: V_Context, fd: number, mode: string | number, cb: Callback): void {
+	new promises.FileHandle(this, fd).chmod(mode).then(() => cb(null), cb);
+}
+fchmod satisfies Omit<typeof fs.fchmod, '__promisify__'>;
+
+/**
+ * Change the file timestamps of a file referenced by the supplied file descriptor.
+ */
+export function futimes(this: V_Context, fd: number, atime: number | Date, mtime: number | Date, cb: Callback = nop): void {
+	new promises.FileHandle(this, fd).utimes(atime, mtime).then(() => cb(null), cb);
+}
+futimes satisfies Omit<typeof fs.futimes, '__promisify__'>;
+
+export function rmdir(this: V_Context, path: fs.PathLike, cb?: Callback): void;
+export function rmdir(this: V_Context, path: fs.PathLike, options: fs.RmDirOptions, cb?: Callback): void;
+export function rmdir(this: V_Context, path: fs.PathLike, options?: fs.RmDirOptions | Callback, cb: Callback = nop): void {
+	cb = typeof options == 'function' ? (options as Callback) : cb;
+	promises.rmdir.call(this, path).then(() => cb(null), cb);
+}
+rmdir satisfies Omit<typeof fs.rmdir, '__promisify__'>;
+
+/**
+ * Asynchronous `mkdir`.
+ * @param mode defaults to `0777`
+ */
+export function mkdir(this: V_Context, path: fs.PathLike, mode?: fs.Mode, cb: Callback = nop): void {
+	promises.mkdir.call(this, path, mode).then(() => cb(null), cb);
+}
+mkdir satisfies Omit<typeof fs.mkdir, '__promisify__'>;
+
+/**
+ * Asynchronous `readdir`. Reads the contents of a directory.
+ * The callback gets two arguments `(err, files)` where `files` is an array of
+ * the names of the files in the directory excluding `'.'` and `'..'`.
+ */
+export function readdir(this: V_Context, path: fs.PathLike, cb: Callback<[string[]]>): void;
+export function readdir(this: V_Context, path: fs.PathLike, options: { withFileTypes?: false }, cb: Callback<[string[]]>): void;
+export function readdir(this: V_Context, path: fs.PathLike, options: { withFileTypes: true }, cb: Callback<[Dirent[]]>): void;
+export function readdir(
+	this: V_Context,
+	path: fs.PathLike,
+	_options: { withFileTypes?: boolean } | Callback<[string[]]>,
+	cb: Callback<[string[]]> | Callback<[Dirent[]]> = nop,
+): void {
+	cb = typeof _options == 'function' ? _options : cb;
+	const options = typeof _options != 'function' ? _options : {};
+	promises.readdir
+		.call(this, path, options as object)
+
+		.then(entries => cb(null, entries as any), cb);
+}
+readdir satisfies Omit<typeof fs.readdir, '__promisify__'>;
+
+export function link(this: V_Context, existing: fs.PathLike, newpath: fs.PathLike, cb: Callback = nop): void {
+	promises.link.call(this, existing, newpath).then(() => cb(null), cb);
+}
+link satisfies Omit<typeof fs.link, '__promisify__'>;
+
+/**
+ * Asynchronous `symlink`.
+ * @param target target path
+ * @param path link path
+ * Type defaults to file
+ */
+export function symlink(this: V_Context, target: fs.PathLike, path: fs.PathLike, cb?: Callback): void;
+export function symlink(this: V_Context, target: fs.PathLike, path: fs.PathLike, type?: fs.symlink.Type, cb?: Callback): void;
+export function symlink(this: V_Context, target: fs.PathLike, path: fs.PathLike, typeOrCB?: fs.symlink.Type | Callback, cb: Callback = nop): void {
+	const type = typeof typeOrCB === 'string' ? typeOrCB : 'file';
+	cb = typeof typeOrCB === 'function' ? typeOrCB : cb;
+	promises.symlink.call(this, target, path, type).then(() => cb(null), cb);
+}
+symlink satisfies Omit<typeof fs.symlink, '__promisify__'>;
+
+export function readlink(this: V_Context, path: fs.PathLike, callback: Callback<[string]>): void;
+export function readlink(this: V_Context, path: fs.PathLike, options: fs.BufferEncodingOption, callback: Callback<[Uint8Array]>): void;
+export function readlink(this: V_Context, path: fs.PathLike, options: fs.EncodingOption, callback: Callback<[string | Uint8Array]>): void;
+export function readlink(this: V_Context, path: fs.PathLike, options: fs.EncodingOption, callback: Callback<[string]>): void;
+export function readlink(
+	this: V_Context,
+	path: fs.PathLike,
+	options: fs.BufferEncodingOption | fs.EncodingOption | Callback<[string]>,
+	callback: Callback<[string]> | Callback<[Uint8Array]> = nop,
+): void {
+	callback = typeof options == 'function' ? options : callback;
+	promises.readlink
+		.call(this, path, typeof options == 'function' ? null : options)
+		.then(result => (callback as Callback<[string | Uint8Array]>)(null, result), callback);
+}
+readlink satisfies Omit<typeof fs.readlink, '__promisify__'>;
+
+export function chown(this: V_Context, path: fs.PathLike, uid: number, gid: number, cb: Callback = nop): void {
+	promises.chown.call(this, path, uid, gid).then(() => cb(null), cb);
+}
+chown satisfies Omit<typeof fs.chown, '__promisify__'>;
+
+export function lchown(this: V_Context, path: fs.PathLike, uid: number, gid: number, cb: Callback = nop): void {
+	promises.lchown.call(this, path, uid, gid).then(() => cb(null), cb);
+}
+lchown satisfies Omit<typeof fs.lchown, '__promisify__'>;
+
+export function chmod(this: V_Context, path: fs.PathLike, mode: number | string, cb: Callback = nop): void {
+	promises.chmod.call(this, path, mode).then(() => cb(null), cb);
+}
+chmod satisfies Omit<typeof fs.chmod, '__promisify__'>;
+
+export function lchmod(this: V_Context, path: fs.PathLike, mode: number | string, cb: Callback = nop): void {
+	promises.lchmod.call(this, path, mode).then(() => cb(null), cb);
+}
+lchmod satisfies Omit<typeof fs.lchmod, '__promisify__'>;
+
+/**
+ * Change file timestamps of the file referenced by the supplied path.
+ */
+export function utimes(this: V_Context, path: fs.PathLike, atime: number | Date, mtime: number | Date, cb: Callback = nop): void {
+	promises.utimes.call(this, path, atime, mtime).then(() => cb(null), cb);
+}
+utimes satisfies Omit<typeof fs.utimes, '__promisify__'>;
+
+/**
+ * Change file timestamps of the file referenced by the supplied path.
+ */
+export function lutimes(this: V_Context, path: fs.PathLike, atime: number | Date, mtime: number | Date, cb: Callback = nop): void {
+	promises.lutimes.call(this, path, atime, mtime).then(() => cb(null), cb);
+}
+lutimes satisfies Omit<typeof fs.lutimes, '__promisify__'>;
+
+/**
+ * Asynchronous `realpath`. The callback gets two arguments
+ * `(err, resolvedPath)`. May use `process.cwd` to resolve relative paths.
+ */
+type RealpathCallback<T> = (error: NodeJS.ErrnoException | null, resolvedPath: T) => void;
+
+export function realpath(this: V_Context, path: fs.PathLike, options: fs.EncodingOption, callback: RealpathCallback<string>): void;
+export function realpath(this: V_Context, path: fs.PathLike, options: fs.BufferEncodingOption, callback: RealpathCallback<NonSharedBuffer>): void;
+export function realpath(this: V_Context, path: fs.PathLike, options: fs.EncodingOption, callback: RealpathCallback<string | NonSharedBuffer>): void;
+export function realpath(this: V_Context, path: fs.PathLike, callback: RealpathCallback<string>): void;
+export function realpath(
+	this: V_Context,
+	path: fs.PathLike,
+	options: fs.EncodingOption | fs.BufferEncodingOption | RealpathCallback<string>,
+	callback?: RealpathCallback<string> | RealpathCallback<NonSharedBuffer>,
+): void {
+	const cb = (typeof options == 'function' ? options : (callback ?? nop)) as Callback<[string | NonSharedBuffer]>;
+	promises.realpath
+		.call<V_Context, [fs.PathLike, fs.EncodingOption | fs.BufferEncodingOption], Promise<string | NonSharedBuffer>>(
+			this,
+			path,
+			typeof options == 'function' ? null : options,
+		)
+		.then(result => cb(null, result), cb);
+}
+realpath.native = realpath;
+realpath satisfies Omit<typeof fs.realpath, '__promisify__'>;
+
+export function access(this: V_Context, path: fs.PathLike, cb: Callback): void;
+export function access(this: V_Context, path: fs.PathLike, mode: number, cb: Callback): void;
+export function access(this: V_Context, path: fs.PathLike, cbMode: number | Callback, cb: Callback = nop): void {
+	const mode = typeof cbMode === 'number' ? cbMode : R_OK;
+	cb = typeof cbMode === 'function' ? cbMode : cb;
+	promises.access.call(this, path, mode).then(() => cb(null), cb);
+}
+access satisfies Omit<typeof fs.access, '__promisify__'>;
+
+const statWatchers = new Map<string, StatWatcher>();
+
+/**
+ * Watch for changes on a file. The listener is called with the current and previous `Stats` whenever they differ.
+ * Every call for the same file returns the same `StatWatcher`.
+ * @param options `bigint`, `persistent`, and `interval` (in milliseconds)
+ */
+export function watchFile(this: V_Context, path: fs.PathLike, listener: (curr: Stats, prev: Stats) => void): StatWatcher;
+export function watchFile(
+	this: V_Context,
+	path: fs.PathLike,
+	options: fs.WatchFileOptions & { bigint: true },
+	listener: (curr: BigIntStats, prev: BigIntStats) => void,
+): StatWatcher;
+export function watchFile(
+	this: V_Context,
+	path: fs.PathLike,
+	options: fs.WatchFileOptions & { bigint?: false },
+	listener: (curr: Stats, prev: Stats) => void,
+): StatWatcher;
+export function watchFile(
+	this: V_Context,
+	path: fs.PathLike,
+	options: fs.WatchFileOptions | ((curr: Stats, prev: Stats) => void),
+	listener?: ((curr: Stats, prev: Stats) => void) | ((curr: BigIntStats, prev: BigIntStats) => void),
+): StatWatcher {
+	const normalizedPath = normalizePath.call(this, path);
+	const opts = typeof options != 'function' ? options : {};
+	listener = typeof options == 'function' ? options : listener;
+
+	if (!listener) throw UV('EINVAL', 'watch', path.toString());
+
+	let watcher = statWatchers.get(normalizedPath);
+	if (!watcher) {
+		watcher = new StatWatcher(this, normalizedPath, opts);
+		statWatchers.set(normalizedPath, watcher);
+	}
+
+	watcher.on('change', listener as (curr: Stats | BigIntStats, prev: Stats | BigIntStats) => void);
+	return watcher;
+}
+watchFile satisfies Omit<typeof fs.watchFile, '__promisify__'>;
+
+/**
+ * Stop watching for changes on a file.
+ * If `listener` is given, only it is removed. Once no listeners remain, the file is no longer watched.
+ */
+export function unwatchFile(this: V_Context, path: fs.PathLike, listener?: (curr: Stats, prev: Stats) => void): void {
+	const normalizedPath = normalizePath.call(this, path);
+	const watcher = statWatchers.get(normalizedPath);
+	if (!watcher) return;
+
+	if (listener) watcher.off('change', listener);
+	else watcher.removeAllListeners('change');
+
+	if (watcher.listenerCount('change')) return;
+	watcher.stop();
+	statWatchers.delete(normalizedPath);
+}
+unwatchFile satisfies Omit<typeof fs.unwatchFile, '__promisify__'>;
+
+export function watch(this: V_Context, path: fs.PathLike, listener?: (event: string, filename: string) => any): FSWatcher;
+export function watch(this: V_Context, path: fs.PathLike, options: fs.WatchOptions, listener?: (event: string, filename: string) => any): FSWatcher;
+export function watch(
+	this: V_Context,
+	path: fs.PathLike,
+	options?: fs.WatchOptions | ((event: string, filename: string) => any),
+	listener?: (event: string, filename: string) => any,
+): FSWatcher {
+	const watcher = new FSWatcher<string>(this, normalizePath.call(this, path), typeof options == 'object' ? options : {});
+	listener = typeof options == 'function' ? options : listener;
+	watcher.on('change', listener || nop);
+	return watcher;
+}
+watch satisfies Omit<typeof fs.watch, '__promisify__'>;
+
+/**
+ * Resolves the handle a file stream uses: the `fd` option if given, otherwise `path` opened with the `flags` option.
+ */
+function streamHandle(
+	context: V_Context,
+	path: fs.PathLike,
+	defaultFlags: string,
+	options: ReadStreamOptions | WriteStreamOptions,
+): promises.FileHandle | OperationsHandle | Promise<promises.FileHandle | OperationsHandle> {
+	const { fd } = options;
+	const operations = options.fs as StreamOperations | undefined;
+	if (operations) {
+		validateOperations(operations, defaultFlags == 'r' ? 'read' : 'write', options);
+		return OperationsHandle.open(operations, path, fd, options.flags ?? defaultFlags, options.mode ?? 0o666);
+	}
+	if (typeof fd == 'number') return new promises.FileHandle(context, fd);
+	if (fd != null) return fd as promises.FileHandle;
+	return promises.open.call(context, path, options.flags ?? defaultFlags, options.mode);
+}
+
+/**
+ * Opens a file in read mode and creates a Node.js-like ReadStream.
+ *
+ * @param path The path to the file to be opened.
+ * @param options Options for the ReadStream and file opening (e.g., `encoding`, `highWaterMark`, `mode`).
+ * @returns A ReadStream object for interacting with the file's contents.
+ */
+export function createReadStream(this: V_Context, path: fs.PathLike, options?: BufferEncoding | ReadStreamOptions): ReadStream {
+	options = typeof options == 'object' ? options : { encoding: options };
+	return new ReadStream({ ...options, signal: options?.signal ?? undefined }, streamHandle(this, path, 'r', options));
+}
+createReadStream satisfies Omit<typeof fs.createReadStream, '__promisify__'>;
+
+/**
+ * Opens a file in write mode and creates a Node.js-like WriteStream.
+ *
+ * @param path The path to the file to be opened.
+ * @param options Options for the WriteStream and file opening (e.g., `encoding`, `highWaterMark`, `mode`).
+ * @returns A WriteStream object for writing to the file.
+ */
+export function createWriteStream(this: V_Context, path: fs.PathLike, options?: BufferEncoding | WriteStreamOptions): WriteStream {
+	options = typeof options == 'object' ? options : { encoding: options };
+	return new WriteStream(options, streamHandle(this, path, 'w', options));
+}
+createWriteStream satisfies Omit<typeof fs.createWriteStream, '__promisify__'>;
+
+export function rm(this: V_Context, path: fs.PathLike, callback: Callback): void;
+export function rm(this: V_Context, path: fs.PathLike, options: fs.RmOptions, callback: Callback): void;
+export function rm(this: V_Context, path: fs.PathLike, options: fs.RmOptions | Callback, callback: Callback = nop): void {
+	callback = typeof options === 'function' ? options : callback;
+	promises.rm.call(this, path, typeof options === 'function' ? undefined : options).then(() => callback(null), callback);
+}
+rm satisfies Omit<typeof fs.rm, '__promisify__'>;
+
+/**
+ * Asynchronously creates a unique temporary directory.
+ * Generates six random characters to be appended behind a required prefix to create a unique temporary directory.
+ */
+export function mkdtemp(this: V_Context, prefix: Buffer, callback: Callback<[Buffer]>): void;
+export function mkdtemp(this: V_Context, prefix: Buffer, options: fs.EncodingOption | fs.BufferEncodingOption, callback: Callback<[Buffer]>): void;
+export function mkdtemp(this: V_Context, prefix: fs.PathLike, callback: Callback<[string]>): void;
+export function mkdtemp(this: V_Context, prefix: fs.PathLike, options: fs.EncodingOption, callback: Callback<[string]>): void;
+export function mkdtemp(this: V_Context, prefix: fs.PathLike, options: fs.BufferEncodingOption, callback: Callback<[Buffer]>): void;
+export function mkdtemp(
+	this: V_Context,
+	prefix: fs.PathLike,
+	options: fs.EncodingOption | fs.BufferEncodingOption | Callback<[string]> | Callback<[Buffer]>,
+	callback: Callback<[Buffer]> | Callback<[string]> = nop,
+): void {
+	callback = typeof options === 'function' ? options : callback;
+	promises.mkdtemp
+		.call<V_Context, [fs.PathLike, fs.EncodingOption | fs.BufferEncodingOption], Promise<string | NonSharedBuffer>>(
+			this,
+			prefix,
+			typeof options != 'function' ? options : null,
+		)
+		.then(result => (callback as Callback<[string | Buffer]>)(null, result), callback);
+}
+mkdtemp satisfies Omit<typeof fs.mkdtemp, '__promisify__'>;
+
+type TempFileCallback<T extends string | NonSharedBuffer> = (error: NodeJS.ErrnoException | null, file: fs.TempFile<T>) => void;
+
+/**
+ * Creates and opens a unique temporary file, named by appending six random characters to `prefix`.
+ */
+export function mkstemp(this: V_Context, prefix: Buffer, callback: TempFileCallback<NonSharedBuffer>): void;
+export function mkstemp(
+	this: V_Context,
+	prefix: Buffer,
+	options: fs.EncodingOption | fs.BufferEncodingOption,
+	callback: TempFileCallback<NonSharedBuffer>,
+): void;
+export function mkstemp(this: V_Context, prefix: fs.PathLike, callback: TempFileCallback<string>): void;
+export function mkstemp(this: V_Context, prefix: fs.PathLike, options: fs.EncodingOption, callback: TempFileCallback<string>): void;
+export function mkstemp(this: V_Context, prefix: fs.PathLike, options: fs.BufferEncodingOption, callback: TempFileCallback<NonSharedBuffer>): void;
+export function mkstemp(
+	this: V_Context,
+	prefix: fs.PathLike,
+	options: fs.EncodingOption | fs.BufferEncodingOption,
+	callback: TempFileCallback<string | NonSharedBuffer>,
+): void;
+export function mkstemp(
+	this: V_Context,
+	prefix: fs.PathLike,
+	options: fs.EncodingOption | fs.BufferEncodingOption | TempFileCallback<string> | TempFileCallback<NonSharedBuffer>,
+	callback: TempFileCallback<string> | TempFileCallback<NonSharedBuffer> = nop,
+): void {
+	const done = (typeof options == 'function' ? options : callback) as Callback<[fs.TempFile]>;
+	promises.mkstemp
+		.call(this, prefix, typeof options == 'function' ? undefined : options)
+		.then(({ path, handle }) => done(null, { path, fd: handle.fd }), done);
+}
+mkstemp satisfies typeof fs.mkstemp;
+
+export function copyFile(this: V_Context, src: fs.PathLike, dest: fs.PathLike, callback: Callback): void;
+export function copyFile(this: V_Context, src: fs.PathLike, dest: fs.PathLike, flags: number, callback: Callback): void;
+export function copyFile(this: V_Context, src: fs.PathLike, dest: fs.PathLike, flags: number | Callback, callback: Callback = nop): void {
+	callback = typeof flags === 'function' ? flags : callback;
+	promises.copyFile.call(this, src, dest, typeof flags === 'function' ? undefined : flags).then(() => callback(null), callback);
+}
+copyFile satisfies Omit<typeof fs.copyFile, '__promisify__'>;
+
+type readvCb = Callback<[number, NodeJS.ArrayBufferView[]]>;
+
+export function readv(this: V_Context, fd: number, buffers: NodeJS.ArrayBufferView[], cb: readvCb): void;
+export function readv(this: V_Context, fd: number, buffers: NodeJS.ArrayBufferView[], position: number, cb: readvCb): void;
+export function readv(this: V_Context, fd: number, buffers: NodeJS.ArrayBufferView[], position: number | readvCb, cb: readvCb = nop): void {
+	cb = typeof position === 'function' ? position : cb;
+	new promises.FileHandle(this, fd)
+		.readv(buffers, typeof position === 'function' ? undefined : position)
+		.then(({ buffers, bytesRead }) => cb(null, bytesRead, buffers), cb);
+}
+readv satisfies Omit<typeof fs.readv, '__promisify__'>;
+export declare namespace readv {
+	const __promisify__: typeof fs.readv.__promisify__;
+}
+promisifyResults(readv, 'bytesRead', 'buffers');
+
+type writevCb = Callback<[number, NodeJS.ArrayBufferView[]]>;
+
+export function writev(this: V_Context, fd: number, buffers: Uint8Array[], cb: writevCb): void;
+export function writev(this: V_Context, fd: number, buffers: Uint8Array[], position: number, cb: writevCb): void;
+export function writev(this: V_Context, fd: number, buffers: Uint8Array[], position: number | writevCb, cb: writevCb = nop) {
+	cb = typeof position === 'function' ? position : cb;
+	new promises.FileHandle(this, fd)
+		.writev(buffers, typeof position === 'function' ? undefined : position)
+		.then(({ buffers, bytesWritten }) => cb(null, bytesWritten, buffers), cb);
+}
+writev satisfies Omit<typeof fs.writev, '__promisify__'>;
+export declare namespace writev {
+	/** Like Node, the buffers are resolved as `buffer`, not `buffers` as `WriteVResult` declares */
+	function __promisify__<T extends readonly NodeJS.ArrayBufferView[]>(
+		fd: number,
+		buffers: T,
+		position?: number,
+	): Promise<{ bytesWritten: number; buffer: T }>;
+}
+promisifyResults(writev, 'bytesWritten', 'buffer');
+
+export function opendir(this: V_Context, path: fs.PathLike, cb: Callback<[Dir]>): void;
+export function opendir(this: V_Context, path: fs.PathLike, options: fs.OpenDirOptions, cb: Callback<[Dir]>): void;
+export function opendir(this: V_Context, path: fs.PathLike, options: fs.OpenDirOptions | Callback<[Dir]>, cb: Callback<[Dir]> = nop): void {
+	cb = typeof options === 'function' ? options : cb;
+	promises.opendir.call(this, path, typeof options === 'function' ? undefined : options).then(result => cb(null, result), cb);
+}
+opendir satisfies Omit<typeof fs.opendir, '__promisify__'>;
+
+export function cp(this: V_Context, source: fs.PathLike, destination: fs.PathLike, callback: Callback): void;
+export function cp(this: V_Context, source: fs.PathLike, destination: fs.PathLike, opts: fs.CopyOptions, callback: Callback): void;
+export function cp(this: V_Context, source: fs.PathLike, destination: fs.PathLike, opts: fs.CopyOptions | Callback, callback: Callback = nop): void {
+	callback = typeof opts === 'function' ? opts : callback;
+	promises.cp.call(this, source, destination, typeof opts === 'function' ? undefined : opts).then(() => callback(null), callback);
+}
+cp satisfies Omit<typeof fs.cp, '__promisify__'>;
+
+export function statfs(this: V_Context, path: fs.PathLike, callback: Callback<[fs.StatsFs]>): void;
+export function statfs(this: V_Context, path: fs.PathLike, options: fs.StatFsOptions & { bigint?: false }, callback: Callback<[fs.StatsFs]>): void;
+export function statfs(
+	this: V_Context,
+	path: fs.PathLike,
+	options: fs.StatFsOptions & { bigint: true },
+	callback: Callback<[fs.BigIntStatsFs]>,
+): void;
+export function statfs(
+	this: V_Context,
+	path: fs.PathLike,
+	options?: fs.StatFsOptions | Callback<[fs.StatsFs]>,
+	callback: Callback<[fs.StatsFs]> | Callback<[fs.BigIntStatsFs]> = nop,
+): void {
+	callback = typeof options === 'function' ? options : callback;
+	promises.statfs
+		.call(this, path, typeof options === 'function' ? undefined : options)
+		.then(result => (callback as Callback<[fs.StatsFs | fs.BigIntStatsFs]>)(null, result), callback);
+}
+statfs satisfies Omit<typeof fs.statfs, '__promisify__'>;
+
+export async function openAsBlob(this: V_Context, path: fs.PathLike, options: fs.OpenAsBlobOptions = {}): Promise<Blob> {
+	const type = blobType(options);
+	return new Blob([await promises.readFile.call(this, normalizePath.call(this, path), {})], { type });
+}
+openAsBlob satisfies typeof fs.openAsBlob;
+
+type GlobCallback<Args extends unknown[]> = (e: Exception | null, ...args: Args) => unknown;
+
+/**
+ * Retrieves the files matching the specified pattern.
+ */
+export function glob(this: V_Context, pattern: string | readonly string[], callback: GlobCallback<[string[]]>): void;
+export function glob(
+	this: V_Context,
+	pattern: string | readonly string[],
+	options: fs.GlobOptionsWithFileTypes,
+	callback: GlobCallback<[Dirent[]]>,
+): void;
+export function glob(
+	this: V_Context,
+	pattern: string | readonly string[],
+	options: fs.GlobOptionsWithoutFileTypes,
+	callback: GlobCallback<[string[]]>,
+): void;
+export function glob(
+	this: V_Context,
+	pattern: string | readonly string[],
+	options: fs.GlobOptions,
+	callback: GlobCallback<[Dirent[] | string[]]>,
+): void;
+export function glob(
+	this: V_Context,
+	pattern: string | readonly string[],
+	options: GlobOptionsU | GlobCallback<[string[]]>,
+	callback: GlobCallback<[Dirent[]]> | GlobCallback<[string[]]> = nop,
+): void {
+	callback = typeof options == 'function' ? options : callback;
+
+	const it = promises.glob.call<V_Context, [string | readonly string[], GlobOptionsU?], NodeJS.AsyncIterator<Dirent | string>>(
+		this,
+		pattern,
+		typeof options === 'function' ? undefined : options,
+	);
+	Array.fromAsync(it).then(
+		results => callback(null, (results as any) ?? []),
+		(e: Exception) => callback(e),
+	);
+}
+glob satisfies typeof fs.glob;

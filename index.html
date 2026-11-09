@@ -147,7 +147,7 @@
     <div class="caption">
       <img src="assets/drop3.ico" alt="logo">
       <span>LocalFileDropShell — 工控机一体化远程运维</span>
-      <span class="ver">v26.11.5.2</span>
+      <span class="ver">v26.11.9.1</span>
     </div>
     <div class="body">
       <h1>LocalFileDropShell — 工控机文件/Shell/VNC 一体化远程运维</h1>
@@ -155,8 +155,10 @@
         面向<b>工控机与调试机</b>的一体化远程运维工具。同一进程同时提供<b>文件传送</b>
         （TightVNC RFB 通道优先 / aiohttp 回退 / 单工喷泉码）、
         <b>HTTP Shell</b>（远程命令执行）、<b>rsync 增量同步</b>、
-        <b>RFB 断点续传</b>、<b>VNC 远程桌面</b>（noVNC + WebSocket 代理）与
-        <b>CLI 交互式 shell</b>。
+        <b>RFB 断点续传</b>、<b>VNC 远程桌面</b>（noVNC + WebSocket 代理）、
+        <b>CLI 交互式 shell</b>，以及 Win95 风格的 <b>Web 拖传页</b>（<code>/drop/</code>）与
+        <b>Web 文件管理器</b>（<code>/files/</code>，C 盘写操作需 justsmart 登录）；
+        主窗口支持<b>最小化到系统托盘</b>。
       </p>
 
       <img class="shot" src="assets/screenshot1.png" alt="TightVNC File Transfer 界面">
@@ -238,6 +240,18 @@
             <h3>Windows 95 风格</h3>
             <p>设计 token 来自 assets/02-windows-95.css，Tk 主界面与内嵌 Web 页统一视觉（3D 凸起边框、Teal 标题栏、MS Sans Serif）。</p>
           </div>
+          <div class="card">
+            <h3>Web 拖放传文件 /drop/</h3>
+            <p>Win95 单文件页面：拖入文件/整个文件夹（保留目录层级）、逐文件进度条；可填远程地址 ip[:端口] 经 RFB FTP 直推，留空保存本机；支持 ?path=&amp;host= 预填。</p>
+          </div>
+          <div class="card">
+            <h3>Web 文件管理器 /files/</h3>
+            <p>参考 filebrowser-quantum：匿名浏览/下载所有盘，根目录列盘符；C 盘写操作（上传/新建/删除/重命名）需 justsmart 登录（会话 Cookie）；双击进入、拖入上传。</p>
+          </div>
+          <div class="card">
+            <h3>系统托盘</h3>
+            <p>ctypes + Shell_NotifyIconW（参考 InternetProxyPy，零第三方依赖）：关闭按钮最小化到托盘，左键唤出、右键菜单显示/退出；设置页含「启动时最小化到托盘」开关。</p>
+          </div>
         </div>
       </fieldset>
 
@@ -257,6 +271,13 @@
             <tr><td>POST</td><td><code>/rfb/file/download</code></td><td>RFB FTP：下载（支持 offset 断点续传）</td></tr>
             <tr><td>POST</td><td><code>/rfb/file/md5</code></td><td>RFB FTP：MD5 校验</td></tr>
             <tr><td>GET</td><td><code>/vnc/</code></td><td>noVNC 静态页面（Tk 标签页内嵌访问 /vnc/vnc.html）</td></tr>
+            <tr><td>GET</td><td><code>/drop/</code></td><td>Win95 Web 拖放上传页（配合 /upload 使用）</td></tr>
+            <tr><td>GET</td><td><code>/files/</code></td><td>Win95 Web 文件管理器页面</td></tr>
+            <tr><td>GET</td><td><code>/api/files/list</code></td><td>文件管理器：列目录；path 为空返回 C:/ D:/ 等盘符</td></tr>
+            <tr><td>GET</td><td><code>/api/files/download</code></td><td>文件管理器：下载文件</td></tr>
+            <tr><td>POST</td><td><code>/api/files/upload</code></td><td>文件管理器：multipart 上传（C 盘需登录）</td></tr>
+            <tr><td>POST</td><td><code>/api/files/op</code></td><td>文件管理器：mkdir / delete / rename（C 盘需登录）</td></tr>
+            <tr><td>POST</td><td><code>/api/files/login</code></td><td>文件管理器登录（justsmart/justsmart → 会话 Cookie）</td></tr>
             <tr><td>GET</td><td><code>/websockify</code></td><td>VNC WebSocket 代理（浏览器 ↔ VNC Server）</td></tr>
             <tr><td>GET</td><td><code>/health</code></td><td>健康检查：shell / 时间 / vnc_detected</td></tr>
           </tbody>
@@ -283,6 +304,9 @@ uv run python build_exe.py                                      # 普通打包 d
       <span>RFB FTP</span>
       <span>noVNC WebSocket</span>
       <span>Decimen v3 Fountain</span>
+      <span>Web /drop/ 拖传</span>
+      <span>Web /files/ 文件管理器</span>
+      <span>系统托盘</span>
       <span>Windows 95</span>
     </div>
   </div>
