@@ -344,7 +344,7 @@ def build_transfer_tab(
         bd=2, relief=tk.SUNKEN,
     )
     local_path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
-    local_path_entry.bind("<Return>", lambda _e: _open_local_path())
+    local_path_entry.bind("<Return>", lambda _e: _refresh_local())
 
     local_tree = ttk.Treeview(
         left_frame,
@@ -673,6 +673,51 @@ def build_transfer_tab(
     add_paths = _add_paths
 
     # ========= 本地路径栏动作 =========
+    def _refresh_local() -> None:
+        """列出路径框中的本地目录内容（目录在前），双击目录可进入."""
+        raw = local_path_var.get().strip().strip('"') or str(Path.home())
+        p = Path(raw).expanduser()
+        if p.is_file():
+            p = p.parent
+        if not p.is_dir():
+            log(f"⚠ 本地路径不存在: {raw}")
+            return
+        local_path_var.set(str(p))
+        _clear_tree(local_tree, _item_store["local"])
+        try:
+            entries = sorted(p.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower()))
+        except OSError as exc:
+            log(f"⚠ 读取本地目录失败 {p}: {exc}")
+            return
+        for entry in entries:
+            try:
+                stat = entry.stat()
+                is_dir = entry.is_dir()
+                uid = local_tree.insert(
+                    "", tk.END,
+                    values=(entry.name, "" if is_dir else _format_size(stat.st_size),
+                            _format_mtime(stat.st_mtime), "目录" if is_dir else "就绪"),
+                )
+                _item_store["local"][uid] = FileItem(
+                    path=str(entry), size=0 if is_dir else stat.st_size,
+                    mtime=stat.st_mtime, status="目录" if is_dir else "就绪",
+                )
+            except OSError:
+                continue
+        log(f"📁 本地列表已刷新: {p}（{len(entries)} 项）")
+
+    def _on_local_dblclick(_event: object = None) -> None:
+        """双击本地目录 → 进入该目录并刷新列表."""
+        sel = local_tree.selection()
+        if not sel:
+            return
+        item = _item_store["local"].get(sel[0])
+        if item and item.status == "目录":
+            local_path_var.set(item.path)
+            _refresh_local()
+
+    local_tree.bind("<Double-1>", _on_local_dblclick)
+
     def _open_local_path() -> None:
         """路径框回车：在资源管理器打开该路径（文件则打开其所属文件夹）."""
         raw = local_path_var.get().strip().strip('"')
@@ -767,6 +812,7 @@ def build_transfer_tab(
 
     # 启动后异步探测远程
     log(f"ℹ 文件传输标签页已挂载, base_url={base_url}")
+    root.after(100, _refresh_local)
     root.after(400, lambda: _refresh_remote(base_url, remote_tree, _item_store, log, target))
 
     return {
@@ -944,9 +990,9 @@ def _do_upload(
     set_progress: Callable[[float, float, str], None],
     target: dict[str, Any] | None = None,
 ) -> None:
-    items = _get_selected_items(local_tree, store["local"])
+    items = [i for i in _get_selected_items(local_tree, store["local"]) if i.status != "目录"]
     if not items:
-        log("⚠ 请先在左侧选择要上传的本地文件")
+        log("⚠ 请先在左侧选择要上传的本地文件（目录请双击进入后选择文件）")
         return
     remote_dir = str((target or {}).get("dir") or "/")
 
