@@ -1,6 +1,6 @@
 [project]
 name = "LocalFileDropShellPy"
-version = "26.11.5.2"
+version = "26.11.9.1"
 description = "面向工控机/调试机的一体化远程运维工具。混合 UI 架构：主界面（文件/文件夹拖放、传输列表、日志、批量生成）使用 tkinter + tkinterdnd2（Win32 WM_DROPFILES 原生拖放）实现 Windows 95 风格；VNC 远程桌面（noVNC + WebSocket 代理）和 Shell CLI GUI（本地 Web Terminal）使用 pywebview 内嵌浏览器实现。同一进程提供文件传送（TightVNC RFB 通道优先 / aiohttp 回退 / 单工喷泉码）、HTTP Shell（pwsh/powershell/cmd 自动检测，GBK/UTF-8 自适应）、rsync 增量同步（Adler-32 + MD5 双阶段块级 delta）、RFB 文件传输（断点续传 offset），CLI 三角色：gui（默认 Tk 主界面，可附加 webview 标签页）、server（纯 aiohttp 服务端）、client（交互式 shell：exit/cd/upload/download/rsync/rfb-*/help）"
 requires-python = ">=3.10"
 dependencies = [

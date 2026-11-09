@@ -107,8 +107,17 @@ def launch_window(
     else:
         cmd = [sys.executable, "-m", "localdropshell.webview_win", payload]
 
+    popen_kwargs: dict[str, Any] = {"close_fds": True}
+    if sys.platform == "win32":
+        # 隐藏控制台子进程一闪而过的黑框（开发态 python.exe 为控制台程序）
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= 1  # STARTF_USESHOWWINDOW
+        si.wShowWindow = 0  # SW_HIDE
+        popen_kwargs["startupinfo"] = si
+        popen_kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+
     try:
-        proc = subprocess.Popen(cmd, close_fds=True)
+        proc = subprocess.Popen(cmd, **popen_kwargs)
     except OSError as exc:
         logger.warning("启动 pywebview 子进程失败: %s", exc)
         return None

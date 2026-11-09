@@ -96,6 +96,18 @@ def is_vnc_server(host: str, port: int, timeout: float = 1.5) -> bool:
 # 3. 进程名匹配（netstat + tasklist）
 # ---------------------------------------------------------------------------
 
+def _hidden_console_kwargs() -> dict:
+    """windowed(无控制台)程序拉起控制台子进程时隐藏一闪而过的黑框."""
+    if sys.platform != "win32":
+        return {}
+    si = subprocess.STARTUPINFO()
+    si.dwFlags |= 1  # STARTF_USESHOWWINDOW
+    si.wShowWindow = 0  # SW_HIDE
+    # CREATE_NO_WINDOW = 0x08000000
+    return {"startupinfo": si, "creationflags": 0x08000000}
+
+
+
 def get_listening_pids(port: int) -> list[int]:
     """返回监听指定端口的进程 PID 列表.
 
@@ -107,7 +119,9 @@ def get_listening_pids(port: int) -> list[int]:
             ["netstat", "-aon"],
             capture_output=True,
             text=True,
+            errors="replace",  # 中文系统 GBK 输出在 UTF-8 模式下防解码崩溃
             timeout=5,
+            **_hidden_console_kwargs(),
         )
     except (FileNotFoundError, subprocess.SubprocessError):
         return []
@@ -141,7 +155,9 @@ def pid_process_name(pid: int) -> str | None:
             ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
             capture_output=True,
             text=True,
+            errors="replace",  # 同上
             timeout=5,
+            **_hidden_console_kwargs(),
         )
     except (FileNotFoundError, subprocess.SubprocessError):
         return None
