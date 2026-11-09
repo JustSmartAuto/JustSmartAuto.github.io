@@ -502,7 +502,7 @@ def _run_elevated(exe: str, params: str, timeout: float = 900.0) -> tuple[bool, 
         if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
             return False, -1, "读取安装进程退出码失败"
         code = int(exit_code.value)
-        return code == 0, code, "" if code == 0 else f"msiexec 返回码 {code}"
+        return code == 0, code, "" if code == 0 else f"进程返回码 {code}"
     finally:
         kernel32.CloseHandle(handle)
 

@@ -150,6 +150,8 @@ tr:hover:not(.sel) td { background: var(--chrome-light); }
       <button id="dlresume" type="button" title="分块续传下载：块存浏览器 IndexedDB，中断后再次点击可继续">续传下载</button>
       <button id="dlfountain" type="button" title="LT 喷泉码流式下载：任意足够帧即可重组，适合弱网/单向场景">喷泉下载</button>
       <button id="previewbtn" type="button" title="预览：文本/代码 Monaco 只读；图片 PhotoSwipe 画廊（本地内置，离线可用）">预览</button>
+      <input type="text" id="searchbox" placeholder="搜索文件名" title="Everything 即时搜索：限定当前目录子树；在盘符列表页则全盘搜索。未安装 Everything 时会引导静默安装">
+      <button id="searchbtn" type="button" title="Everything 即时搜索（限定当前目录子树）">搜索</button>
       <button id="loginbtn" type="button">登录</button>
       <input type="file" id="picker" multiple hidden>
     </div>
@@ -193,6 +195,19 @@ tr:hover:not(.sel) td { background: var(--chrome-light); }
   </div>
 </div>
 
+<div class="modal-mask" id="setupmask">
+  <div class="modal">
+    <div class="titlebar"><span>文件搜索 — Everything</span></div>
+    <div class="mbody">
+      <div class="row"><span>文件搜索由 Everything（voidtools）提供。本机未安装，是否使用内嵌安装包静默安装？<br>（约 2MB，会弹一次 UAC 提权确认，需在工控机桌面批准）</span></div>
+      <div class="btns">
+        <button id="setupok" type="button">安装</button>
+        <button id="setupcancel" type="button">取消</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script src="monaco/vs/loader.js"></script>
 <script>
 (function () {
@@ -209,6 +224,7 @@ tr:hover:not(.sel) td { background: var(--chrome-light); }
   var parent = null;
   var entries = [];
   var sel = -1;
+  var searchMode = false;   // 搜索模式：entries 为 Everything 结果，e.full 为绝对路径
 
   function api(url, opts) {
     return fetch(url, opts).then(function (r) {
@@ -241,6 +257,8 @@ tr:hover:not(.sel) td { background: var(--chrome-light); }
     if (!base) return name;                 // 盘符列表 → "C:/"
     return base.replace(/[\\/]+$/, "") + "/" + name;
   }
+  // 条目绝对路径：搜索结果自带 full，普通浏览用 cwd 拼接
+  function entryPath(e) { return e.full || join(cwd, e.name); }
 
   function render() {
     rowsEl.innerHTML = "";
@@ -250,24 +268,28 @@ tr:hover:not(.sel) td { background: var(--chrome-light); }
       var icon = e.dir ? "[+]" : "[ ]";
       tr.innerHTML = '<td class="name"><span class="ico"></span></td><td></td><td></td>';
       tr.children[0].querySelector(".ico").textContent = icon;
-      tr.children[0].appendChild(document.createTextNode(e.name));
+      // 搜索模式下名称列显示完整路径（title 同），便于区分同名文件
+      var label = searchMode && e.full ? e.full : e.name;
+      tr.children[0].appendChild(document.createTextNode(label));
+      tr.children[0].title = e.full || e.name;
       tr.children[1].textContent = fmtSize(e);
       tr.children[2].textContent = fmtTime(e.mtime);
       tr.addEventListener("click", function () { sel = i; render(); });
       tr.addEventListener("dblclick", function () {
-        if (e.dir) nav(join(cwd, e.name));
+        if (e.dir) nav(entryPath(e));
         else if (isImage(e.name)) previewImage(e);
         else if (previewLang(e.name)) previewEntry(e);
-        else location.href = "/api/files/download?path=" + encodeURIComponent(join(cwd, e.name));
+        else location.href = "/api/files/download?path=" + encodeURIComponent(entryPath(e));
       });
       rowsEl.appendChild(tr);
     });
-    setStatus(entries.length + " 项");
+    setStatus(searchMode ? "搜索结果 " + entries.length + " 项（Everything）" : entries.length + " 项");
   }
 
   function nav(path) {
     api("/api/files/list?path=" + encodeURIComponent(path)).then(function (r) {
       if (r.error) { setStatus("错误: " + r.error); return; }
+      searchMode = false;
       cwd = r.path; parent = r.parent; entries = r.entries; sel = -1;
       pathInput.value = cwd;
       setAuth(r.auth);
@@ -302,7 +324,7 @@ tr:hover:not(.sel) td { background: var(--chrome-light); }
   document.getElementById("dlbtn").addEventListener("click", function () {
     var e = selected();
     if (!e || e.dir) { setStatus("请选择文件"); return; }
-    location.href = "/api/files/download?path=" + encodeURIComponent(join(cwd, e.name));
+    location.href = "/api/files/download?path=" + encodeURIComponent(entryPath(e));
   });
 
   document.getElementById("mkdirbtn").addEventListener("click", function () {
@@ -322,7 +344,7 @@ tr:hover:not(.sel) td { background: var(--chrome-light); }
     if (!to || to === e.name) return;
     writeOp("/api/files/op", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ op: "rename", path: join(cwd, e.name), to: to }),
+      body: JSON.stringify({ op: "rename", path: entryPath(e), to: to }),
     });
   });
 
@@ -332,7 +354,7 @@ tr:hover:not(.sel) td { background: var(--chrome-light); }
     if (!confirm("确认删除 " + e.name + " ?" + (e.dir ? "（含全部内容）" : ""))) return;
     writeOp("/api/files/op", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ op: "delete", path: join(cwd, e.name) }),
+      body: JSON.stringify({ op: "delete", path: entryPath(e) }),
     });
   });
 
@@ -406,6 +428,60 @@ tr:hover:not(.sel) td { background: var(--chrome-light); }
   });
 
   // ============================================================
+  // 文件搜索（Everything HTTP Server JSON API，见 everything.py）
+  //   限定当前目录子树；盘符列表页为全盘搜索。
+  //   未安装 Everything 时服务端返回 need_setup → 引导静默安装（需登录）。
+  // ============================================================
+  var searchbox = document.getElementById("searchbox");
+  var setupmask = document.getElementById("setupmask");
+  var pendingQuery = "";
+
+  function doSearch() {
+    var q = searchbox.value.trim();
+    if (!q) { setStatus("请输入搜索关键词"); return; }
+    setStatus("搜索中（Everything）...");
+    api("/api/files/search?q=" + encodeURIComponent(q) + "&path=" + encodeURIComponent(cwd))
+      .then(function (r) {
+        if (r.need_setup) { pendingQuery = q; setupmask.classList.add("show"); return; }
+        if (r.error) { setStatus("搜索失败: " + r.error); return; }
+        searchMode = true;
+        entries = r.entries; sel = -1;
+        render();
+      })
+      .catch(function () { setStatus("搜索请求失败"); });
+  }
+  document.getElementById("searchbtn").addEventListener("click", doSearch);
+  searchbox.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") doSearch();
+  });
+
+  document.getElementById("setupcancel").addEventListener("click", function () {
+    setupmask.classList.remove("show");
+    setStatus("已取消安装（文件搜索不可用）");
+  });
+  setupmask.addEventListener("click", function (e) {
+    if (e.target === setupmask) setupmask.classList.remove("show");
+  });
+  document.getElementById("setupok").addEventListener("click", function () {
+    // 安装会改变本机软件状态，要求登录；未登录先走登录框
+    api("/api/files/session").then(function (s) {
+      if (!s.auth) {
+        setupmask.classList.remove("show");
+        setStatus("请先登录后再安装 Everything");
+        loginmask.classList.add("show");
+        return;
+      }
+      setStatus("正在静默安装 Everything（请在工控机桌面批准 UAC）...");
+      setupmask.classList.remove("show");
+      api("/api/files/search/setup", { method: "POST" }).then(function (r) {
+        if (r.error) { setStatus("安装失败: " + r.error); return; }
+        setStatus("Everything 已就绪");
+        if (pendingQuery) doSearch();   // 安装成功后重试之前的搜索
+      });
+    });
+  });
+
+  // ============================================================
   // 文本预览（Monaco Editor 本地内置：assets/files/monaco/，离线可用）
   // ============================================================
   var PREVIEW_EXT = {
@@ -451,7 +527,7 @@ tr:hover:not(.sel) td { background: var(--chrome-light); }
     if (!lang) { setStatus("该类型不支持预览"); return; }
     if (e.size > PREVIEW_MAX) { setStatus("文件超过 8MB，不支持预览"); return; }
     setStatus("加载预览 " + e.name + " ...");
-    fetch("/api/files/download?path=" + encodeURIComponent(join(cwd, e.name)))
+    fetch("/api/files/download?path=" + encodeURIComponent(entryPath(e)))
       .then(function (resp) {
         if (!resp.ok) throw new Error("HTTP " + resp.status);
         return resp.text();
@@ -519,8 +595,8 @@ tr:hover:not(.sel) td { background: var(--chrome-light); }
     return pswpReady;
   }
 
-  function imgUrl(name) {
-    return "/api/files/download?path=" + encodeURIComponent(join(cwd, name));
+  function imgUrl(e) {
+    return "/api/files/download?path=" + encodeURIComponent(entryPath(e));
   }
 
   function previewImage(e) {
@@ -534,14 +610,14 @@ tr:hover:not(.sel) td { background: var(--chrome-light); }
     var first = new Image();
     first.onload = function () { openGallery(imgs, startIndex, first.naturalWidth, first.naturalHeight); };
     first.onerror = function () { setStatus("图片加载失败: " + e.name); };
-    first.src = imgUrl(e.name);
+    first.src = imgUrl(e);
   }
 
   function openGallery(imgs, startIndex, w0, h0) {
     photoswipeLoad().then(function (PhotoSwipe) {
       var items = imgs.map(function (x, i) {
         return {
-          src: imgUrl(x.name),
+          src: imgUrl(x),
           width: i === startIndex ? w0 : 0,
           height: i === startIndex ? h0 : 0,
           alt: x.name,
@@ -677,7 +753,7 @@ tr:hover:not(.sel) td { background: var(--chrome-light); }
   var CHUNK = 4 * 1024 * 1024;
 
   function resumeDownload(entry) {
-    var path = join(cwd, entry.name);
+    var path = entryPath(entry);
     var key = path + "|" + entry.size + "|" + entry.mtime;
     var db;
     return idbOpen().then(function (d) {
@@ -1011,7 +1087,7 @@ tr:hover:not(.sel) td { background: var(--chrome-light); }
   var FT_MAX_FRAMES_MULT = 25;
 
   function fountainDownload(entry) {
-    var path = join(cwd, entry.name);
+    var path = entryPath(entry);
     return fetch("/api/files/fountain?path=" + encodeURIComponent(path)).then(function (resp) {
       if (!resp.ok) {
         return resp.json().then(function (j) { throw new Error(j.error || ("HTTP " + resp.status)); },

@@ -31,6 +31,7 @@ from urllib.parse import quote
 
 import aiohttp.web as web
 
+from . import everything as _everything
 from . import fountain as _fountain
 from . import settings as _settings
 from . import vnc as _vnc
@@ -462,6 +463,48 @@ async def op_handler(request: web.Request) -> web.Response:
 
 
 # ---------------------------------------------------------------------------
+# Everything 搜索（文件名即时搜索，集成见 everything.py 模块 docstring）
+# ---------------------------------------------------------------------------
+
+async def search_handler(request: web.Request) -> web.Response:
+    """GET /api/files/search?q=&path= — 按文件名搜索（匿名可用，与匿名浏览一致）.
+
+    path 为空时全盘搜索，否则限定该目录子树。未安装 Everything 时返回
+    ``{"need_setup": true}``，由页面弹确认后走 ``/api/files/search/setup``。
+    """
+    q = request.query.get("q", "").strip()
+    if not q:
+        return _err("缺少搜索关键词 q", 400)
+    try:
+        base = _resolve(request.query.get("path", ""))
+    except ValueError as e:
+        return _err(str(e), 400)
+    base_str = None if base is None else str(base).replace("\\", "/")
+
+    if _everything.detect() == "missing":
+        return _ok({"need_setup": True, "entries": []})
+    alive = await asyncio.to_thread(_everything.ensure_running, logger.info)
+    if not alive:
+        return _err("Everything HTTP 服务未能启动", 502)
+    try:
+        entries = await asyncio.to_thread(_everything.search, q, base_str)
+    except Exception as e:
+        logger.exception("Everything 搜索失败")
+        return _err(f"搜索失败: {e}", 502)
+    return _ok({"entries": entries, "count": len(entries)})
+
+
+async def search_setup_handler(request: web.Request) -> web.Response:
+    """POST /api/files/search/setup — 内嵌安装包静默提权安装 Everything（需登录）."""
+    if not _authed(request):
+        return _err("安装 Everything 需要先登录（文件管理页右上角）", 403)
+    ok, detail = await asyncio.to_thread(_everything.install_and_start, logger.info)
+    if not ok:
+        return _err(f"Everything 安装/启动失败: {detail}", 500)
+    return _ok({"installed": True, "detail": detail})
+
+
+# ---------------------------------------------------------------------------
 # 注册
 # ---------------------------------------------------------------------------
 
@@ -476,5 +519,7 @@ def register(app: web.Application) -> None:
     app.router.add_get("/api/files/list", list_handler)
     app.router.add_get("/api/files/download", download_handler)
     app.router.add_get("/api/files/fountain", fountain_handler)
+    app.router.add_get("/api/files/search", search_handler)
+    app.router.add_post("/api/files/search/setup", search_setup_handler)
     app.router.add_post("/api/files/upload", upload_handler)
     app.router.add_post("/api/files/op", op_handler)
