@@ -158,14 +158,47 @@ _ALIAS_FRUITS = (
 )
 
 
+def _is_cjk(ch: str) -> bool:
+    """是否表意文字（中日韩汉字/假名），用于判定昵称拼接是否需要空格."""
+    code = ord(ch)
+    return (
+        0x3400 <= code <= 0x4DBF      # 扩展 A
+        or 0x4E00 <= code <= 0x9FFF   # 基本区
+        or 0xF900 <= code <= 0xFAFF   # 兼容表意
+        or 0x3040 <= code <= 0x30FF   # 平假名 / 片假名
+    )
+
+
+def join_alias(adjective: str, noun: str) -> str:
+    """按语言语法拼接昵称：中文词语之间不加空格，英文（拉丁字母）之间加空格."""
+    if not adjective:
+        return noun
+    if not noun:
+        return adjective
+    if _is_cjk(adjective[-1]) and _is_cjk(noun[0]):
+        return adjective + noun
+    return f"{adjective} {noun}"
+
+
+def normalize_alias(alias: str) -> str:
+    """去掉已存昵称里「中文 中文」之间的空格（英文之间保留空格）."""
+    out: list[str] = []
+    for i, ch in enumerate(alias):
+        if ch in " \t" and out and i + 1 < len(alias):
+            if _is_cjk(out[-1]) and _is_cjk(alias[i + 1]):
+                continue
+        out.append(ch)
+    return "".join(out)
+
+
 def device_alias() -> str:
     """返回设备昵称；首次调用生成随机昵称并持久化到 settings.json."""
     data = load_settings()
     alias = str(data.get("device_alias") or "").strip()
     if alias:
-        return alias
+        return normalize_alias(alias)
     import secrets
-    alias = secrets.choice(_ALIAS_ADJECTIVES) + " " + secrets.choice(_ALIAS_FRUITS)
+    alias = join_alias(secrets.choice(_ALIAS_ADJECTIVES), secrets.choice(_ALIAS_FRUITS))
     data["device_alias"] = alias
     try:
         save_settings(data)
