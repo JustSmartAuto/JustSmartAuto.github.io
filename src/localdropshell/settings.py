@@ -129,6 +129,17 @@ def save_transfer_protocol(protocol: str) -> Path:
     return save_settings(data)
 
 
+def load_minimize_to_tray() -> bool:
+    """启动时最小化到托盘开关；默认关闭."""
+    return bool(load_settings().get("minimize_to_tray_on_start", False))
+
+
+def save_minimize_to_tray(enabled: bool) -> Path:
+    data = load_settings()
+    data["minimize_to_tray_on_start"] = bool(enabled)
+    return save_settings(data)
+
+
 # ---------------------------------------------------------------------------
 # 地址解析
 # ---------------------------------------------------------------------------

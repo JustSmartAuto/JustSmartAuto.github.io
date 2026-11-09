@@ -450,11 +450,57 @@ def _about_sections(base_url: str, runtime: dict[str, str]) -> list[tuple[str, s
 
 
 
+def _show_settings_window(root: tk.Tk) -> None:
+    """Win95 风格设置窗口：启动选项."""
+    from localdropshell.settings import load_minimize_to_tray, save_minimize_to_tray
+
+    win = tk.Toplevel(root)
+    win.title("设置")
+    win.configure(bg=Win95_COLORS["chrome"])
+    win.transient(root)
+    win.resizable(False, False)
+    _center_on_parent(win, root, 340, 120)
+
+    body = tk.Frame(win, bg=Win95_COLORS["chrome"], bd=2, relief=tk.GROOVE)
+    body.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+    var = tk.BooleanVar(value=load_minimize_to_tray())
+    tk.Checkbutton(
+        body,
+        text="启动时最小化到托盘",
+        variable=var,
+        bg=Win95_COLORS["chrome"],
+        activebackground=Win95_COLORS["chrome"],
+        fg=Win95_COLORS["ink"],
+        font=Win95_FONT,
+        anchor="w",
+    ).pack(side=tk.TOP, fill=tk.X, padx=8, pady=8)
+
+    bar = tk.Frame(win, bg=Win95_COLORS["chrome"])
+    bar.pack(side=tk.BOTTOM, fill=tk.X, padx=8, pady=(0, 8))
+
+    def _ok() -> None:
+        try:
+            save_minimize_to_tray(var.get())
+        except OSError as exc:
+            logger.warning("保存设置失败: %s", exc)
+        win.destroy()
+
+    for text, cmd in (("确定", _ok), ("取消", win.destroy)):
+        tk.Button(
+            bar, text=text, width=8, font=Win95_FONT, bd=2, relief=tk.RAISED,
+            command=cmd,
+        ).pack(side=tk.RIGHT, padx=(6, 0))
+
+    win.bind("<Escape>", lambda _e: win.destroy())
+
+
 def _build_menus(
     root: tk.Tk,
     base_url: str,
     tab_frames: dict[str, tk.Frame],
     runtime: dict[str, str],
+    on_exit=None,
 ) -> None:
     menubar = tk.Menu(root, tearoff=0)
     root.config(menu=menubar)
@@ -483,7 +529,9 @@ def _build_menus(
 
     m_file.add_command(label="打开 Web 拖传页面", command=_open_drop_page)
     m_file.add_separator()
-    m_file.add_command(label="退出", command=root.destroy)
+    m_file.add_command(label="设置...", command=lambda: _show_settings_window(root))
+    m_file.add_separator()
+    m_file.add_command(label="退出", command=on_exit or root.destroy)
 
     # ---- 传输 ----
     m_xfer = tk.Menu(menubar, tearoff=0)
@@ -597,12 +645,36 @@ def run_tk_gui(
     root.minsize(820, 520)
     apply_win95_style(root)
 
+    # --- 系统托盘：窗口关闭按钮最小化到托盘，托盘右键菜单/文件菜单真正退出 ---
+    from localdropshell.settings import load_minimize_to_tray
+    from localdropshell.ui.tray_win import TrayIcon
+
+    def _show_window() -> None:
+        root.deiconify()
+        root.lift()
+        root.focus_force()
+
+    tray: TrayIcon | None = None
+
+    def _exit_app() -> None:
+        if tray is not None:
+            tray.stop()
+        root.destroy()
+
+    try:
+        tray = TrayIcon(root, on_show=_show_window, on_exit=_exit_app)
+        tray.start()
+        root.protocol("WM_DELETE_WINDOW", root.withdraw)  # 关闭 → 最小化到托盘
+    except Exception:  # pragma: no cover — 托盘失败不影响主窗口
+        logger.warning("系统托盘初始化失败", exc_info=True)
+        tray = None
+
     # --- Tab 按钮栏 ---
     bar_frame, tab_frames, switch_tab = make_tab_button_bar(root)
 
     # --- 构造菜单 ---
     runtime: dict[str, str] = {"vnc": "探测中..."}
-    _build_menus(root, base_url, tab_frames, runtime)
+    _build_menus(root, base_url, tab_frames, runtime, on_exit=_exit_app)
 
     # --- 填充四个 Tab ---
     # 延迟 import, 只在需要时加载 —— 各 UI 模块自己管理依赖
@@ -667,7 +739,14 @@ def run_tk_gui(
     root.after(300, lambda: _detect_vnc_background(base_url, _update_vnc_status))
 
     # --- 启动 ---
+    # 设置页开关：启动时最小化到托盘（默认关闭）
+    if tray is not None and load_minimize_to_tray():
+        root.withdraw()
+
     try:
         root.mainloop()
     except KeyboardInterrupt:
         logger.info("Tk mainloop 被中断")
+    finally:
+        if tray is not None:
+            tray.stop()

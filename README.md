@@ -13,6 +13,7 @@
 | **远程地址 / 收藏夹** | Tk 文件传输页顶栏 + 收藏夹页 | 输入 `ip[:端口]`（省略按 5900）点“连接”直连该远程 VNC；收藏备注名 / ip:port / 传输协议 / 文件传输默认路径 / 多个快捷路径，持久化到 `D:/JustSmart/LocalFileDropShell/favorites.json`（不可写回退 `%APPDATA%/LocalFileDropShell`） |
 | **Web 拖放传文件** | 浏览器 `/drop/` | Win95 风格拖传页（`assets/drop/index.html`）：拖入文件/整个文件夹（保留目录层级）、逐文件进度条；可填「远程地址 ip[:端口]」经 RFB FTP 直推远程，留空则保存到本机目录；支持 `?path=&host=` 预填；Tk「文件」菜单一键打开 |
 | **CLI 交互式 shell** | 纯控制台 | 同进程三角色（`gui` / `server` / `client`），内置 upload / download / rsync / rfb-* 等命令 |
+| **系统托盘** | 托盘图标（drop3.ico） | ctypes + Shell_NotifyIconW 独立消息窗口线程（参考 InternetProxyPy，无第三方依赖）；窗口关闭按钮最小化到托盘，左键唤出、右键菜单「显示窗口 / 退出」；「文件 → 设置...」含「启动时最小化到托盘」开关（默认关闭，持久化 `minimize_to_tray_on_start`） |
 
 **混合 UI 架构**：
 - **主窗口（Tkinter + tkinterdnd2）**：负责文件/文件夹拖放、传输列表、进度条、日志输出、批量生成——Windows 95 风格（3D 凸起边框、Teal 标题栏、MS Sans Serif）
