@@ -19,7 +19,7 @@ import secrets
 import struct
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -433,6 +433,241 @@ def decode_session(
 
 
 # ---------------------------------------------------------------------------
+# 4. LT 喷泉码（真喷泉，Wire 帧 flags bit0=1）
+# ---------------------------------------------------------------------------
+#
+# 设计约束：**浏览器端 JS 必须能逐字节复刻编码决策**，因此：
+#
+# - PRNG 用 xorshift32（纯整数位运算，无浮点超越函数）；
+# - 度分布用 Ideal Soliton 的**闭式 CDF**（ telescoping ：
+#   CDF(d) = 1/k + 1 - 1/d ），只用 IEEE754 保证精确舍入的 + - * / 与 sqrt 之外的
+#   运算——Python 与 JS 结果严格一致；不用 exp/log（两语言不保证末位一致）；
+# - 选块用 Fisher-Yates 部分洗牌（纯整数取模）。
+#
+# 每个 LT 帧的 ``seq`` 是**编码帧序号**（单调递增，可无限产生），
+# 种子 = fnv1a(session_id.u16le + seq.u32le)，解码端凭 (session_id, seq, k)
+# 重算度与源块下标集合，无需在帧内携带下标列表。
+#
+# 代价：Ideal Soliton 的译码开销尾部较重，期望需 k + O(√k·ln k) 帧；
+# 服务端无限流式发送，客户端收齐即断开，弱网/本地 HTTP 场景可接受。
+
+WIRE_FLAG_LT = 1
+
+# xorshift32 种子兜底（fnv1a 理论上可能吐出 0，xorshift 全 0 会卡死）
+_LT_SEED_FALLBACK = 0x9E3779B9
+
+
+def _xs32(state: int) -> int:
+    """xorshift32 (13,17,5)：输入输出均为 uint32，state 不可为 0。"""
+    state ^= (state << 13) & 0xFFFFFFFF
+    state ^= state >> 17
+    state ^= (state << 5) & 0xFFFFFFFF
+    return state & 0xFFFFFFFF
+
+
+def lt_seed(session_id: int, seq: int) -> int:
+    """帧种子 = fnv1a(session_id u16le ‖ seq u32le)，为 0 时替换为固定常量。"""
+    raw = struct.pack("<HI", session_id & 0xFFFF, seq & 0xFFFFFFFF)
+    seed = fnv1a(raw)
+    return seed if seed != 0 else _LT_SEED_FALLBACK
+
+
+def _lt_degree(k: int, u: float) -> int:
+    """Ideal Soliton 度抽样：找最小 d ∈ [1,k] 使 CDF(d) >= u（二分）。
+
+    CDF(d) = 1/k + 1 - 1/d（由 ρ(1)=1/k, ρ(d)=1/(d(d-1)) 裂项求和）。
+    全部运算为 IEEE754 精确舍入的加/减/除，JS 端同序复刻即逐位一致。
+    """
+    if k <= 1:
+        return 1
+    lo, hi = 1, k
+    inv_k = 1.0 / k
+    while lo < hi:
+        mid = (lo + hi) // 2
+        cdf = inv_k + 1.0 - 1.0 / mid
+        if cdf >= u:
+            hi = mid
+        else:
+            lo = mid + 1
+    return lo
+
+
+def lt_select(session_id: int, seq: int, k: int) -> list[int]:
+    """由 (session_id, seq, k) 确定性地算出本帧异或的源块下标列表。
+
+    先抽 1 个均匀数定度，再抽 d 次做 Fisher-Yates 部分洗牌取前 d 个下标。
+    """
+    if k <= 0:
+        return []
+    state = lt_seed(session_id, seq)
+    state = _xs32(state)
+    u = state / 4294967296.0  # 2^32 为 2 的幂，除法精确
+    d = _lt_degree(k, u)
+    idx = list(range(k))
+    for i in range(d):
+        state = _xs32(state)
+        j = i + state % (k - i)
+        idx[i], idx[j] = idx[j], idx[i]
+    return idx[:d]
+
+
+def pick_block_size(total_len: int, max_k: int = 60000,
+                    min_bs: int = 4096, max_bs: int = 1 << 20) -> int:
+    """按 DCF2 总长选自适配块长：k 限制在 ``max_k`` 内（Wire 帧 k 为 u16）。"""
+    if total_len <= 0:
+        return min_bs
+    bs = max(min_bs, math.ceil(total_len / max_k))
+    return min(bs, max_bs)
+
+
+def lt_encode_stream(
+    container: Dcf2Container,
+    session_id: int | None = None,
+    block_size: int | None = None,
+) -> "Iterator[WireFrame]":
+    """无限 LT 编码帧流（生成器）。flags=WIRE_FLAG_LT，seq 从 0 单调递增。
+
+    源数据 = DCF2 容器字节流，末尾零填充到 k*block_len；``block_size`` 为 None
+    时按 ``pick_block_size`` 自适应。
+    """
+    full = pack(container)
+    total_len = len(full)
+    if block_size is None:
+        block_size = pick_block_size(total_len)
+    if block_size <= 0 or block_size > 0xFFFF:
+        raise ValueError(f"block_size 非法: {block_size}")
+    k = math.ceil(total_len / block_size) if total_len > 0 else 0
+    if k == 0:
+        raise ValueError("空容器无法 LT 编码")
+    if k > 0xFFFF:
+        raise ValueError(f"块数 {k} 超出 u16 上限")
+
+    padded = full + b"\x00" * (k * block_size - total_len)
+    payload_fnv = fnv1a(full)
+    if session_id is None:
+        session_id = int.from_bytes(secrets.token_bytes(2), "big")
+
+    seq = 0
+    while True:
+        indices = lt_select(session_id, seq, k)
+        block = bytearray(block_size)
+        for i in indices:
+            src = padded[i * block_size:(i + 1) * block_size]
+            for j in range(block_size):
+                block[j] ^= src[j]
+        yield WireFrame(
+            session_id=session_id,
+            seq=seq,
+            k=k,
+            block_len=block_size,
+            total_len=total_len,
+            payload_fnv=payload_fnv,
+            block=bytes(block),
+            flags=WIRE_FLAG_LT,
+        )
+        seq = (seq + 1) & 0xFFFFFFFF
+
+
+class LtDecoder:
+    """LT 译码器（置信传播）。与 JS 端解码逻辑等价，供测试与调试复用。
+
+    用法：逐帧 ``feed(unpack_frame(buf))``，返回 True 表示收齐；
+    收齐后 ``result()`` 返回完整 DCF2 字节流（已验 FNV-1a）。
+    """
+
+    def __init__(self) -> None:
+        self.session_id: int | None = None
+        self.k = 0
+        self.block_len = 0
+        self.total_len = 0
+        self.expected_fnv = 0
+        self.recovered: dict[int, bytes] = {}
+        self.pending: dict[int, tuple[set[int], bytearray]] = {}
+        self.done = False
+        self._full: bytes | None = None
+
+    @property
+    def progress(self) -> tuple[int, int]:
+        """(已恢复块数, 总块数)。"""
+        return len(self.recovered), self.k
+
+    def feed(self, frame: WireFrame) -> bool:
+        if self.done:
+            return True
+        if not (frame.flags & WIRE_FLAG_LT):
+            raise ValueError("非 LT 帧（flags bit0 未置位）")
+        if self.session_id is None:
+            self.session_id = frame.session_id
+            self.k = frame.k
+            self.block_len = frame.block_len
+            self.total_len = frame.total_len
+            self.expected_fnv = frame.payload_fnv
+        elif frame.session_id != self.session_id:
+            return False  # 别的会话，忽略
+        if frame.seq in self.pending:
+            return False  # 重复帧
+
+        indices = set(lt_select(frame.session_id, frame.seq, self.k))
+        data = bytearray(frame.block)
+        # 扣掉已恢复的源块
+        for i in sorted(indices & self.recovered.keys()):
+            src = self.recovered[i]
+            for j in range(self.block_len):
+                data[j] ^= src[j]
+            indices.discard(i)
+
+        if not indices:
+            pass  # 全部已知，冗余帧
+        elif len(indices) == 1:
+            self._recover(next(iter(indices)), data)
+        else:
+            self.pending[frame.seq] = (indices, data)
+
+        if len(self.recovered) == self.k:
+            self._finalize()
+        return self.done
+
+    def _recover(self, idx: int, data: bytearray) -> None:
+        if idx in self.recovered:
+            return
+        self.recovered[idx] = bytes(data)
+        queue = [idx]
+        while queue:
+            r = queue.pop()
+            src = self.recovered[r]
+            for seq in list(self.pending):
+                inds, blk = self.pending[seq]
+                if r not in inds:
+                    continue
+                for j in range(self.block_len):
+                    blk[j] ^= src[j]
+                inds.discard(r)
+                if len(inds) <= 1:
+                    del self.pending[seq]
+                    if len(inds) == 1:
+                        nidx = next(iter(inds))
+                        if nidx not in self.recovered:
+                            self.recovered[nidx] = bytes(blk)
+                            queue.append(nidx)
+
+    def _finalize(self) -> None:
+        full = b"".join(self.recovered[i] for i in range(self.k))[: self.total_len]
+        actual = fnv1a(full)
+        if actual != self.expected_fnv:
+            raise ValueError(
+                f"LT 重组 FNV-1a 校验失败：期望 0x{self.expected_fnv:08X}，"
+                f"实际 0x{actual:08X}"
+            )
+        self._full = full
+        self.done = True
+
+    def result(self) -> bytes:
+        if not self.done or self._full is None:
+            raise ValueError("尚未收齐")
+        return self._full
+
+
+# ---------------------------------------------------------------------------
 # 自检（python -m localdropshell.fountain）
 # ---------------------------------------------------------------------------
 
@@ -493,5 +728,54 @@ if __name__ == "__main__":  # pragma: no cover - 开发自检
         block=frames[0].block,
     )
     assert decode_session(sid_miss, expected_session_id=frames[0].session_id) is None
+
+    # ---- LT 喷泉码闭环 ----
+    # 种子的确定性：同参数重算必须一致
+    assert lt_select(7, 42, 100) == lt_select(7, 42, 100)
+    # 度合法 & 下标去重且在界内
+    for s in range(50):
+        sel = lt_select(1, s, 64)
+        assert 1 <= len(sel) <= 64
+        assert len(set(sel)) == len(sel)
+        assert all(0 <= x < 64 for x in sel)
+    # 编码流 → 译码闭环（随机数据，避免 gzip 干扰，块小一点加大 k）
+    import os as _os
+    rnd = _os.urandom(10000)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".bin") as tf2:
+        tf2.write(rnd)
+        temp2 = tf2.name
+    try:
+        c3 = build_from_file(temp2)
+        gen = lt_encode_stream(c3, session_id=1234, block_size=256)
+        dec = LtDecoder()
+        fed = 0
+        for fr in gen:
+            dec.feed(fr)
+            fed += 1
+            if dec.done:
+                break
+            assert fed < 100000, "LT 译码超出合理帧数"
+        assert dec.done
+        rebuilt3 = dec.result()
+        assert rebuilt3 == pack(c3)
+        plain3 = decompress_payload_if_needed(unpack(rebuilt3))
+        assert plain3 == rnd
+        # 随机丢 30% 帧仍能译码（喷泉特性）
+        import random as _rnd
+        rng = _rnd.Random(42)
+        dec2 = LtDecoder()
+        gen2 = lt_encode_stream(c3, session_id=1234, block_size=256)
+        fed2 = 0
+        for fr in gen2:
+            fed2 += 1
+            if rng.random() < 0.3:
+                continue  # 模拟丢帧
+            dec2.feed(fr)
+            if dec2.done:
+                break
+            assert fed2 < 200000
+        assert dec2.done and dec2.result() == pack(c3)
+    finally:
+        _os.unlink(temp2)
 
     print("fountain.py 自检通过 ✓")

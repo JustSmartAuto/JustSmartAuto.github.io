@@ -7,7 +7,8 @@
     POST /api/files/logout           注销
     GET  /api/files/session          {"auth": true/false}
     GET  /api/files/list?path=       列目录；path 为空时返回 C:/ D:/ 等盘符
-    GET  /api/files/download?path=   下载文件
+    GET  /api/files/download?path=   下载文件（支持 Range 单区间 → 206，页面端续传用）
+    GET  /api/files/fountain?path=   LT 喷泉码帧无限流（Wire 帧 flags bit0=1），收齐即断
     POST /api/files/upload           multipart 上传（path=目标目录, file=文件）
     POST /api/files/op               {"op": mkdir|delete|rename, ...}
 
@@ -17,16 +18,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import re
 import secrets
 import string
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import aiohttp.web as web
 
+from . import fountain as _fountain
 from . import vnc as _vnc
 
 logger = logging.getLogger("localdropshell.fileman")
@@ -201,16 +206,146 @@ async def list_handler(request: web.Request) -> web.Response:
 
 
 async def download_handler(request: web.Request) -> web.StreamResponse:
+    """下载文件；支持单区间 ``Range: bytes=start-end``（206），用于页面端续传."""
     try:
         target = _resolve(request.query.get("path", ""))
     except ValueError as e:
         return _err(str(e), 400)
     if target is None or not target.is_file():
         return _err("文件不存在", 404)
-    return web.FileResponse(
-        target,
-        headers={"Content-Disposition": f'attachment; filename="{target.name}"'},
+
+    size = target.stat().st_size
+    disposition = f'attachment; filename="{target.name}"'
+    range_header = (request.headers.get("Range") or "").strip()
+
+    if not range_header:
+        return web.FileResponse(
+            target,
+            headers={
+                "Content-Disposition": disposition,
+                "Accept-Ranges": "bytes",
+            },
+        )
+
+    m = re.fullmatch(r"bytes=(\d*)-(\d*)", range_header)
+    if not m or (not m.group(1) and not m.group(2)):
+        return _err("仅支持单区间 bytes Range", 400)
+    if m.group(1):  # bytes=start-end / bytes=start-
+        start = int(m.group(1))
+        end = int(m.group(2)) if m.group(2) else size - 1
+    else:  # bytes=-N（末尾 N 字节）
+        n = int(m.group(2))
+        start = max(0, size - n)
+        end = size - 1
+    if start > end or start >= size:
+        return web.Response(
+            status=416,
+            headers={"Content-Range": f"bytes */{size}"},
+        )
+    end = min(end, size - 1)
+    length = end - start + 1
+
+    resp = web.StreamResponse(
+        status=206,
+        headers={
+            "Content-Type": "application/octet-stream",
+            "Content-Disposition": disposition,
+            "Content-Range": f"bytes {start}-{end}/{size}",
+            "Content-Length": str(length),
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "no-store",
+        },
     )
+    await resp.prepare(request)
+    try:
+        with open(target, "rb") as f:
+            f.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk = f.read(min(65536, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                await resp.write(chunk)
+    except (ConnectionResetError, asyncio.CancelledError):
+        pass  # 客户端中断（续传场景属正常）
+    return resp
+
+
+# ---------------------------------------------------------------------------
+# 喷泉码下载（LT 帧无限流，收齐即断）
+# ---------------------------------------------------------------------------
+
+# 帧数保护上限的倍数：客户端收到 max_frames_mult * k 仍未译码即异常
+FOUNTAIN_MAX_FRAMES_MULT = 20
+
+
+async def fountain_handler(request: web.Request) -> web.StreamResponse:
+    """GET /api/files/fountain?path=&block_size= — LT 喷泉帧无限流.
+
+    每帧为 decimen v3 Wire 帧（flags bit0=1 表示 LT 异或帧），自描述：
+    客户端按 (session_id, seq, k) 重算源块下标，收齐 k 块后主动断开。
+    文件名/大小经响应头 X-Lds-Name（percent-encoded UTF-8）/ X-Lds-Size 提供，
+    便于页面先弹保存对话框再接收。
+    """
+    try:
+        target = _resolve(request.query.get("path", ""))
+    except ValueError as e:
+        return _err(str(e), 400)
+    if target is None or not target.is_file():
+        return _err("文件不存在", 404)
+
+    size = target.stat().st_size
+    if size == 0:
+        return _err("空文件无需喷泉码传输", 400)
+    if size >= 0xFFFFFFFF:
+        return _err("文件超过 4GB，超出 Wire 帧 total_len 上限", 413)
+
+    block_size_raw = request.query.get("block_size", "").strip()
+    block_size: int | None = None
+    if block_size_raw:
+        try:
+            block_size = int(block_size_raw)
+        except ValueError:
+            return _err("block_size 需为整数", 400)
+        if not (1 <= block_size <= 0xFFFF):
+            return _err("block_size 需在 1..65535 之间", 400)
+
+    try:
+        container = _fountain.build_from_file(str(target))
+    except OSError as e:
+        return _err(f"读取文件失败: {e}", 500)
+
+    resp = web.StreamResponse(
+        status=200,
+        headers={
+            "Content-Type": "application/octet-stream",
+            "Cache-Control": "no-store",
+            "X-Lds-Name": quote(target.name),
+            "X-Lds-Size": str(size),
+        },
+    )
+    await resp.prepare(request)
+
+    frames = 0
+    started = time.perf_counter()
+    try:
+        for frame in _fountain.lt_encode_stream(container, block_size=block_size):
+            await resp.write(_fountain.pack_frame(frame))
+            frames += 1
+            # 每 256 帧让出一次事件循环，避免饿死其它连接
+            if frames % 256 == 0:
+                await asyncio.sleep(0)
+            # 保护：客户端异常不断连时避免无限发送
+            if frames > FOUNTAIN_MAX_FRAMES_MULT * frame.k:
+                logger.warning("喷泉码会话帧数超限，主动断开 frames=%d k=%d", frames, frame.k)
+                break
+    except (ConnectionResetError, asyncio.CancelledError):
+        pass  # 客户端收齐断开，属正常
+    finally:
+        logger.info("喷泉码会话结束 frames=%d file=%s ms=%d",
+                    frames, target, int((time.perf_counter() - started) * 1000))
+    return resp
 
 
 # ---------------------------------------------------------------------------
@@ -327,5 +462,6 @@ def register(app: web.Application) -> None:
     app.router.add_get("/api/files/session", session_handler)
     app.router.add_get("/api/files/list", list_handler)
     app.router.add_get("/api/files/download", download_handler)
+    app.router.add_get("/api/files/fountain", fountain_handler)
     app.router.add_post("/api/files/upload", upload_handler)
     app.router.add_post("/api/files/op", op_handler)

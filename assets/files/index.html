@@ -102,6 +102,19 @@ tr:hover:not(.sel) td { background: var(--chrome-light); }
 
 .drop-hint { color: var(--chrome-dark); }
 .listwrap.over { outline: 2px dashed var(--title); outline-offset: -4px; }
+
+/* 下载进度条（续传 / 喷泉码共用） */
+#prow { display: none; margin-top: 6px; align-items: center; gap: 6px; }
+#prow.show { display: flex; }
+#pwrap {
+  flex: 1; height: 14px;
+  border: 2px solid;
+  border-color: var(--chrome-dark) var(--chrome-lighter) var(--chrome-lighter) var(--chrome-dark);
+  background: #fff; position: relative;
+}
+#pfill { height: 100%; width: 0; background: var(--title); }
+#ptext { flex: none; min-width: 220px; text-align: right; color: var(--ink); }
+#pcancel { flex: none; }
 </style>
 </head>
 <body>
@@ -117,6 +130,8 @@ tr:hover:not(.sel) td { background: var(--chrome-light); }
       <button id="renamebtn" type="button">重命名</button>
       <button id="delbtn" type="button">删除</button>
       <button id="dlbtn" type="button">下载</button>
+      <button id="dlresume" type="button" title="分块续传下载：块存浏览器 IndexedDB，中断后再次点击可继续">续传下载</button>
+      <button id="dlfountain" type="button" title="LT 喷泉码流式下载：任意足够帧即可重组，适合弱网/单向场景">喷泉下载</button>
       <button id="loginbtn" type="button">登录</button>
       <input type="file" id="picker" multiple hidden>
     </div>
@@ -129,6 +144,11 @@ tr:hover:not(.sel) td { background: var(--chrome-light); }
     <div class="statusbar">
       <span id="status">就绪</span>
       <span id="authstate" class="locked">未登录（C 盘只读）</span>
+    </div>
+    <div id="prow">
+      <div id="pwrap"><div id="pfill"></div></div>
+      <span id="ptext"></span>
+      <button id="pcancel" type="button">取消</button>
     </div>
   </div>
 </div>
@@ -354,6 +374,546 @@ tr:hover:not(.sel) td { background: var(--chrome-light); }
   });
   loginmask.addEventListener("click", function (e) {
     if (e.target === loginmask) loginmask.classList.remove("show");
+  });
+
+  // ============================================================
+  // 高级下载
+  //   1) 分块续传：Range 分块 → IndexedDB 持久化 → 收齐后落盘
+  //   2) LT 喷泉码：/api/files/fountain 无限帧流 → JS LT 解码 → 落盘
+  //   落盘优先 showSaveFilePicker（安全上下文），回退 Blob + a[download]。
+  //   SHA-256 优先 crypto.subtle（安全上下文），回退内嵌纯 JS 实现。
+  // ============================================================
+  var prow = document.getElementById("prow");
+  var pfill = document.getElementById("pfill");
+  var ptext = document.getElementById("ptext");
+  var dlBusy = false;
+  var dlCancel = false;
+
+  document.getElementById("pcancel").addEventListener("click", function () { dlCancel = true; });
+
+  function progShow(text) { prow.classList.add("show"); pfill.style.width = "0"; ptext.textContent = text; }
+  function progSet(frac, text) {
+    pfill.style.width = Math.min(100, Math.round(frac * 100)) + "%";
+    if (text) ptext.textContent = text;
+  }
+  function progHide() { prow.classList.remove("show"); }
+
+  // ---------- 落盘 ----------
+  function saveBytes(name, u8, writeChunks) {
+    // writeChunks: 可选，(writable) => Promise，流式写块（续传用，避免整文件入内存）
+    var picked = null;
+    if (window.showSaveFilePicker) {
+      picked = window.showSaveFilePicker({ suggestedName: name }).then(
+        function (h) { return h.createWritable(); },
+        function () { return "aborted"; }
+      );
+    } else {
+      picked = Promise.resolve(null);
+    }
+    return picked.then(function (w) {
+      if (w === "aborted") return "aborted";
+      if (w) {
+        var seq = writeChunks
+          ? writeChunks(w)
+          : w.write(u8);
+        return seq.then(function () { return w.close(); }).then(function () { return "saved"; });
+      }
+      // 回退：拼 Blob 走浏览器下载（续传场景下块从 IndexedDB 逐块读出再拼接）
+      if (writeChunks) {
+        var parts = [];
+        var collector = { write: function (b) { parts.push(b); return Promise.resolve(); }, close: function () { return Promise.resolve(); } };
+        return writeChunks(collector).then(function () {
+          saveBlobFallback(name, new Blob(parts));
+          return "saved";
+        });
+      }
+      saveBlobFallback(name, new Blob([u8]));
+      return Promise.resolve("saved");
+    });
+  }
+  function saveBlobFallback(name, blob) {
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url; a.download = name;
+    document.body.appendChild(a); a.click();
+    setTimeout(function () { URL.revokeObjectURL(url); a.remove(); }, 10000);
+  }
+
+  // ---------- IndexedDB（lds-dl：meta + chunk）----------
+  function idbOpen() {
+    return new Promise(function (res, rej) {
+      var rq = indexedDB.open("lds-dl", 1);
+      rq.onupgradeneeded = function () {
+        var db = rq.result;
+        db.createObjectStore("meta", { keyPath: "key" });
+        db.createObjectStore("chunk");
+      };
+      rq.onsuccess = function () { res(rq.result); };
+      rq.onerror = function () { rej(rq.error || new Error("IndexedDB 打开失败")); };
+    });
+  }
+  function idbDone(req) {
+    return new Promise(function (res, rej) {
+      req.onsuccess = function () { res(req.result); };
+      req.onerror = function () { rej(req.error || new Error("IndexedDB 操作失败")); };
+    });
+  }
+  function idbGet(db, store, key) { return idbDone(db.transaction(store, "readonly").objectStore(store).get(key)); }
+  function idbAll(db, store) { return idbDone(db.transaction(store, "readonly").objectStore(store).getAll()); }
+  function idbPut(db, store, val, key) {
+    return idbDone(db.transaction(store, "readwrite").objectStore(store).put(val, key));
+  }
+  function idbDel(db, store, key) {
+    return idbDone(db.transaction(store, "readwrite").objectStore(store).delete(key));
+  }
+
+  // ---------- 分块续传 ----------
+  var CHUNK = 4 * 1024 * 1024;
+
+  function resumeDownload(entry) {
+    var path = join(cwd, entry.name);
+    var key = path + "|" + entry.size + "|" + entry.mtime;
+    var db;
+    return idbOpen().then(function (d) {
+      db = d;
+      return idbGet(db, "meta", key);
+    }).then(function (meta) {
+      if (!meta) {
+        meta = { key: key, path: path, name: entry.name, size: entry.size,
+                 mtime: entry.mtime, chunkSize: CHUNK, done: {}, updated: 0 };
+      }
+      var nChunks = Math.max(1, Math.ceil(entry.size / CHUNK));
+      meta.chunkCount = nChunks;
+
+      function loop(i) {
+        if (dlCancel) throw new Error("已取消（进度已保存，再次点击续传下载可继续）");
+        if (i >= nChunks) return finish(meta);
+        if (meta.done[i]) return loop(i + 1);
+        var a = i * CHUNK, b = Math.min(entry.size, (i + 1) * CHUNK) - 1;
+        progSet(i / nChunks, "续传 " + entry.name + " 块 " + (i + 1) + "/" + nChunks);
+        return fetch("/api/files/download?path=" + encodeURIComponent(path), {
+          headers: { Range: "bytes=" + a + "-" + b },
+        }).then(function (resp) {
+          if (resp.status !== 206) throw new Error("服务端未支持 Range（HTTP " + resp.status + "）");
+          return resp.blob();
+        }).then(function (blob) {
+          if (entry.size > 0 && blob.size !== b - a + 1) throw new Error("块长度不符");
+          return idbPut(db, "chunk", blob, key + "#" + i);
+        }).then(function () {
+          meta.done[i] = 1; meta.updated = Date.now();
+          return idbPut(db, "meta", meta);
+        }).then(function () { return loop(i + 1); });
+      }
+
+      function finish(m) {
+        progSet(1, "落盘 " + m.name + " ...");
+        var writeChunks = function (w) {
+          var chain = Promise.resolve();
+          for (var i = 0; i < nChunks; i++) {
+            (function (idx) {
+              chain = chain.then(function () {
+                return idbGet(db, "chunk", key + "#" + idx).then(function (blob) {
+                  if (!blob) throw new Error("续传块丢失 #" + idx);
+                  return w.write(blob);
+                });
+              });
+            })(i);
+          }
+          return chain;
+        };
+        return saveBytes(m.name, null, writeChunks).then(function (r) {
+          if (r === "saved") {
+            var chain = Promise.resolve();
+            for (var i = 0; i < nChunks; i++) {
+              (function (idx) { chain = chain.then(function () { return idbDel(db, "chunk", key + "#" + idx); }); })(i);
+            }
+            return chain.then(function () { return idbDel(db, "meta", key); });
+          }
+        });
+      }
+
+      return loop(0);
+    });
+  }
+
+  // 清理过期（3 天）续传缓存；返回剩余任务数
+  function idbCleanupStale() {
+    if (!window.indexedDB) return Promise.resolve(0);
+    var db;
+    return idbOpen().then(function (d) {
+      db = d;
+      return idbAll(db, "meta");
+    }).then(function (metas) {
+      var now = Date.now(), left = 0, chain = Promise.resolve();
+      metas.forEach(function (m) {
+        if (now - (m.updated || 0) > 3 * 86400000) {
+          for (var i = 0; i < (m.chunkCount || 0); i++) {
+            (function (idx) { chain = chain.then(function () { return idbDel(db, "chunk", m.key + "#" + idx); }); })(i);
+          }
+          chain = chain.then(function () { return idbDel(db, "meta", m.key); });
+        } else left++;
+      });
+      return chain.then(function () { return left; });
+    }).catch(function () { return 0; });
+  }
+
+  // ---------- LT 喷泉码解码（与 fountain.py 逐字节对齐，勿改运算顺序）----------
+  function fnv1a(u8) {
+    var h = 0x811C9DC5;
+    for (var i = 0; i < u8.length; i++) {
+      h ^= u8[i];
+      h = Math.imul(h, 0x01000193);
+    }
+    return h >>> 0;
+  }
+  function xs32(s) {           // xorshift32 (13,17,5)，输入输出 uint32
+    s = (s ^ (s << 13)) | 0;
+    s = (s ^ (s >>> 17)) | 0;
+    s = (s ^ (s << 5)) | 0;
+    return s >>> 0;
+  }
+  function ltSeed(sid, seq) {  // fnv1a(session_id u16le ‖ seq u32le)
+    var b = new Uint8Array(6);
+    b[0] = sid & 255; b[1] = (sid >>> 8) & 255;
+    b[2] = seq & 255; b[3] = (seq >>> 8) & 255; b[4] = (seq >>> 16) & 255; b[5] = (seq >>> 24) & 255;
+    var s = fnv1a(b);
+    return s === 0 ? 0x9E3779B9 : s;
+  }
+  function ltDegree(k, u) {    // Ideal Soliton 闭式 CDF 二分：最小 d 使 1/k+1-1/d >= u
+    if (k <= 1) return 1;
+    var lo = 1, hi = k, invK = 1.0 / k;
+    while (lo < hi) {
+      var mid = (lo + hi) >> 1;
+      var cdf = invK + 1.0 - 1.0 / mid;
+      if (cdf >= u) hi = mid; else lo = mid + 1;
+    }
+    return lo;
+  }
+  function ltSelect(sid, seq, k) {
+    if (k <= 0) return [];
+    var state = ltSeed(sid, seq);
+    state = xs32(state);
+    var u = state / 4294967296.0;
+    var d = ltDegree(k, u);
+    var idx = new Uint32Array(k);
+    var i;
+    for (i = 0; i < k; i++) idx[i] = i;
+    for (i = 0; i < d; i++) {
+      state = xs32(state);
+      var j = i + (state % (k - i));
+      var t = idx[i]; idx[i] = idx[j]; idx[j] = t;
+    }
+    return Array.prototype.slice.call(idx, 0, d);
+  }
+
+  function LtDec() {
+    this.sid = null; this.k = 0; this.blockLen = 0; this.totalLen = 0; this.fnv = 0;
+    this.recovered = {};   // idx -> Uint8Array
+    this.nRecovered = 0;
+    this.pending = {};     // seq -> { inds: {idx:true}, n: 剩余度数, blk: Uint8Array }
+    this.done = false; this.full = null;
+  }
+  LtDec.prototype.xorInto = function (dst, src) {
+    for (var j = 0; j < dst.length; j++) dst[j] ^= src[j];
+  };
+  LtDec.prototype.feed = function (f) {
+    if (this.done) return true;
+    if (!(f.flags & 1)) throw new Error("非 LT 帧");
+    if (this.sid === null) {
+      this.sid = f.sid; this.k = f.k; this.blockLen = f.blockLen;
+      this.totalLen = f.totalLen; this.fnv = f.fnv;
+    } else if (f.sid !== this.sid) return false;
+    if (this.pending[f.seq]) return false;
+
+    var sel = ltSelect(f.sid, f.seq, this.k);
+    var inds = {}, n = 0, i, idx;
+    for (i = 0; i < sel.length; i++) inds[sel[i]] = true;
+    n = sel.length;
+    var blk = new Uint8Array(f.block);  // 拷贝，流缓冲会复用
+    // 扣掉已恢复块
+    for (i = 0; i < sel.length; i++) {
+      idx = sel[i];
+      if (this.recovered[idx]) {
+        this.xorInto(blk, this.recovered[idx]);
+        delete inds[idx]; n--;
+      }
+    }
+    if (n === 0) {
+      // 全已知，冗余帧
+    } else if (n === 1) {
+      for (idx in inds) { this.recoverOne(parseInt(idx, 10), blk); break; }
+    } else {
+      this.pending[f.seq] = { inds: inds, n: n, blk: blk };
+    }
+    if (this.nRecovered === this.k) this.finalize();
+    return this.done;
+  };
+  LtDec.prototype.recoverOne = function (idx, blk) {
+    if (this.recovered[idx]) return;
+    this.recovered[idx] = blk;
+    this.nRecovered++;
+    var queue = [idx], self = this;
+    while (queue.length) {
+      var r = queue.pop();
+      var src = self.recovered[r];
+      Object.keys(self.pending).forEach(function (seq) {
+        var p = self.pending[seq];
+        if (!p || !p.inds[r]) return;
+        self.xorInto(p.blk, src);
+        delete p.inds[r]; p.n--;
+        if (p.n <= 1) {
+          delete self.pending[seq];
+          if (p.n === 1) {
+            for (var ni in p.inds) {
+              var nidx = parseInt(ni, 10);
+              if (!self.recovered[nidx]) {
+                self.recovered[nidx] = p.blk;
+                self.nRecovered++;
+                queue.push(nidx);
+              }
+              break;
+            }
+          }
+        }
+      });
+    }
+  };
+  LtDec.prototype.finalize = function () {
+    var full = new Uint8Array(this.k * this.blockLen);
+    for (var i = 0; i < this.k; i++) full.set(this.recovered[i], i * this.blockLen);
+    full = full.subarray(0, this.totalLen);
+    if (fnv1a(full) !== this.fnv) throw new Error("LT 重组 FNV-1a 校验失败");
+    this.full = full;
+    this.done = true;
+  };
+
+  // ---------- 字节流队列（fetch reader → 帧切分）----------
+  function ByteQueue() { this.chunks = []; this.len = 0; }
+  ByteQueue.prototype.push = function (u8) { this.chunks.push(u8); this.len += u8.length; };
+  ByteQueue.prototype.peek = function (n) {
+    if (this.len < n) return null;
+    var out = new Uint8Array(n), off = 0, i = 0;
+    while (off < n) {
+      var c = this.chunks[i++];
+      var take = Math.min(c.length, n - off);
+      out.set(c.subarray(0, take), off);
+      off += take;
+    }
+    return out;
+  };
+  ByteQueue.prototype.shift = function (n) {
+    this.len -= n;
+    while (n > 0) {
+      var c = this.chunks[0];
+      if (c.length <= n) { this.chunks.shift(); n -= c.length; }
+      else { this.chunks[0] = c.subarray(n); n = 0; }
+    }
+  };
+
+  // ---------- DCF2 解析（49B 头 + name + type + payload，全小端）----------
+  function parseDcf2(u8) {
+    var dv = new DataView(u8.buffer, u8.byteOffset, u8.length);
+    if (u8.length < 49 || dv.getUint8(0) !== 0x44 || dv.getUint8(1) !== 0x43 ||
+        dv.getUint8(2) !== 0x46 || dv.getUint8(3) !== 0x32) {
+      throw new Error("无效 DCF2 容器");
+    }
+    var compression = dv.getUint8(4);
+    var nameLen = dv.getUint16(5, true);
+    var typeLen = dv.getUint16(7, true);
+    var fileLen = dv.getUint32(9, true);
+    var transLen = dv.getUint32(13, true);
+    var sha = u8.subarray(17, 49);
+    var td = new TextDecoder("utf-8");
+    var name = td.decode(u8.subarray(49, 49 + nameLen));
+    var payload = u8.subarray(49 + nameLen + typeLen, 49 + nameLen + typeLen + transLen);
+    if (payload.length !== transLen) throw new Error("DCF2 payload 长度不符");
+    return { compression: compression, name: name, fileLen: fileLen, transLen: transLen,
+             sha: sha, payload: payload };
+  }
+
+  function gunzip(u8) {
+    if (!window.DecompressionStream) return Promise.reject(new Error("浏览器不支持 gzip 解压（DecompressionStream）"));
+    var ds = new DecompressionStream("gzip");
+    var stream = new Blob([u8]).stream().pipeThrough(ds);
+    return new Response(stream).arrayBuffer().then(function (ab) { return new Uint8Array(ab); });
+  }
+
+  // ---------- SHA-256：优先 crypto.subtle，回退纯 JS 实现 ----------
+  function sha256Bytes(u8) {
+    if (window.crypto && crypto.subtle) {
+      return crypto.subtle.digest("SHA-256", u8).then(function (ab) { return new Uint8Array(ab); });
+    }
+    return Promise.resolve(sha256Js(u8));
+  }
+  // 纯 JS SHA-256（FIPS 180-4，单次调用，供非安全上下文回退）
+  function sha256Js(msg) {
+    var K = [
+      0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+      0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+      0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+      0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+      0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+      0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+      0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+      0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2];
+    var H = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+    function rr(x, n) { return (x >>> n) | (x << (32 - n)); }
+    var bitLen = msg.length * 8;
+    var padded = Math.ceil((msg.length + 9) / 64) * 64;
+    var buf = new Uint8Array(padded);
+    buf.set(msg);
+    buf[msg.length] = 0x80;
+    var dv = new DataView(buf.buffer);
+    dv.setUint32(padded - 8, Math.floor(bitLen / 4294967296), false);
+    dv.setUint32(padded - 4, bitLen >>> 0, false);
+    var w = new Uint32Array(64);
+    for (var off = 0; off < padded; off += 64) {
+      var t;
+      for (t = 0; t < 16; t++) w[t] = dv.getUint32(off + t * 4, false);
+      for (t = 16; t < 64; t++) {
+        var s0 = rr(w[t - 15], 7) ^ rr(w[t - 15], 18) ^ (w[t - 15] >>> 3);
+        var s1 = rr(w[t - 2], 17) ^ rr(w[t - 2], 19) ^ (w[t - 2] >>> 10);
+        w[t] = (w[t - 16] + s0 + w[t - 7] + s1) | 0;
+      }
+      var a = H[0], b = H[1], c = H[2], d = H[3], e = H[4], f = H[5], g = H[6], h = H[7];
+      for (t = 0; t < 64; t++) {
+        var S1 = rr(e, 6) ^ rr(e, 11) ^ rr(e, 25);
+        var ch = (e & f) ^ (~e & g);
+        var t1 = (h + S1 + ch + K[t] + w[t]) | 0;
+        var S0 = rr(a, 2) ^ rr(a, 13) ^ rr(a, 22);
+        var maj = (a & b) ^ (a & c) ^ (b & c);
+        var t2 = (S0 + maj) | 0;
+        h = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b; b = a; a = (t1 + t2) | 0;
+      }
+      H[0] = (H[0] + a) | 0; H[1] = (H[1] + b) | 0; H[2] = (H[2] + c) | 0; H[3] = (H[3] + d) | 0;
+      H[4] = (H[4] + e) | 0; H[5] = (H[5] + f) | 0; H[6] = (H[6] + g) | 0; H[7] = (H[7] + h) | 0;
+    }
+    var out = new Uint8Array(32);
+    var odv = new DataView(out.buffer);
+    for (var i = 0; i < 8; i++) odv.setUint32(i * 4, H[i], false);
+    return out;
+  }
+
+  function eqBytes(a, b) {
+    if (a.length !== b.length) return false;
+    for (var i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+    return true;
+  }
+
+  // ---------- 喷泉码下载 ----------
+  var FT_MAX_FRAMES_MULT = 25;
+
+  function fountainDownload(entry) {
+    var path = join(cwd, entry.name);
+    return fetch("/api/files/fountain?path=" + encodeURIComponent(path)).then(function (resp) {
+      if (!resp.ok) {
+        return resp.json().then(function (j) { throw new Error(j.error || ("HTTP " + resp.status)); },
+                                function () { throw new Error("HTTP " + resp.status); });
+      }
+      var name = entry.name;
+      try { name = decodeURIComponent(resp.headers.get("X-Lds-Name") || name); } catch (e) {}
+      var reader = resp.body.getReader();
+      var q = new ByteQueue();
+      var dec = new LtDec();
+      var frames = 0;
+
+      function pump() {
+        if (dlCancel) {
+          reader.cancel();
+          throw new Error("已取消（喷泉码会话不可续传，可重新发起）");
+        }
+        if (dec.done) { reader.cancel(); return { name: name, dec: dec, frames: frames }; }
+        return reader.read().then(function (r) {
+          if (r.done) {
+            if (!dec.done) throw new Error("连接已断且未收齐（喷泉码会话不可续传，可重新发起）");
+            return { name: name, dec: dec, frames: frames };
+          }
+          q.push(r.value);
+          for (;;) {
+            var hdr = q.peek(22);
+            if (!hdr) break;
+            var hdv = new DataView(hdr.buffer, hdr.byteOffset, 22);
+            if (hdv.getUint8(0) !== 0xD1 || hdv.getUint8(1) !== 0xC3 || hdv.getUint8(2) !== 3) {
+              throw new Error("无效 Wire 帧头");
+            }
+            var blen = hdv.getUint16(12, true);
+            var fbuf = q.peek(22 + blen);
+            if (!fbuf) break;
+            q.shift(22 + blen);
+            var dv = new DataView(fbuf.buffer, fbuf.byteOffset, 22 + blen);
+            var frame = {
+              flags: dv.getUint8(3),
+              sid: dv.getUint16(4, true),
+              seq: dv.getUint32(6, true),
+              k: dv.getUint16(10, true),
+              blockLen: blen,
+              totalLen: dv.getUint32(14, true),
+              fnv: dv.getUint32(18, true),
+              block: fbuf.subarray(22),
+            };
+            frames++;
+            dec.feed(frame);
+            if (frames > FT_MAX_FRAMES_MULT * dec.k) {
+              reader.cancel();
+              throw new Error("帧数超限仍未译码，会话异常");
+            }
+            if (frames % 20 === 0 || dec.done) {
+              progSet(dec.nRecovered / dec.k,
+                      "喷泉 " + name + " 块 " + dec.nRecovered + "/" + dec.k + " · 帧 " + frames);
+            }
+            if (dec.done) break;
+          }
+          return pump();
+        });
+      }
+      return pump();
+    }).then(function (r) {
+      progSet(1, "校验与落盘 " + r.name + " ...");
+      var container = parseDcf2(r.dec.full);
+      var plainP = container.compression === 1 ? gunzip(container.payload)
+        : container.compression === 0 ? Promise.resolve(container.payload)
+        : Promise.reject(new Error("未知 compression: " + container.compression));
+      return plainP.then(function (plain) {
+        if (plain.length !== container.fileLen) throw new Error("解压后长度不符");
+        return sha256Bytes(plain).then(function (digest) {
+          if (!eqBytes(digest, container.sha)) throw new Error("SHA-256 校验失败");
+          var fname = container.name || r.name;
+          return saveBytes(fname, plain).then(function (sr) {
+            return { saved: sr, frames: r.frames, k: r.dec.k, name: fname };
+          });
+        });
+      });
+    });
+  }
+
+  // ---------- 高级下载入口与按钮 ----------
+  function startDownload(kind) {
+    var e = selected();
+    if (dlBusy) { setStatus("已有下载任务进行中"); return; }
+    if (!e || e.dir) { setStatus("请选择文件"); return; }
+    if (!window.indexedDB && kind === "resume") { setStatus("浏览器不支持 IndexedDB"); return; }
+    dlBusy = true; dlCancel = false;
+    progShow(kind === "resume" ? "续传 " + e.name + " ..." : "喷泉 " + e.name + " ...");
+    var job = kind === "resume" ? resumeDownload(e) : fountainDownload(e);
+    job.then(function (r) {
+      if (kind === "fountain" && r) {
+        setStatus(r.saved === "aborted" ? "已取消落盘"
+          : "喷泉下载完成 " + r.name + "（" + r.frames + " 帧 / k=" + r.k + "）");
+      } else {
+        setStatus("续传下载完成 " + e.name);
+      }
+    }).catch(function (err) {
+      setStatus("下载中断: " + (err && err.message ? err.message : err));
+    }).then(function () {
+      dlBusy = false; progHide();
+    });
+  }
+  document.getElementById("dlresume").addEventListener("click", function () { startDownload("resume"); });
+  document.getElementById("dlfountain").addEventListener("click", function () { startDownload("fountain"); });
+
+  // 页面加载：清理过期续传缓存并提示未完成任务
+  idbCleanupStale().then(function (left) {
+    if (left > 0) setStatus("有 " + left + " 个未完成的续传任务：选中同名文件点「续传下载」可继续");
   });
 
   nav("");
