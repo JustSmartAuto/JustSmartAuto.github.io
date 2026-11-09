@@ -115,7 +115,23 @@ tr:hover:not(.sel) td { background: var(--chrome-light); }
 #pfill { height: 100%; width: 0; background: var(--title); }
 #ptext { flex: none; min-width: 220px; text-align: right; color: var(--ink); }
 #pcancel { flex: none; }
+
+/* Monaco 文本预览弹窗 */
+#pv-overlay {
+  display: none; position: fixed; inset: 0; z-index: 99;
+  background: rgba(0, 0, 0, .35);
+  align-items: center; justify-content: center;
+}
+.pv-win { width: min(920px, 94vw); }
+#pv-editor {
+  height: min(580px, 72vh);
+  background: #fff;
+  border: 2px solid;
+  border-color: var(--chrome-dark) var(--chrome-lighter) var(--chrome-lighter) var(--chrome-dark);
+}
+#pv-close { cursor: pointer; }
 </style>
+<link rel="stylesheet" href="monaco/vs/editor/editor.main.css">
 </head>
 <body>
 <div class="window">
@@ -132,6 +148,7 @@ tr:hover:not(.sel) td { background: var(--chrome-light); }
       <button id="dlbtn" type="button">下载</button>
       <button id="dlresume" type="button" title="分块续传下载：块存浏览器 IndexedDB，中断后再次点击可继续">续传下载</button>
       <button id="dlfountain" type="button" title="LT 喷泉码流式下载：任意足够帧即可重组，适合弱网/单向场景">喷泉下载</button>
+      <button id="previewbtn" type="button" title="Monaco 只读预览文本/配置/代码文件（本地内置，离线可用）">预览</button>
       <button id="loginbtn" type="button">登录</button>
       <input type="file" id="picker" multiple hidden>
     </div>
@@ -153,6 +170,14 @@ tr:hover:not(.sel) td { background: var(--chrome-light); }
   </div>
 </div>
 
+<div id="pv-overlay">
+  <div class="window pv-win">
+    <div class="titlebar"><span id="pv-title">预览</span><span class="btns"><span id="pv-close" title="关闭">×</span></span></div>
+    <div id="pv-editor"></div>
+    <div class="statusbar"><span id="pv-status"></span></div>
+  </div>
+</div>
+
 <div class="modal-mask" id="loginmask">
   <div class="modal">
     <div class="titlebar"><span>登录</span></div>
@@ -167,6 +192,7 @@ tr:hover:not(.sel) td { background: var(--chrome-light); }
   </div>
 </div>
 
+<script src="monaco/vs/loader.js"></script>
 <script>
 (function () {
   "use strict";
@@ -229,6 +255,7 @@ tr:hover:not(.sel) td { background: var(--chrome-light); }
       tr.addEventListener("click", function () { sel = i; render(); });
       tr.addEventListener("dblclick", function () {
         if (e.dir) nav(join(cwd, e.name));
+        else if (previewLang(e.name)) previewEntry(e);
         else location.href = "/api/files/download?path=" + encodeURIComponent(join(cwd, e.name));
       });
       rowsEl.appendChild(tr);
@@ -374,6 +401,93 @@ tr:hover:not(.sel) td { background: var(--chrome-light); }
   });
   loginmask.addEventListener("click", function (e) {
     if (e.target === loginmask) loginmask.classList.remove("show");
+  });
+
+  // ============================================================
+  // 文本预览（Monaco Editor 本地内置：assets/files/monaco/，离线可用）
+  // ============================================================
+  var PREVIEW_EXT = {
+    txt: "plaintext", log: "plaintext", md: "markdown", csv: "plaintext",
+    json: "json", toml: "ini", ini: "ini", cfg: "ini", conf: "ini", properties: "ini", env: "ini",
+    yaml: "yaml", yml: "yaml", xml: "xml", html: "html", htm: "html", css: "css",
+    js: "javascript", ts: "typescript", py: "python", java: "java", go: "go", rs: "rust",
+    c: "cpp", h: "cpp", cpp: "cpp", cs: "csharp", rb: "ruby", php: "php", lua: "lua",
+    sh: "shell", bat: "bat", cmd: "bat", ps1: "powershell", sql: "sql",
+    dockerfile: "dockerfile", vue: "html", gitignore: "plaintext", reg: "plaintext",
+  };
+  var PREVIEW_MAX = 8 * 1024 * 1024;
+  var monacoReady = null;
+  var previewEditor = null;
+
+  function previewLang(name) {
+    var idx = name.lastIndexOf(".");
+    if (idx < 0) return null;
+    return PREVIEW_EXT[name.slice(idx + 1).toLowerCase()] || null;
+  }
+
+  function monacoLoad() {
+    if (monacoReady) return monacoReady;
+    monacoReady = new Promise(function (res, rej) {
+      if (!window.require) { rej(new Error("Monaco loader 未加载")); return; }
+      window.MonacoEnvironment = {
+        getWorkerUrl: function (moduleId, label) {
+          return label === "json"
+            ? "monaco/vs/language/json/jsonWorker.js"
+            : "monaco/vs/base/worker/workerMain.js";
+        },
+      };
+      window.require.config({ paths: { vs: "monaco/vs" } });
+      window.require(["vs/editor/editor.main"], function () { res(window.monaco); },
+                     function () { rej(new Error("Monaco 主模块加载失败")); });
+    });
+    return monacoReady;
+  }
+
+  function previewEntry(e) {
+    if (!e || e.dir) { setStatus("请选择文本文件"); return; }
+    var lang = previewLang(e.name);
+    if (!lang) { setStatus("该类型不支持预览"); return; }
+    if (e.size > PREVIEW_MAX) { setStatus("文件超过 8MB，不支持预览"); return; }
+    setStatus("加载预览 " + e.name + " ...");
+    fetch("/api/files/download?path=" + encodeURIComponent(join(cwd, e.name)))
+      .then(function (resp) {
+        if (!resp.ok) throw new Error("HTTP " + resp.status);
+        return resp.text();
+      })
+      .then(function (text) {
+        return monacoLoad().then(function () { showPreview(e.name, lang, text, e.size); });
+      })
+      .then(function () { setStatus("就绪"); })
+      .catch(function (err) { setStatus("预览失败: " + (err && err.message ? err.message : err)); });
+  }
+
+  function showPreview(name, lang, text, size) {
+    document.getElementById("pv-title").textContent = "预览 — " + name;
+    document.getElementById("pv-overlay").style.display = "flex";
+    if (previewEditor) { previewEditor.dispose(); previewEditor = null; }
+    previewEditor = window.monaco.editor.create(document.getElementById("pv-editor"), {
+      value: text,
+      language: lang,
+      readOnly: true,
+      automaticLayout: true,
+      fontSize: 12,
+      minimap: { enabled: false },
+      scrollBeyondLastLine: false,
+      theme: "vs",
+    });
+    document.getElementById("pv-status").textContent = fmtSize({ size: size }) + " · " + lang + " · 只读";
+  }
+  function closePreview() {
+    document.getElementById("pv-overlay").style.display = "none";
+    if (previewEditor) { previewEditor.dispose(); previewEditor = null; }
+  }
+  document.getElementById("previewbtn").addEventListener("click", function () { previewEntry(selected()); });
+  document.getElementById("pv-close").addEventListener("click", closePreview);
+  document.getElementById("pv-overlay").addEventListener("click", function (e) {
+    if (e.target === this) closePreview();
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && document.getElementById("pv-overlay").style.display !== "none") closePreview();
   });
 
   // ============================================================
