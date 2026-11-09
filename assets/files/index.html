@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LocalFileDropShell — Web 文件管理器</title>
+<style>
+/* Windows 95 design tokens — assets/02-windows-95.css */
+:root {
+  --bg: #008080; --chrome: #c0c0c0; --chrome-light: #dfdfdf;
+  --chrome-lighter: #ffffff; --chrome-dark: #808080; --chrome-darker: #000000;
+  --ink: #000; --title: #000080; --title-text: #fff; --select: #000080;
+  --font: "MS Sans Serif", "Pixelated MS Sans Serif", Tahoma, sans-serif;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+  background: var(--bg); font-family: var(--font); font-size: 12px; color: var(--ink);
+  display: flex; align-items: center; justify-content: center; padding: 12px;
+}
+.window {
+  width: min(860px, 100%); height: min(600px, 100%);
+  display: flex; flex-direction: column;
+  background: var(--chrome);
+  border: 2px solid;
+  border-color: var(--chrome-lighter) var(--chrome-darker) var(--chrome-darker) var(--chrome-lighter);
+  box-shadow: inset -1px -1px 0 var(--chrome-dark), inset 1px 1px 0 var(--chrome-light);
+  padding: 2px;
+}
+.titlebar {
+  background: linear-gradient(90deg, var(--title), #1084d0);
+  color: var(--title-text); font-weight: bold; padding: 3px 6px;
+  display: flex; justify-content: space-between; user-select: none;
+}
+.body { padding: 8px; display: flex; flex-direction: column; flex: 1; min-height: 0; }
+
+.toolbar { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; flex-wrap: wrap; }
+button {
+  font-family: var(--font); font-size: 12px; padding: 3px 10px;
+  background: var(--chrome); border: 2px solid;
+  border-color: var(--chrome-lighter) var(--chrome-darker) var(--chrome-darker) var(--chrome-lighter);
+  box-shadow: inset -1px -1px 0 var(--chrome-dark), inset 1px 1px 0 var(--chrome-light);
+  cursor: pointer;
+}
+button:active {
+  border-color: var(--chrome-darker) var(--chrome-lighter) var(--chrome-lighter) var(--chrome-darker);
+  box-shadow: none;
+}
+input[type=text], input[type=password] {
+  font-family: var(--font); font-size: 12px; padding: 2px 4px;
+  border: 2px solid;
+  border-color: var(--chrome-dark) var(--chrome-lighter) var(--chrome-lighter) var(--chrome-dark);
+  background: #fff; outline: none;
+}
+#path { flex: 1; min-width: 200px; }
+
+.listwrap {
+  flex: 1; min-height: 0;
+  border: 2px solid;
+  border-color: var(--chrome-dark) var(--chrome-lighter) var(--chrome-lighter) var(--chrome-dark);
+  background: #fff; overflow-y: auto;
+}
+table { width: 100%; border-collapse: collapse; }
+th {
+  text-align: left; font-weight: normal; padding: 2px 6px;
+  background: var(--chrome); border: 1px solid;
+  border-color: var(--chrome-lighter) var(--chrome-darker) var(--chrome-darker) var(--chrome-lighter);
+  position: sticky; top: 0;
+}
+td { padding: 1px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 380px; }
+tr.sel td { background: var(--select); color: #fff; }
+tr:hover:not(.sel) td { background: var(--chrome-light); }
+.name { cursor: default; }
+.name .ico { display: inline-block; width: 18px; }
+
+.statusbar {
+  margin-top: 6px; padding: 2px 6px;
+  border: 2px solid;
+  border-color: var(--chrome-dark) var(--chrome-lighter) var(--chrome-lighter) var(--chrome-dark);
+  display: flex; justify-content: space-between; gap: 8px;
+}
+#authstate.locked { color: #c00000; }
+#authstate.ok { color: #008000; }
+
+/* 登录对话框 */
+.modal-mask {
+  position: fixed; inset: 0; background: rgba(0,0,0,.35);
+  display: none; align-items: center; justify-content: center;
+}
+.modal-mask.show { display: flex; }
+.modal {
+  width: 300px; background: var(--chrome); padding: 2px;
+  border: 2px solid;
+  border-color: var(--chrome-lighter) var(--chrome-darker) var(--chrome-darker) var(--chrome-lighter);
+}
+.modal .mbody { padding: 10px; }
+.modal .row { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+.modal .row label { width: 48px; flex: none; }
+.modal .row input { flex: 1; }
+.modal .btns { display: flex; justify-content: flex-end; gap: 6px; }
+
+.drop-hint { color: var(--chrome-dark); }
+.listwrap.over { outline: 2px dashed var(--title); outline-offset: -4px; }
+</style>
+</head>
+<body>
+<div class="window">
+  <div class="titlebar"><span>Web 文件管理器 — LocalFileDropShell</span><span id="titleright">C 盘写操作需登录</span></div>
+  <div class="body">
+    <div class="toolbar">
+      <button id="up" type="button">⬆ 上级</button>
+      <input type="text" id="path" placeholder="留空显示盘符列表，回车打开">
+      <button id="refresh" type="button">刷新</button>
+      <button id="uploadbtn" type="button">上传</button>
+      <button id="mkdirbtn" type="button">新建文件夹</button>
+      <button id="renamebtn" type="button">重命名</button>
+      <button id="delbtn" type="button">删除</button>
+      <button id="dlbtn" type="button">下载</button>
+      <button id="loginbtn" type="button">登录</button>
+      <input type="file" id="picker" multiple hidden>
+    </div>
+    <div class="listwrap" id="listwrap">
+      <table>
+        <thead><tr><th>名称</th><th style="width:90px">大小</th><th style="width:150px">修改时间</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    <div class="statusbar">
+      <span id="status">就绪</span>
+      <span id="authstate" class="locked">未登录（C 盘只读）</span>
+    </div>
+  </div>
+</div>
+
+<div class="modal-mask" id="loginmask">
+  <div class="modal">
+    <div class="titlebar"><span>登录</span></div>
+    <div class="mbody">
+      <div class="row"><label>账号</label><input type="text" id="user" autocomplete="username"></div>
+      <div class="row"><label>密码</label><input type="password" id="pass" autocomplete="current-password"></div>
+      <div class="btns">
+        <button id="loginok" type="button">确定</button>
+        <button id="logincancel" type="button">取消</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var rowsEl = document.getElementById("rows");
+  var pathInput = document.getElementById("path");
+  var statusEl = document.getElementById("status");
+  var authEl = document.getElementById("authstate");
+  var listwrap = document.getElementById("listwrap");
+  var loginmask = document.getElementById("loginmask");
+  var loginbtn = document.getElementById("loginbtn");
+
+  var cwd = "";        // 当前路径，"" 表示盘符列表
+  var parent = null;
+  var entries = [];
+  var sel = -1;
+
+  function api(url, opts) {
+    return fetch(url, opts).then(function (r) {
+      return r.json().catch(function () { return { ok: false, error: "HTTP " + r.status }; });
+    });
+  }
+  function setStatus(t) { statusEl.textContent = t; }
+  function setAuth(auth) {
+    authEl.textContent = auth ? "已登录（C 盘可写）" : "未登录（C 盘只读）";
+    authEl.className = auth ? "ok" : "locked";
+    loginbtn.textContent = auth ? "注销" : "登录";
+  }
+
+  function fmtSize(e) {
+    if (e.dir) return "<DIR>";
+    var n = e.size;
+    if (n < 1024) return n + " B";
+    if (n < 1048576) return (n / 1024).toFixed(1) + " KB";
+    if (n < 1073741824) return (n / 1048576).toFixed(1) + " MB";
+    return (n / 1073741824).toFixed(2) + " GB";
+  }
+  function fmtTime(ts) {
+    if (!ts) return "";
+    var d = new Date(ts * 1000);
+    function p(x) { return (x < 10 ? "0" : "") + x; }
+    return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) +
+           " " + p(d.getHours()) + ":" + p(d.getMinutes());
+  }
+  function join(base, name) {
+    if (!base) return name;                 // 盘符列表 → "C:/"
+    return base.replace(/[\\/]+$/, "") + "/" + name;
+  }
+
+  function render() {
+    rowsEl.innerHTML = "";
+    entries.forEach(function (e, i) {
+      var tr = document.createElement("tr");
+      if (i === sel) tr.className = "sel";
+      var icon = e.dir ? "[+]" : "[ ]";
+      tr.innerHTML = '<td class="name"><span class="ico"></span></td><td></td><td></td>';
+      tr.children[0].querySelector(".ico").textContent = icon;
+      tr.children[0].appendChild(document.createTextNode(e.name));
+      tr.children[1].textContent = fmtSize(e);
+      tr.children[2].textContent = fmtTime(e.mtime);
+      tr.addEventListener("click", function () { sel = i; render(); });
+      tr.addEventListener("dblclick", function () {
+        if (e.dir) nav(join(cwd, e.name));
+        else location.href = "/api/files/download?path=" + encodeURIComponent(join(cwd, e.name));
+      });
+      rowsEl.appendChild(tr);
+    });
+    setStatus(entries.length + " 项");
+  }
+
+  function nav(path) {
+    api("/api/files/list?path=" + encodeURIComponent(path)).then(function (r) {
+      if (r.error) { setStatus("错误: " + r.error); return; }
+      cwd = r.path; parent = r.parent; entries = r.entries; sel = -1;
+      pathInput.value = cwd;
+      setAuth(r.auth);
+      render();
+    });
+  }
+
+  function selected() { return sel >= 0 ? entries[sel] : null; }
+
+  function writeOp(url, opts) {
+    return fetch(url, opts).then(function (r) {
+      return r.json().catch(function () { return { ok: false, error: "HTTP " + r.status }; });
+    }).then(function (r) {
+      if (r.error) {
+        setStatus("错误: " + r.error);
+        if (r.error.indexOf("登录") >= 0) loginmask.classList.add("show");
+      } else {
+        nav(cwd);
+      }
+      return r;
+    });
+  }
+
+  document.getElementById("up").addEventListener("click", function () {
+    if (parent !== null) nav(parent);
+  });
+  document.getElementById("refresh").addEventListener("click", function () { nav(cwd); });
+  pathInput.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") nav(pathInput.value.trim());
+  });
+
+  document.getElementById("dlbtn").addEventListener("click", function () {
+    var e = selected();
+    if (!e || e.dir) { setStatus("请选择文件"); return; }
+    location.href = "/api/files/download?path=" + encodeURIComponent(join(cwd, e.name));
+  });
+
+  document.getElementById("mkdirbtn").addEventListener("click", function () {
+    if (!cwd) { setStatus("请先进入盘符目录"); return; }
+    var name = prompt("新建文件夹名称：", "新建文件夹");
+    if (!name) return;
+    writeOp("/api/files/op", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ op: "mkdir", path: cwd, name: name }),
+    });
+  });
+
+  document.getElementById("renamebtn").addEventListener("click", function () {
+    var e = selected();
+    if (!e) { setStatus("请先选择项目"); return; }
+    var to = prompt("新名称：", e.name);
+    if (!to || to === e.name) return;
+    writeOp("/api/files/op", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ op: "rename", path: join(cwd, e.name), to: to }),
+    });
+  });
+
+  document.getElementById("delbtn").addEventListener("click", function () {
+    var e = selected();
+    if (!e) { setStatus("请先选择项目"); return; }
+    if (!confirm("确认删除 " + e.name + " ?" + (e.dir ? "（含全部内容）" : ""))) return;
+    writeOp("/api/files/op", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ op: "delete", path: join(cwd, e.name) }),
+    });
+  });
+
+  // ---- 上传（按钮 + 拖入列表区）----
+  var picker = document.getElementById("picker");
+  document.getElementById("uploadbtn").addEventListener("click", function () {
+    if (!cwd) { setStatus("请先进入盘符目录"); return; }
+    picker.click();
+  });
+  picker.addEventListener("change", function () {
+    uploadFiles(Array.prototype.slice.call(picker.files));
+    picker.value = "";
+  });
+  ["dragover", "dragenter"].forEach(function (ev) {
+    listwrap.addEventListener(ev, function (e) { e.preventDefault(); listwrap.classList.add("over"); });
+  });
+  ["dragleave", "drop"].forEach(function (ev) {
+    listwrap.addEventListener(ev, function (e) { e.preventDefault(); listwrap.classList.remove("over"); });
+  });
+  listwrap.addEventListener("drop", function (e) {
+    if (!cwd) { setStatus("请先进入盘符目录"); return; }
+    uploadFiles(Array.prototype.slice.call(e.dataTransfer.files));
+  });
+
+  function uploadFiles(files) {
+    if (!files.length) return;
+    var i = 0;
+    function next() {
+      if (i >= files.length) { nav(cwd); return; }
+      var f = files[i++];
+      setStatus("上传 " + f.name + " (" + i + "/" + files.length + ")");
+      var fd = new FormData();
+      fd.append("path", cwd);
+      fd.append("file", f, f.name);
+      writeOp("/api/files/upload", { method: "POST", body: fd }).then(next);
+    }
+    next();
+  }
+
+  // ---- 登录 ----
+  loginbtn.addEventListener("click", function () {
+    if (loginbtn.textContent === "注销") {
+      api("/api/files/logout", { method: "POST" }).then(function () { setAuth(false); nav(cwd); });
+    } else {
+      loginmask.classList.add("show");
+      document.getElementById("user").focus();
+    }
+  });
+  document.getElementById("logincancel").addEventListener("click", function () {
+    loginmask.classList.remove("show");
+  });
+  function doLogin() {
+    api("/api/files/login", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user: document.getElementById("user").value.trim(),
+        pass: document.getElementById("pass").value,
+      }),
+    }).then(function (r) {
+      if (r.error) { setStatus("登录失败: " + r.error); return; }
+      loginmask.classList.remove("show");
+      setAuth(true); nav(cwd);
+    });
+  }
+  document.getElementById("loginok").addEventListener("click", doLogin);
+  document.getElementById("pass").addEventListener("keydown", function (e) {
+    if (e.key === "Enter") doLogin();
+  });
+  loginmask.addEventListener("click", function (e) {
+    if (e.target === loginmask) loginmask.classList.remove("show");
+  });
+
+  nav("");
+})();
+</script>
+</body>
+</html>

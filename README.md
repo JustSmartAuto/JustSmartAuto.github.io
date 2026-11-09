@@ -14,6 +14,7 @@
 | **Web 拖放传文件** | 浏览器 `/drop/` | Win95 风格拖传页（`assets/drop/index.html`）：拖入文件/整个文件夹（保留目录层级）、逐文件进度条；可填「远程地址 ip[:端口]」经 RFB FTP 直推远程，留空则保存到本机目录；支持 `?path=&host=` 预填；Tk「文件」菜单一键打开 |
 | **CLI 交互式 shell** | 纯控制台 | 同进程三角色（`gui` / `server` / `client`），内置 upload / download / rsync / rfb-* 等命令 |
 | **系统托盘** | 托盘图标（drop3.ico） | ctypes + Shell_NotifyIconW 独立消息窗口线程（参考 InternetProxyPy，无第三方依赖）；窗口关闭按钮最小化到托盘，左键唤出、右键菜单「显示窗口 / 退出」；「文件 → 设置...」含「启动时最小化到托盘」开关（默认关闭，持久化 `minimize_to_tray_on_start`） |
+| **Web 文件管理器** | 浏览器 `/files/` | 参考 filebrowser-quantum，Win95 风格（`assets/files/index.html` + `fileman.py`）：匿名可浏览/下载所有盘，根目录列出 C:/ D:/ 等盘符；**C 盘写操作（上传/新建/删除/重命名）需登录**（账号/密码 `justsmart`），会话 Cookie 内存保存；支持双击进入、路径回车、上级回退、拖入上传 |
 
 **混合 UI 架构**：
 - **主窗口（Tkinter + tkinterdnd2）**：负责文件/文件夹拖放、传输列表、进度条、日志输出、批量生成——Windows 95 风格（3D 凸起边框、Teal 标题栏、MS Sans Serif）

@@ -1117,6 +1117,10 @@ def create_app(config: ServerConfig | None = None) -> web.Application:
     app.router.add_get("/shell/{tail:.*}", shell_static_handler)
     app.router.add_get("/drop/{tail:.*}", drop_static_handler)
 
+    # Web 文件管理器（匿名浏览盘符，C 盘写操作需 justsmart 登录）
+    from . import fileman as _fileman
+    _fileman.register(app)
+
     return app
 
 

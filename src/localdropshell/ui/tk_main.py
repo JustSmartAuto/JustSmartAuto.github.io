@@ -528,6 +528,12 @@ def _build_menus(
         webbrowser.open(f"{base_url}/drop/")
 
     m_file.add_command(label="打开 Web 拖传页面", command=_open_drop_page)
+
+    def _open_files_page() -> None:
+        import webbrowser
+        webbrowser.open(f"{base_url}/files/")
+
+    m_file.add_command(label="打开 Web 文件管理器", command=_open_files_page)
     m_file.add_separator()
     m_file.add_command(label="设置...", command=lambda: _show_settings_window(root))
     m_file.add_separator()
