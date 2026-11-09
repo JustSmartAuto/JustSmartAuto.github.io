@@ -231,12 +231,19 @@ def _filetime_to_unix(value: object) -> int:
 
 
 def search(query: str, base: str | None, limit: int = SEARCH_LIMIT) -> list[dict]:
-    """经 HTTP JSON API 搜索，返回与列目录同构的 entry 列表（多一个 ``full`` 绝对路径）."""
+    """经 HTTP JSON API 搜索，返回与列目录同构的 entry 列表（多一个 ``full`` 绝对路径）.
+
+    1.4.1 的 JSON 默认只给 ``type``/``name``；``path``/``size``/``date_modified``
+    （下划线命名，FILETIME 字符串）需显式开启对应 ``*_column=1``。
+    """
     params = urllib.parse.urlencode({
         "search": _syntax(query, base),
         "json": "1",
         "count": str(limit),
         "offset": "0",
+        "path_column": "1",
+        "size_column": "1",
+        "date_modified_column": "1",
     })
     url = f"http://127.0.0.1:{HTTP_PORT}/?{params}"
     with urllib.request.urlopen(url, timeout=10.0) as resp:
@@ -259,7 +266,7 @@ def search(query: str, base: str | None, limit: int = SEARCH_LIMIT) -> list[dict
             "name": name,
             "dir": is_dir,
             "size": 0 if is_dir else size,
-            "mtime": _filetime_to_unix(item.get("dateModified")),
+            "mtime": _filetime_to_unix(item.get("date_modified") or item.get("dateModified")),
             "full": full.replace("\\", "/"),
         })
     return entries
