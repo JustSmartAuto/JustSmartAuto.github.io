@@ -575,6 +575,18 @@ def run_tk_gui(
         root = tk.Tk()
 
     root.title("LocalFileDropShell — 工控机一体化远程运维")
+
+    # 窗口/任务栏图标（打包后经 _MEIPASS/assets 解析，缺失时忽略）
+    try:
+        from localdropshell.vnc import bundle_asset_dir
+        assets_dir = bundle_asset_dir()
+        if assets_dir is not None:
+            ico = assets_dir / "drop3.ico"
+            if ico.is_file():
+                root.iconbitmap(str(ico))
+    except Exception:  # pragma: no cover — 图标失败不影响主流程
+        logger.debug("设置窗口图标失败", exc_info=True)
+
     root.geometry("1040x680")
     root.minsize(820, 520)
     apply_win95_style(root)
