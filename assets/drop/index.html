@@ -163,6 +163,7 @@ button:active {
 <div class="window">
   <div class="titlebar">
     <span>LocalFileDropShell — Web 拖放传文件</span>
+    <span id="alias" title="设备昵称（首次启动随机生成）"></span>
     <span class="btns"><span>_</span><span>□</span><span>×</span></span>
   </div>
   <div class="body">
@@ -204,6 +205,14 @@ button:active {
   var q = new URLSearchParams(location.search);
   if (q.get("path")) dirInput.value = q.get("path");
   if (q.get("host")) hostInput.value = q.get("host");
+
+  // 设备昵称（服务端首次访问生成并持久化）
+  fetch("/api/device").then(function (r) { return r.json(); }).then(function (j) {
+    if (j && j.alias) {
+      document.getElementById("alias").textContent = "「" + j.alias + "」";
+      document.title = j.alias + " — Web 拖放传文件";
+    }
+  }).catch(function () {});
 
   document.getElementById("browse").addEventListener("click", function () { picker.click(); });
   picker.addEventListener("change", function () {

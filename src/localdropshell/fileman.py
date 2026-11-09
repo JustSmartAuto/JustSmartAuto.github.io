@@ -32,6 +32,7 @@ from urllib.parse import quote
 import aiohttp.web as web
 
 from . import fountain as _fountain
+from . import settings as _settings
 from . import vnc as _vnc
 
 logger = logging.getLogger("localdropshell.fileman")
@@ -172,6 +173,11 @@ async def logout_handler(request: web.Request) -> web.Response:
 
 async def session_handler(request: web.Request) -> web.Response:
     return _ok({"auth": _authed(request)})
+
+
+async def device_handler(request: web.Request) -> web.Response:
+    """GET /api/device — 设备昵称（首次访问生成并持久化到 settings.json）."""
+    return _ok({"alias": _settings.device_alias()})
 
 
 # ---------------------------------------------------------------------------
@@ -466,6 +472,7 @@ def register(app: web.Application) -> None:
     app.router.add_post("/api/files/login", login_handler)
     app.router.add_post("/api/files/logout", logout_handler)
     app.router.add_get("/api/files/session", session_handler)
+    app.router.add_get("/api/device", device_handler)
     app.router.add_get("/api/files/list", list_handler)
     app.router.add_get("/api/files/download", download_handler)
     app.router.add_get("/api/files/fountain", fountain_handler)
