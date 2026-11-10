@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import os
 import re
 import socket
 import subprocess
 import threading
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable
 
 from .config import CORE_ARGS, INSTANCE_NAME, VIRTUAL_CIDR
@@ -126,7 +128,7 @@ class EasyTierEngine:
     @staticmethod
     def _local_virtual_ip() -> str:
         result = subprocess.run(
-            ["ipconfig", "/all"],
+            [str(Path(os.environ["SystemRoot"]) / "System32" / "ipconfig.exe"), "/all"],
             capture_output=True,
             timeout=5,
             creationflags=subprocess.CREATE_NO_WINDOW,

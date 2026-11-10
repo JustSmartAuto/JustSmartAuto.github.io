@@ -19,7 +19,7 @@ uv run python build_exe.py
 
 ## 运行说明
 
-- 使用默认 EasyTier 监听器，并通过 TCP、UDP 连接 `public.easytier.cn:11010`。
+- TCP、UDP、WireGuard 监听端口均由系统自动分配，避免与其他程序发生端口冲突；通过 TCP、UDP 连接 `easytier-us.slarker.me:11010`。
 - 启动时清理 VirtualLanPy 自己残留的提权 core 进程，避免旧实例占用 11010 等端口；不会清理 EasyTier GUI 的进程。
 - 提权后自动将内嵌证书导入当前用户的“受信任的根证书颁发机构”和“受信任的发布者”。
 - 配置目录优先使用 `D:/JustSmart/VirtualLanPy`，不可用时回退到 `%APPDATA%/VirtualLanPy`；EasyTier 日志保存在其中的 `logs/`。
@@ -34,9 +34,9 @@ instance_name = "justsmart"
 dhcp = true
 ipv4 = "10.168.10.0/24"
 listeners = [
-    "tcp://0.0.0.0:11010",
-    "udp://0.0.0.0:11010",
-    "wg://0.0.0.0:11011",
+    "tcp://0.0.0.0:0",
+    "udp://0.0.0.0:0",
+    "wg://0.0.0.0:0",
 ]
 rpc_portal = "127.0.0.1:15888"
 
@@ -45,10 +45,10 @@ network_name = "justsmart"
 network_secret = "justsmart"
 
 [[peer]]
-uri = "tcp://public.easytier.cn:11010"
+uri = "tcp://easytier-us.slarker.me:11010"
 
 [[peer]]
-uri = "udp://public.easytier.cn:11010"
+uri = "udp://easytier-us.slarker.me:11010"
 
 [flags]
 ```
