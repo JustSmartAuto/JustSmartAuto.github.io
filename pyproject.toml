@@ -1,0 +1,19 @@
+[project]
+name = "VirtualLanPy"
+version = "1.0.0"
+description = "基于 EasyTier 的一键虚拟局域网调试工具"
+requires-python = ">=3.11"
+dependencies = ["tkinterdnd2>=0.7.0"]
+
+[dependency-groups]
+dev = ["pyinstaller>=6"]
+
+[project.scripts]
+virtual-lan = "virtual_lan.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

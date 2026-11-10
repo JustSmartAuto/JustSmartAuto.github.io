@@ -1,0 +1,63 @@
+EasyTier CLI 使用指南
+1
+EasyTier CLI 是 EasyTier 提供的命令行工具，用于管理和监控去中心化虚拟网络。它支持节点状态查看、路由信息查询、VPN 配置导出等操作，适合在服务器或无图形界面环境下使用。
+
+安装与准备 可通过多种方式安装 EasyTier，包括下载预编译二进制文件、cargo install、Docker、Linux 脚本、Homebrew 等。安装完成后，核心程序为 easytier-core，管理工具为 easytier-cli。
+
+快速组网示例 当没有公网 IP 时，可使用社区提供的共享节点：
+
+# 节点 A
+sudo easytier-core -d --network-name abc --network-secret abc -p tcp://public.easytier.cn:11010
+
+# 节点 B
+sudo easytier-core -d --network-name abc --network-secret abc -p tcp://public.easytier.cn:11010
+复制
+连接成功后，可用 CLI 检查状态：
+
+easytier-cli peer
+复制
+输出将显示节点 IP、延迟、丢包率、传输字节数等信息。
+
+常用 CLI 命令
+
+查看对等节点
+
+easytier-cli peer
+复制
+查看路由信息
+
+easytier-cli route
+复制
+查看本地节点信息
+
+easytier-cli node
+复制
+导出 WireGuard 客户端配置
+
+easytier-cli vpn-portal
+复制
+高级用法
+
+子网代理：启动时添加 -n 参数共享子网，CLI 可验证路由同步情况：
+
+sudo easytier-core -i 10.144.144.2 -n 10.1.1.0/24
+easytier-cli route
+复制
+WireGuard 集成：启用 VPN 门户并导出配置，方便移动端接入：
+
+sudo easytier-core -i 10.144.144.1 --vpn-portal wg://0.0.0.0:11013/10.14.14.0/24
+easytier-cli vpn-portal
+复制
+提示
+
+若无法 ping 通，需检查防火墙规则。
+
+可同时连接多个共享节点以提高可用性。
+
+CLI 输出可用于自动化脚本，实现网络状态监控与运维。
+
+这样，借助 EasyTier CLI，您可以在命令行中高效管理去中心化 VPN 网络，并灵活扩展功能。
+
+了解详细信息:
+1 -
+github.com
