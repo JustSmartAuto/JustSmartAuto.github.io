@@ -1,0 +1,17 @@
+instance_name = "justsmart"
+
+dhcp = true
+listeners = []
+
+[network_identity]
+network_name = "justsmart"
+network_secret = "justsmart"
+
+[[peer]]
+uri = "tcp://225284.xyz:11010"
+
+[[peer]]
+uri = "udp://225284.xyz:11010"
+
+[flags]
+dev_name = "et_9_ajdv"
