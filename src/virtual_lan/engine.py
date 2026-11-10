@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import re
 import socket
 import subprocess
 import threading
@@ -31,6 +32,7 @@ class EasyTierEngine:
         self._poll_thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._rpc_portal = ""
+        self._api_warning_logged = False
         self.running = False
 
     @staticmethod
@@ -105,16 +107,41 @@ class EasyTierEngine:
             raise RuntimeError(result.stderr.strip() or result.stdout.strip() or f"cli 退出码 {result.returncode}")
         return json.loads(result.stdout)
 
+    @staticmethod
+    def _local_virtual_ip() -> str:
+        result = subprocess.run(
+            ["ipconfig", "/all"],
+            capture_output=True,
+            timeout=5,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        output = result.stdout.decode("mbcs", errors="replace")
+        match = re.search(r"\b10\.168\.10\.(?:[1-9]|[1-9]\d|1\d\d|2[0-4]\d|25[0-4])\b", output)
+        return match.group(0) if match else "等待分配"
+
     def _poll(self) -> None:
         while not self._stop.wait(2):
             try:
                 node = self._cli("node")
                 peers = self._cli("peer")
-                status = parse_status(node, peers)
-                self.on_status(status)
-            except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
-                if not self._stop.is_set():
-                    self.on_status(Status(state="正在连接", details=(f"状态查询暂不可用：{exc}",)))
+                self.on_status(parse_status(node, peers))
+                self._api_warning_logged = False
+            except (OSError, RuntimeError, ValueError, json.JSONDecodeError, subprocess.TimeoutExpired):
+                if self._stop.is_set():
+                    continue
+                if not self._api_warning_logged:
+                    self.on_log("CLI 状态 API 不可用，已切换为 Windows 网卡状态检测")
+                    self._api_warning_logged = True
+                try:
+                    virtual_ip = self._local_virtual_ip()
+                except (OSError, subprocess.TimeoutExpired):
+                    virtual_ip = "等待分配"
+                connected = virtual_ip != "等待分配"
+                self.on_status(Status(
+                    state="已连接" if connected else "正在获取虚拟 IP",
+                    virtual_ip=virtual_ip,
+                    details=("CLI 节点详情不可用；虚拟 IP 来自 Windows 网卡检测",),
+                ))
 
     def stop(self) -> None:
         with self._lock:
@@ -171,8 +198,9 @@ def parse_status(node: object, peers: object) -> Status:
     details = []
     for item in peer_items:
         hostname = next(iter(_find_values(item, {"hostname"})), "节点")
+        peer_ip = next(iter(_find_values(item, {"virtual_ip", "virtual_ipv4", "ipv4", "ip_addr"})), "未知")
         cost = next(iter(_find_values(item, {"cost", "latency"})), "-")
-        details.append(f"{hostname}    延迟/路径：{cost}")
+        details.append(f"{hostname}    IP：{peer_ip}    延迟/路径：{cost}")
     ip = ips[0] if ips else "等待分配"
     state = "已连接" if ips else "正在获取虚拟 IP"
     return Status(state=state, virtual_ip=ip, hostname=hostnames[0] if hostnames else "-", peers=len(peer_items), details=tuple(details))

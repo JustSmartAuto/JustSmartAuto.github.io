@@ -4,7 +4,7 @@ import queue
 import threading
 import tkinter as tk
 from datetime import datetime
-from tkinter import filedialog, ttk
+from tkinter import ttk
 
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
@@ -57,10 +57,10 @@ class MainWindow:
 
         controls = tk.Frame(self.root, bg=BG)
         controls.pack(fill="x", padx=24)
-        self.start_button = tk.Button(controls, text="重新连接", command=self.reconnect, bg=PRIMARY, fg="white", activebackground="#1D4ED8", activeforeground="white", relief="flat", font=FONT, padx=18, pady=6)
+        self.start_button = self._button(controls, "重新连接", self.reconnect, primary=True)
         self.start_button.pack(side="left")
-        tk.Button(controls, text="复制虚拟 IP", command=self.copy_ip, bg=CARD, fg=TEXT, relief="solid", bd=1, font=FONT, padx=18, pady=6).pack(side="left", padx=8)
-        tk.Button(controls, text="断开连接", command=self.disconnect, bg=CARD, fg=TEXT, relief="solid", bd=1, font=FONT, padx=18, pady=6).pack(side="left")
+        self._button(controls, "复制虚拟 IP", self.copy_ip).pack(side="left", padx=8)
+        self._button(controls, "断开连接", self.disconnect).pack(side="left")
 
         notebook = ttk.Notebook(self.root)
         notebook.pack(fill="both", expand=True, padx=20, pady=16)
@@ -74,6 +74,21 @@ class MainWindow:
             widget.drop_target_register(DND_FILES)
             widget.dnd_bind("<<Drop>>", self._drop)
         tk.Label(self.root, text="可将日志文件拖入窗口打开", bg=BG, fg=MUTED, font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=24, pady=(0, 8))
+
+    @staticmethod
+    def _button(parent: tk.Frame, text: str, command, primary: bool = False) -> tk.Button:
+        normal = PRIMARY if primary else CARD
+        hover = "#1D4ED8" if primary else "#E2E8F0"
+        foreground = "white" if primary else TEXT
+        button = tk.Button(
+            parent, text=text, command=command, bg=normal, fg=foreground,
+            activebackground=hover, activeforeground=foreground,
+            relief="flat" if primary else "solid", bd=0 if primary else 1,
+            font=FONT, padx=18, pady=6, cursor="hand2",
+        )
+        button.bind("<Enter>", lambda _event: button.configure(bg=hover) if button["state"] != "disabled" else None)
+        button.bind("<Leave>", lambda _event: button.configure(bg=normal))
+        return button
 
     @staticmethod
     def _text(parent: tk.Frame) -> tk.Text:
