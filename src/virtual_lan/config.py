@@ -12,6 +12,4 @@ CORE_ARGS = (
     "--network-secret", NETWORK_SECRET,
     "--peers", PUBLIC_SERVER, PUBLIC_SERVER_UDP,
     "--instance-name", INSTANCE_NAME,
-    "--no-listener",
-    "--multi-thread",
 )

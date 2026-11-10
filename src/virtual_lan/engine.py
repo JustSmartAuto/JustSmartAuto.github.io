@@ -41,11 +41,27 @@ class EasyTierEngine:
             sock.bind(("127.0.0.1", 0))
             return f"127.0.0.1:{sock.getsockname()[1]}"
 
+    @staticmethod
+    def _stop_orphaned_cores() -> None:
+        script = (
+            "Get-CimInstance Win32_Process -Filter \"Name='easytier-core.exe'\" | "
+            "Where-Object {$_.CommandLine -like '*_MEI*' -and "
+            "$_.CommandLine -like '*--network-name justsmart*'} | "
+            "ForEach-Object {Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue}"
+        )
+        subprocess.run(
+            ["powershell.exe", "-NoProfile", "-Command", script],
+            capture_output=True,
+            timeout=10,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+
     def start(self) -> None:
         with self._lock:
             if self.running:
                 return
             validate_binaries()
+            self._stop_orphaned_cores()
             self._stop.clear()
             self._rpc_portal = self._available_rpc_portal()
             log_dir = config_dir() / "logs"
