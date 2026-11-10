@@ -9,7 +9,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Callable
 
-from .config import CORE_ARGS, INSTANCE_NAME
+from .config import CORE_ARGS, INSTANCE_NAME, VIRTUAL_CIDR
 from .paths import config_dir
 from .resources import resource, validate_binaries
 
@@ -72,7 +72,7 @@ class EasyTierEngine:
                 self.on_status(Status(state="启动失败"))
                 return
             self.running = True
-            self.on_log("EasyTier 已启动，正在通过 DHCP 获取 10.168.10.0/24 网段地址 ...")
+            self.on_log(f"EasyTier 已启动，正在通过 DHCP 获取 {VIRTUAL_CIDR} 网段地址 ...")
             self.on_status(Status(state="正在连接"))
             threading.Thread(target=self._read_output, args=(self._process,), daemon=True, name="easytier-output").start()
             self._poll_thread = threading.Thread(target=self._poll, daemon=True, name="easytier-status")
@@ -192,7 +192,7 @@ def parse_status(node: object, peers: object) -> Status:
             address = ipaddress.ip_address(candidate)
         except ValueError:
             continue
-        if address in ipaddress.ip_network("10.168.10.0/24"):
+        if address in ipaddress.ip_network(VIRTUAL_CIDR):
             ips.append(candidate)
     hostnames = [str(v) for v in _find_values(node, {"hostname"}) if v]
     details = []

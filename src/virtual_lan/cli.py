@@ -61,6 +61,14 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if not single_instance():
         return 1
+    try:
+        from .certificates import install_trusted_certificate
+        install_trusted_certificate()
+    except (OSError, ctypes.WinError) as exc:
+        ctypes.windll.user32.MessageBoxW(
+            0, f"签名证书自动导入失败：{exc}\n软件将继续运行，但 Windows 可能显示发布者警告。",
+            "VirtualLanPy", 0x30,
+        )
     from .ui import MainWindow
     MainWindow().run()
     return 0
