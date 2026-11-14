@@ -172,7 +172,7 @@ class VncClient:
         pixel_format = struct.pack(">BBBBHHHBBBxxx", 32, 24, 0, 1, 255, 255, 255, 16, 8, 0)
         self._send(struct.pack(">BBxx", 0, 1) + pixel_format)
         encoding_map = {"原始": 0, "Hextile": 5, "ZRLE": 16}
-        preferred = encoding_map.get(self.encoding)
+        preferred = encoding_map.get(self.encoding, 16)
         encodings = [0, 1, 5, 16]
         if preferred in encodings:
             encodings.remove(preferred)
@@ -206,7 +206,8 @@ class VncClient:
     def _read_message(self) -> None:
         message_type = self._recv(1)[0]
         if message_type == 0:
-            self._recv(3)
+            # RFC 6143 §7.6.1：FramebufferUpdate 头为 type + 1 字节 padding + U16 矩形数
+            self._recv(1)
             count = struct.unpack(">H", self._recv(2))[0]
             for _ in range(count):
                 x, y, width, height, encoding = struct.unpack(">HHHHi", self._recv(12))
@@ -229,7 +230,14 @@ class VncClient:
             raise VncError(f"未知服务器消息: {message_type}")
 
     def _decode_rectangle(self, x: int, y: int, width: int, height: int, encoding: int) -> None:
-        if not self.image or width <= 0 or height <= 0:
+        if not self.image:
+            raise VncError("无效的帧缓冲区矩形")
+        if encoding == -239:
+            # 光标伪编码：0x0 表示隐藏光标（无数据）
+            if width > 0 and height > 0:
+                self._recv(width * height * 4 + ((width + 7) // 8) * height)
+            return
+        if width <= 0 or height <= 0:
             raise VncError("无效的帧缓冲区矩形")
         if encoding == 0:
             tile = Image.frombytes("RGB", (width, height), self._recv(width * height * 4), "raw", "BGRX")
@@ -248,13 +256,13 @@ class VncClient:
             resized.paste(self.image, (0, 0))
             self.image = resized
             self.on_event("resized", (width, height))
-        elif encoding == -239:
-            self._recv(width * height * 4 + ((width + 7) // 8) * height)
+            # RFB 规范：帧缓冲区尺寸变化后需重新发送非增量请求（RFC 6143 §7.8.2）
+            self.request_update(incremental=False)
         else:
             raise VncError(f"收到未协商的编码: {encoding}")
 
     def _pixel(self) -> tuple[int, int, int]:
-        blue, green, red = self._recv(3)
+        blue, green, red, _ = self._recv(4)
         return red, green, blue
 
     def _decode_hextile(self, x: int, y: int, width: int, height: int) -> None:
@@ -300,53 +308,77 @@ class VncClient:
             offset += count
             return result
 
+        def run_length() -> int:
+            # 长度 = 所有长度字节之和 + 1；255 为续接字节（RFC 6143 §7.7.5）
+            total = 0
+            while True:
+                byte = take(1)[0]
+                total += byte
+                if byte != 255:
+                    return total + 1
+
         for tile_y in range(0, height, 64):
             tile_h = min(64, height - tile_y)
             for tile_x in range(0, width, 64):
                 tile_w = min(64, width - tile_x)
-                palette_size = take(1)[0]
-                palette = []
-                for _ in range(palette_size):
+                subencoding = take(1)[0]
+                size = tile_w * tile_h
+                tile = None
+                if subencoding == 0:
+                    tile = Image.frombytes("RGB", (tile_w, tile_h), take(size * 3), "raw", "BGR")
+                elif subencoding == 1:
                     blue, green, red = take(3)
-                    palette.append((red, green, blue))
-                tile = Image.new("RGB", (tile_w, tile_h))
-                pixels = tile.load()
-                if palette_size == 0:
+                    tile = Image.frombytes("RGB", (tile_w, tile_h), bytes((red, green, blue)) * size, "raw", "RGB")
+                elif 2 <= subencoding <= 16:
+                    palette = []
+                    for _ in range(subencoding):
+                        blue, green, red = take(3)
+                        palette.append((red, green, blue))
+                    bits = 1 if subencoding == 2 else (2 if subencoding <= 4 else 4)
+                    row_bytes = (tile_w * bits + 7) // 8
+                    mask = (1 << bits) - 1
+                    buf = bytearray(size * 3)
                     for py in range(tile_h):
+                        row = take(row_bytes)
                         for px in range(tile_w):
-                            blue, green, red = take(3)
-                            pixels[px, py] = red, green, blue
-                elif palette_size == 1:
-                    tile.paste(palette[0], (0, 0, tile_w, tile_h))
+                            position = px * bits
+                            index = (row[position // 8] >> (8 - bits - (position % 8))) & mask
+                            buf[(py * tile_w + px) * 3:(py * tile_w + px) * 3 + 3] = bytes(palette[index])
+                    tile = Image.frombytes("RGB", (tile_w, tile_h), bytes(buf), "raw", "RGB")
+                elif 17 <= subencoding <= 127:
+                    raise VncError(f"ZRLE 无效子编码: {subencoding}")
+                elif subencoding == 128:
+                    buf = bytearray(size * 3)
+                    filled = 0
+                    while filled < size:
+                        blue, green, red = take(3)
+                        run = min(run_length(), size - filled)
+                        buf[filled * 3:(filled + run) * 3] = bytes((red, green, blue)) * run
+                        filled += run
+                    tile = Image.frombytes("RGB", (tile_w, tile_h), bytes(buf), "raw", "RGB")
+                elif subencoding in (129,) :
+                    raise VncError("ZRLE 不支持调色板复用")
                 else:
-                    for py in range(tile_h):
-                        px = 0
-                        while px < tile_w:
-                            value = take(1)[0]
-                            run = 1
-                            if value == 128:
-                                color = tuple(take(3))
-                                color = color[2], color[1], color[0]
-                                run = take(1)[0] + 1
-                            elif value > 128:
-                                color = palette[value - 128]
-                                run = take(1)[0] + 1
-                            elif value in (2, 4, 8, 16) and value == palette_size:
-                                bits = {2: 1, 4: 2, 8: 4, 16: 8}[value]
-                                packed = take((tile_w * bits + 7) // 8)
-                                for index in range(tile_w):
-                                    bit = index * bits
-                                    shift = 8 - bits - (bit % 8)
-                                    palette_index = (packed[bit // 8] >> shift) & (value - 1)
-                                    pixels[index, py] = palette[palette_index]
-                                px = tile_w
-                                continue
-                            else:
-                                color = palette[value]
-                            for _ in range(run):
-                                if px < tile_w:
-                                    pixels[px, py] = color
-                                    px += 1
+                    palette_size = subencoding - 128
+                    palette = []
+                    for _ in range(palette_size):
+                        blue, green, red = take(3)
+                        palette.append((red, green, blue))
+                    buf = bytearray(size * 3)
+                    filled = 0
+                    while filled < size:
+                        value = take(1)[0]
+                        if value < 128:
+                            index, run = value, 1
+                        else:
+                            index = value - 128
+                            run = min(run_length(), size - filled)
+                        if index >= palette_size:
+                            raise VncError("ZRLE 调色板索引越界")
+                        blue, green, red = palette[index]
+                        buf[filled * 3:(filled + run) * 3] = bytes((red, green, blue)) * run
+                        filled += run
+                    tile = Image.frombytes("RGB", (tile_w, tile_h), bytes(buf), "raw", "RGB")
                 self.image.paste(tile, (x + tile_x, y + tile_y))
 
     def pointer(self, x: int, y: int, mask: int) -> None:
