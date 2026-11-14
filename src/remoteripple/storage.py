@@ -100,7 +100,7 @@ class Store:
             "settings": {
                 "night_mode": False,
                 "diagnostic_mode": False,
-                "check_updates": True,
+                "check_updates": False,
                 "last_update": None,
             },
         }

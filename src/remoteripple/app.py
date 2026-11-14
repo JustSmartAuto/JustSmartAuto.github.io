@@ -300,7 +300,7 @@ class RemoteRippleApp:
         frame.pack(fill=tk.BOTH, expand=True)
         night = tk.BooleanVar(value=self.store.settings.get("night_mode"))
         diagnostic = tk.BooleanVar(value=self.store.settings.get("diagnostic_mode"))
-        updates = tk.BooleanVar(value=self.store.settings.get("check_updates", True))
+        updates = tk.BooleanVar(value=self.store.settings.get("check_updates", False))
         for text, variable in (("深色主题（重启后完全生效）", night), ("诊断模式（详细日志）", diagnostic), ("启动时检查更新", updates)):
             ttk.Checkbutton(frame, text=text, variable=variable).pack(anchor=tk.W, pady=5)
 
@@ -332,7 +332,7 @@ class RemoteRippleApp:
         self.status.set(f"已导出：{name}")
 
     def _startup_update(self) -> None:
-        if self.store.settings.get("check_updates", True):
+        if self.store.settings.get("check_updates", False):
             self.check_updates(False)
 
     def check_updates(self, forced: bool) -> None:
