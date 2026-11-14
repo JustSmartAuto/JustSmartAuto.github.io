@@ -235,8 +235,12 @@
             <p>VNC 密码使用当前 Windows 用户的 DPAPI 加密保存。</p>
           </div>
           <div class="card">
+            <h3><span class="dot">●</span>界面主题</h3>
+            <p>Claude 风格暖色主题：暖米白背景、涟漪橙红高亮，深色模式，全窗口圆角涟漪图标。</p>
+          </div>
+          <div class="card">
             <h3><span class="dot">●</span>更多细节</h3>
-            <p>深色主题、诊断模式（详细日志）、启动时检查更新。</p>
+            <p>诊断模式（详细日志）、启动时检查更新。</p>
           </div>
         </div>
       </section>
@@ -253,6 +257,11 @@
           目标地址支持 <code>host</code>、<code>host:5900</code>、<code>host::5900</code>、
           <code>[IPv6]:5900</code> 等格式，默认端口 5900。
         </p>
+        <p style="margin-top: 12px; color: var(--ink-soft); font-size: 14.5px">
+          打包为 exe：<code>python build_exe.py</code>（可选
+          <code>--onedir</code>、<code>--console</code>、<code>--name</code>），
+          产物输出至 <code>dist/</code>。
+        </p>
       </section>
 
       <section id="structure">
@@ -264,6 +273,7 @@
 ├── <span class="p">filetransfer.py</span>  <span class="c"># 文件传输页（本地/远程双栏、拖放）</span>
 ├── <span class="p">vnc.py</span>           <span class="c"># VNC/RFB 客户端（协议握手、编码解码、键鼠）</span>
 ├── <span class="p">rfbftp.py</span>        <span class="c"># TightVNC RFB 文件传输会话</span>
+├── <span class="p">theme.py</span>         <span class="c"># Claude 风格 ttk 主题</span>
 ├── <span class="p">models.py</span>        <span class="c"># Host/Session 数据模型、地址解析</span>
 └── <span class="p">storage.py</span>       <span class="c"># 配置存储、DPAPI 密码加密</span></pre>
       </section>
@@ -274,8 +284,9 @@
         <p>
           RemoteRipplePy · MIT License © 2026
           <a href="https://github.com/JustSmartAuto">JustSmartAuto</a>
-          · 配置与日志保存在
-          <code>%APPDATA%/RemoteRipplePy</code>
+          · 配置保存在
+          <code>D:/JustSmart/RemoteRipplePy</code>
+          （回退 <code>%APPDATA%/JustSmart/RemoteRipplePy</code>）
         </p>
       </div>
     </footer>
