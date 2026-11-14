@@ -1,6 +1,6 @@
 [project]
 name = "RemoteRipplePy"
-version = "1.2.0"
+version = "26.11.14.15"
 description = "Pure Python RemoteRipple-compatible VNC client with Tkinter and TightVNC file transfer"
 requires-python = ">=3.13,<3.14"
 dependencies = [

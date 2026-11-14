@@ -30,7 +30,7 @@ class RemoteRippleApp:
     def __init__(self) -> None:
         self.store = Store()
         self.root = TkinterDnD.Tk()
-        self.root.title(f"Remote Ripple Python {__version__}")
+        self.root.title(f"RemoteRipplePy {__version__}")
         self.root.geometry("1180x760")
         apply_icon(self.root)
         self.root.minsize(850, 560)
@@ -75,7 +75,7 @@ class RemoteRippleApp:
         help_menu.add_command(label="诊断日志", command=self.show_logs)
         help_menu.add_command(label="检查更新", command=lambda: self.check_updates(True))
         help_menu.add_command(label="Remote Ripple 网站", command=lambda: webbrowser.open("https://remoteripple.com"))
-        help_menu.add_command(label="关于", command=lambda: messagebox.showinfo("关于", f"Remote Ripple Python {__version__}\nPython 3.13 + Tkinter + tkinterdnd2\n纯 Python RFB / TightVNC 文件传输", parent=self.root))
+        help_menu.add_command(label="关于", command=lambda: messagebox.showinfo("关于", f"RemoteRipplePy {__version__}\nPython 3.13 + Tkinter + tkinterdnd2\n纯 Python RFB / TightVNC 文件传输", parent=self.root))
 
     def _build_home(self) -> None:
         hero = ttk.Frame(self.home, padding=16)

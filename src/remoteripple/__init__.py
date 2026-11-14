@@ -1,4 +1,4 @@
-__version__ = "1.2.0"
+__version__ = "26.11.14.15"
 
 import sys
 import tkinter as tk
