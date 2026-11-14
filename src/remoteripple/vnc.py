@@ -144,7 +144,8 @@ class VncClient:
             length = struct.unpack(">I", self._recv(4))[0]
             raise VncError(self._recv(length).decode("utf-8", "replace"))
         security_types = list(self._recv(count))
-        if 16 in security_types:
+        tight_enabled = 16 in security_types
+        if tight_enabled:
             self._tight_auth()
         elif 2 in security_types:
             self._send(b"\x02")
@@ -163,6 +164,10 @@ class VncClient:
         self._recv(16)
         name_length = struct.unpack(">I", self._recv(4))[0]
         self.desktop_name = self._recv(name_length).decode("utf-8", "replace")
+        if tight_enabled:
+            server_count, client_count, encoding_count, _padding = struct.unpack(">HHHH", self._recv(8))
+            for _ in range(server_count + client_count + encoding_count):
+                self._recv(16)
         self.image = Image.new("RGB", (self.width, self.height), "black")
         pixel_format = struct.pack(">BBBBHHHBBBxxx", 32, 24, 0, 1, 255, 255, 255, 16, 8, 0)
         self._send(struct.pack(">BBxx", 0, 1) + pixel_format)

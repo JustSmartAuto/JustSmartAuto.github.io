@@ -114,7 +114,7 @@ def vnc_auth_response(challenge: bytes, password: str) -> bytes:
     # 第一步：用固定密钥 DES 加密 password
     fixed = _des_encrypt_bytes(bytes(_VNC_KEY), key.encode("latin-1", "ignore"))
     # 第二步：用加密后的 password 作为密钥加密 challenge
-    return _des_encrypt_bytes(fixed, challenge[:16])
+    return _des_encrypt_bytes(fixed, challenge[:8]) + _des_encrypt_bytes(fixed, challenge[8:16])
 
 
 def _des_encrypt_bytes(key8: bytes, data8: bytes) -> bytes:
@@ -587,7 +587,9 @@ class FtpSession:
         self._expect(DOWNLOAD_START_REPLY)
 
         written = 0
-        with open(local_path, "wb") as f:
+        with open(local_path, "r+b" if offset else "wb") as f:
+            if offset:
+                f.seek(offset)
             while True:
                 self._send(
                     struct.pack(">I", DOWNLOAD_DATA_REQUEST)
