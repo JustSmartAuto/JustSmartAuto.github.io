@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import ctypes
+import sys
 import tkinter as tk
-from tkinter import ttk
+from pathlib import Path
+from tkinter import ttk, font as tkfont
 
 # 设计令牌：摘自 assets/claude-style.css（Claude 风格 · 温暖极简）
 LIGHT = {
@@ -24,20 +27,71 @@ DARK = {
     "coral": "#d97757",
     "coral_deep": "#e08a6a",
 }
-FONT_UI = ("Segoe UI", 10)
-FONT_UI_BOLD = ("Segoe UI", 10, "bold")
+FONT_FALLBACK = "Segoe UI"
 FONT_MONO = ("Consolas", 10)
+_FONT_FILE = "Smiley Sans Oblique.ttf"
+_FR_PRIVATE = 0x10
+
+_theme_font: tuple[str, int] = (FONT_FALLBACK, 10)
+
+
+def font_path() -> Path | None:
+    candidates: list[Path] = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        base = Path(meipass)
+        candidates += [
+            base / "assets" / _FONT_FILE,
+            base / "remoteripple" / "assets" / _FONT_FILE,
+        ]
+    candidates.append(Path(__file__).with_name("assets") / _FONT_FILE)
+    if not meipass:
+        candidates.append(Path(__file__).resolve().parents[2] / "assets" / _FONT_FILE)
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _load_theme_family() -> str:
+    path = font_path()
+    if not path:
+        return FONT_FALLBACK
+    try:
+        if not ctypes.windll.gdi32.AddFontResourceExW(str(path), _FR_PRIVATE, 0):
+            return FONT_FALLBACK
+    except Exception:
+        return FONT_FALLBACK
+    matched: str | None = None
+    for family in tkfont.families():
+        lowered = family.casefold()
+        if "smiley sans" in lowered or "得意黑" in family:
+            if not family.startswith("@"):
+                return family
+            matched = matched or family
+    return matched or FONT_FALLBACK
+
+
+def theme_font(size: int = 10, bold: bool = False) -> tuple[str, int] | tuple[str, int, str]:
+    family, _ = _theme_font
+    return (family, size, "bold") if bold else (family, size)
 
 
 def apply_theme(root: tk.Misc, night: bool = False) -> None:
+    global _theme_font
     c = DARK if night else LIGHT
+    family = _load_theme_family()
+    _theme_font = (family, 10)
+    ui = (family, 10)
+    ui_bold = (family, 10, "bold")
+    ui_head = (family, 24)
     style = ttk.Style(root)
     style.theme_use("clam")
     root.configure(background=c["bg"])
 
     style.configure(
         ".",
-        font=FONT_UI,
+        font=ui,
         background=c["bg"],
         foreground=c["ink"],
         fieldbackground=c["card"],
@@ -61,7 +115,7 @@ def apply_theme(root: tk.Misc, night: bool = False) -> None:
 
     style.configure(
         "TButton",
-        font=FONT_UI,
+        font=ui,
         background=c["card"],
         foreground=c["ink"],
         bordercolor=c["line"],
@@ -82,7 +136,7 @@ def apply_theme(root: tk.Misc, night: bool = False) -> None:
         foreground="#ffffff",
         bordercolor=c["coral"],
         focuscolor=c["coral_deep"],
-        font=FONT_UI_BOLD,
+        font=ui_bold,
     )
     style.map(
         "Accent.TButton",
@@ -107,7 +161,7 @@ def apply_theme(root: tk.Misc, night: bool = False) -> None:
         foreground=c["ink"],
         rowheight=26,
         borderwidth=0,
-        font=FONT_UI,
+        font=ui,
     )
     style.map(
         "Treeview",
@@ -118,7 +172,7 @@ def apply_theme(root: tk.Misc, night: bool = False) -> None:
         "Treeview.Heading",
         background=c["surface"],
         foreground=c["ink_soft"],
-        font=FONT_UI_BOLD,
+        font=ui_bold,
         relief="flat",
         padding=(8, 6),
     )
@@ -142,7 +196,7 @@ def apply_theme(root: tk.Misc, night: bool = False) -> None:
     style.map("TCheckbutton", background=[("active", c["bg"])])
 
     style.configure("TLabelframe", background=c["bg"], bordercolor=c["line"], relief="flat", borderwidth=1)
-    style.configure("TLabelframe.Label", background=c["bg"], foreground=c["ink_soft"], font=FONT_UI)
+    style.configure("TLabelframe.Label", background=c["bg"], foreground=c["ink_soft"], font=ui)
 
     style.configure("TScale", troughcolor=c["surface"], background=c["card"], bordercolor=c["line"], lightcolor=c["line"], darkcolor=c["line"])
     style.map("TScale", background=[("active", c["coral"])])

@@ -20,7 +20,7 @@ from . import __version__, apply_icon
 from .filetransfer import FileTransferTab
 from .models import Host, Session, format_target, parse_target
 from .storage import Store, config_dir
-from .theme import apply_theme
+from .theme import apply_theme, theme_font
 from .viewer import ViewerTab
 
 LOG = logging.getLogger(__name__)
@@ -80,13 +80,13 @@ class RemoteRippleApp:
     def _build_home(self) -> None:
         hero = ttk.Frame(self.home, padding=16)
         hero.pack(fill=tk.X)
-        ttk.Label(hero, text="Remote Ripple", font=("Segoe UI", 22, "bold")).pack(side=tk.LEFT)
+        ttk.Label(hero, text="Remote Ripple", font=theme_font(22, bold=True)).pack(side=tk.LEFT)
         ttk.Button(hero, text="新建连接", style="Accent.TButton", command=self.new_connection).pack(side=tk.RIGHT)
         ttk.Button(hero, text="设置", command=self.show_settings).pack(side=tk.RIGHT, padx=6)
 
         connect = ttk.LabelFrame(self.home, text="快速连接（host、host:5900、host::5900 或 [IPv6]:5900）", padding=10)
         connect.pack(fill=tk.X, padx=16)
-        self.quick = ttk.Entry(connect, font=("Segoe UI", 11))
+        self.quick = ttk.Entry(connect, font=theme_font(12))
         self.quick.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.quick.bind("<Return>", lambda _e: self.quick_connect())
         ttk.Button(connect, text="连接", style="Accent.TButton", command=self.quick_connect).pack(side=tk.LEFT, padx=6)

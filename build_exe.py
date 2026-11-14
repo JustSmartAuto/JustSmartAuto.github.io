@@ -60,7 +60,7 @@ def main() -> None:
         "--paths",
         str(ROOT / "src"),
         "--add-data",
-        f"{icon}{os.pathsep}assets",
+        f"{ROOT / 'assets'}{os.pathsep}assets",
         "--add-data",
         f"{ROOT / 'src' / 'remoteripple' / 'assets'}{os.pathsep}remoteripple/assets",
         "--collect-all",
