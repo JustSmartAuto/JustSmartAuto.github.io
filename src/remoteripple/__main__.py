@@ -12,6 +12,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="RemoteRipplePy")
     parser.add_argument("target", nargs="?", help="启动后连接的主机，例如 192.168.1.10:5900")
     args = parser.parse_args()
+    if sys.platform == "win32":
+        import ctypes
+
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("JustSmart.RemoteRipplePy")
+        except Exception:
+            pass
     log_dir = config_dir() / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
