@@ -71,9 +71,23 @@ def unprotect_password(value: str) -> str:
 
 def config_dir() -> Path:
     override = os.environ.get("REMOTERIPPLEPY_CONFIG_DIR")
-    root = Path(override) if override else Path(os.environ.get("APPDATA", Path.home())) / "GlavSoft" / "RemoteRipplePy"
-    root.mkdir(parents=True, exist_ok=True)
-    return root
+    candidates = []
+    if override:
+        candidates.append(Path(override))
+    else:
+        candidates.append(Path("D:/JustSmart/RemoteRipplePy"))
+        candidates.append(Path(os.environ.get("APPDATA", Path.home())) / "JustSmart" / "RemoteRipplePy")
+    for candidate in candidates:
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            LOG.warning("配置目录不可用：%s", candidate)
+            continue
+        if os.access(candidate, os.W_OK):
+            return candidate
+    fallback = Path(os.environ.get("APPDATA", Path.home())) / "JustSmart" / "RemoteRipplePy"
+    fallback.mkdir(parents=True, exist_ok=True)
+    return fallback
 
 
 class Store:

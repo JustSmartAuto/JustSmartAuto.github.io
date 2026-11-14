@@ -7,6 +7,7 @@ from typing import Any
 
 from PIL import Image, ImageTk
 
+from . import apply_icon
 from .models import Host
 from .vnc import VncClient
 
@@ -187,6 +188,7 @@ class ViewerTab(ttk.Frame):
             return
         window = tk.Toplevel(self)
         window.attributes("-fullscreen", True)
+        apply_icon(window)
         window.configure(background="black")
         window.bind("<Escape>", lambda _e: self.toggle_fullscreen())
         self.fullscreen_window = window

@@ -72,8 +72,8 @@ class FileTransferTab(ttk.Frame):
 
         buttons = ttk.Frame(self, padding=5)
         buttons.pack(fill=tk.X)
-        ttk.Button(buttons, text="上传所选 →", command=self.upload_selected).pack(side=tk.LEFT)
-        ttk.Button(buttons, text="← 下载所选", command=self.download_selected).pack(side=tk.LEFT, padx=5)
+        ttk.Button(buttons, text="上传所选 →", style="Accent.TButton", command=self.upload_selected).pack(side=tk.LEFT)
+        ttk.Button(buttons, text="← 下载所选", style="Accent.TButton", command=self.download_selected).pack(side=tk.LEFT, padx=5)
         ttk.Button(buttons, text="上传文件…", command=self.upload_dialog).pack(side=tk.LEFT)
         ttk.Button(buttons, text="上传目录…", command=self.upload_directory_dialog).pack(side=tk.LEFT, padx=5)
         self.progress = ttk.Progressbar(buttons, mode="determinate")

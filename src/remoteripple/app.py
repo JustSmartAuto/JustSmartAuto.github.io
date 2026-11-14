@@ -16,10 +16,11 @@ from tkinter import ttk
 
 from tkinterdnd2 import TkinterDnD
 
-from . import __version__
+from . import __version__, apply_icon
 from .filetransfer import FileTransferTab
 from .models import Host, Session, format_target, parse_target
 from .storage import Store, config_dir
+from .theme import apply_theme
 from .viewer import ViewerTab
 
 LOG = logging.getLogger(__name__)
@@ -31,11 +32,7 @@ class RemoteRippleApp:
         self.root = TkinterDnD.Tk()
         self.root.title(f"Remote Ripple Python {__version__}")
         self.root.geometry("1180x760")
-        icon = Path(__file__).with_name("assets") / "remoteripple.ico"
-        if not icon.exists():
-            icon = Path(__file__).resolve().parents[2] / "assets" / "remoteripple.ico"
-        if icon.exists():
-            self.root.iconbitmap(str(icon))
+        apply_icon(self.root)
         self.root.minsize(850, 560)
         self.events: queue.Queue[tuple[ViewerTab, str, object]] = queue.Queue()
         self.sessions: dict[str, tuple[ttk.Frame, ViewerTab, FileTransferTab, Host]] = {}
@@ -48,24 +45,13 @@ class RemoteRippleApp:
         self.home = ttk.Frame(self.notebook)
         self.notebook.add(self.home, text="主页")
         self._build_home()
-        ttk.Label(self.root, textvariable=self.status, relief=tk.SUNKEN, anchor=tk.W, padding=5).pack(fill=tk.X)
+        ttk.Label(self.root, textvariable=self.status, style="Status.TLabel", anchor=tk.W).pack(fill=tk.X)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.root.after(100, self._poll)
         self.root.after(1000, self._startup_update)
 
     def _style(self) -> None:
-        style = ttk.Style(self.root)
-        if "vista" in style.theme_names():
-            style.theme_use("vista")
-        if self.store.settings.get("night_mode"):
-            style.theme_use("clam")
-            style.configure(".", background="#252525", foreground="#eeeeee", fieldbackground="#333333")
-            style.configure("TFrame", background="#252525")
-            style.configure("TLabel", background="#252525", foreground="#eeeeee")
-            style.configure("TLabelframe", background="#252525", foreground="#eeeeee")
-            style.configure("TLabelframe.Label", background="#252525", foreground="#eeeeee")
-            style.configure("Treeview", background="#333333", foreground="#eeeeee", fieldbackground="#333333")
-            self.root.configure(background="#252525")
+        apply_theme(self.root, bool(self.store.settings.get("night_mode")))
 
     def _menu(self) -> None:
         menu = tk.Menu(self.root)
@@ -95,7 +81,7 @@ class RemoteRippleApp:
         hero = ttk.Frame(self.home, padding=16)
         hero.pack(fill=tk.X)
         ttk.Label(hero, text="Remote Ripple", font=("Segoe UI", 22, "bold")).pack(side=tk.LEFT)
-        ttk.Button(hero, text="新建连接", command=self.new_connection).pack(side=tk.RIGHT)
+        ttk.Button(hero, text="新建连接", style="Accent.TButton", command=self.new_connection).pack(side=tk.RIGHT)
         ttk.Button(hero, text="设置", command=self.show_settings).pack(side=tk.RIGHT, padx=6)
 
         connect = ttk.LabelFrame(self.home, text="快速连接（host、host:5900、host::5900 或 [IPv6]:5900）", padding=10)
@@ -103,7 +89,7 @@ class RemoteRippleApp:
         self.quick = ttk.Entry(connect, font=("Segoe UI", 11))
         self.quick.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.quick.bind("<Return>", lambda _e: self.quick_connect())
-        ttk.Button(connect, text="连接", command=self.quick_connect).pack(side=tk.LEFT, padx=6)
+        ttk.Button(connect, text="连接", style="Accent.TButton", command=self.quick_connect).pack(side=tk.LEFT, padx=6)
 
         search_bar = ttk.Frame(self.home, padding=(16, 12, 16, 4))
         search_bar.pack(fill=tk.X)
@@ -164,6 +150,7 @@ class RemoteRippleApp:
     def new_connection(self) -> None:
         dialog = tk.Toplevel(self.root)
         dialog.title("新建远程连接")
+        apply_icon(dialog)
         dialog.transient(self.root)
         dialog.resizable(False, False)
         dialog.grab_set()
@@ -196,7 +183,7 @@ class RemoteRippleApp:
 
         buttons = ttk.Frame(frame)
         buttons.grid(row=5, column=0, columnspan=2, sticky=tk.E, pady=(12, 0))
-        ttk.Button(buttons, text="连接", command=connect).pack(side=tk.LEFT, padx=4)
+        ttk.Button(buttons, text="连接", style="Accent.TButton", command=connect).pack(side=tk.LEFT, padx=4)
         ttk.Button(buttons, text="取消", command=dialog.destroy).pack(side=tk.LEFT)
         dialog.bind("<Return>", lambda _e: connect())
         dialog.bind("<Escape>", lambda _e: dialog.destroy())
@@ -306,6 +293,7 @@ class RemoteRippleApp:
     def show_settings(self) -> None:
         win = tk.Toplevel(self.root)
         win.title("设置")
+        apply_icon(win)
         win.transient(self.root)
         win.grab_set()
         frame = ttk.Frame(win, padding=16)
@@ -368,6 +356,7 @@ class RemoteRippleApp:
     def show_logs(self) -> None:
         win = tk.Toplevel(self.root)
         win.title("诊断日志")
+        apply_icon(win)
         win.geometry("850x500")
         text = tk.Text(win, wrap=tk.NONE)
         text.pack(fill=tk.BOTH, expand=True)
