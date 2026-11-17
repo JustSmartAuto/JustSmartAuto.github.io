@@ -103,6 +103,8 @@ def run_server(host: str | None = None, port: int | None = None) -> None:
     async def _main() -> None:
         runner, _site = await start_server(cfg)
         click.echo(f"LocalFileDropShell 服务端已启动 http://{cfg.host}:{cfg.port}")
+        if cfg.port != cfg_port:
+            click.echo(f"  端口 {cfg_port} 已被占用，已自动切换到 {cfg.port}")
         if vnc_info and getattr(vnc_info, "port", None):
             click.echo(
                 f"  VNC Server: port={vnc_info.port} "
@@ -639,9 +641,11 @@ def run_gui(host: str | None = None, port: int | None = None, folder: str | None
     cfg_host = host or os.environ.get("HTTP_SHELL_HOST", "0.0.0.0")
     cfg_port = port or _parse_env_int("HTTP_SHELL_PORT", 10022)
 
-    # 本地 loop 端口固定为 10022 供 Tk UI 调用
-    ui_port = port or 10022
+    # Tk UI 通过 127.0.0.1 访问后台服务端；端口以服务端实际绑定为准
+    # （10022 被占用时 start_server 会自动递推，并回写 conf.port）
+    conf = ServerConfig(host=cfg_host, port=cfg_port)
     ui_host = "127.0.0.1"
+    state: dict[str, int] = {}
 
     # 工控机首次部署：未安装 TightVNC 时用内嵌 MSI 静默提权安装（失败不阻塞启动）
     try:
@@ -653,9 +657,10 @@ def run_gui(host: str | None = None, port: int | None = None, folder: str | None
 
     def _run_server_thread() -> None:
         async def _serve() -> None:
-            runner, _site = await start_server(ServerConfig(host=cfg_host, port=cfg_port))
+            runner, _site = await start_server(conf)
+            state["port"] = conf.port
             logging.getLogger("localdropshell.cli").info(
-                "GUI 后台服务端已就绪 %s:%s", cfg_host, cfg_port
+                "GUI 后台服务端已就绪 %s:%s", cfg_host, conf.port
             )
             try:
                 # start_server 只负责启动；必须保持事件循环存活，否则
@@ -675,14 +680,21 @@ def run_gui(host: str | None = None, port: int | None = None, folder: str | None
     t.start()
 
     # 等待端口就绪，避免 Tk 首屏请求早于服务端监听
+    ui_port = conf.port
     deadline = time.time() + 5.0
     while time.time() < deadline:
-        try:
-            with socket.create_connection((ui_host, ui_port), timeout=0.3):
-                break
-        except OSError:
-            time.sleep(0.1)
+        candidate = state.get("port")
+        if candidate:
+            try:
+                with socket.create_connection((ui_host, candidate), timeout=0.3):
+                    ui_port = candidate
+                    break
+            except OSError:
+                pass
+        time.sleep(0.1)
 
+    # 超时兜底：若服务端晚于 deadline 才绑定，也以它回写的端口为准
+    ui_port = state.get("port") or ui_port
     base_url = f"http://{ui_host}:{ui_port}"
 
     try:

@@ -91,7 +91,7 @@
 
 ## HTTP / API 路由
 
-aiohttp 服务端默认监听 `0.0.0.0:10022`（环境变量 `HTTP_SHELL_PORT` 可覆盖）。
+aiohttp 服务端默认监听 `0.0.0.0:10022`（环境变量 `HTTP_SHELL_PORT` 可覆盖）。端口被占用时自动向后递推（10023、10024…），Banner 会打印实际使用的端口。
 
 ### `GET /health` 健康检查
 
@@ -306,7 +306,7 @@ multipart/form-data：`file=@local.bin` + `path=/remote/dir/file.bin` + `offset=
 
 | 服务 | 默认端口 | 说明 |
 |---|---|---|
-| 主 HTTP 服务（Shell / upload / rsync / RFB / Shell GUI） | `10022` | 可通过 `--port` 或环境变量 `HTTP_SHELL_PORT` 覆盖 |
+| 主 HTTP 服务（Shell / upload / rsync / RFB / Shell GUI） | `10022` | 可通过 `--port` 或环境变量 `HTTP_SHELL_PORT` 覆盖；被占用时自动递增 |
 | VNC RFB（内嵌模式） | `15900` | 自动递增避免冲突 |
 | noVNC HTTP | 与主服务复用 | `/vnc/` 路径 |
 | Shell GUI HTTP | 与主服务复用 | `/shell/` 路径 |

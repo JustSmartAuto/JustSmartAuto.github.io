@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import errno
 import hashlib
 import json
 import logging
@@ -1126,16 +1127,71 @@ def create_app(config: ServerConfig | None = None) -> web.Application:
 
 async def start_server(
     config: ServerConfig | None = None,
+    max_port_tries: int = 50,
 ) -> tuple[web_runner.AppRunner, web_runner.TCPSite]:
     """CLI 层启动入口: 构建 app → runner → site → start.
 
+    端口被占用时自动向后递推（10022 → 10023 → …），成功启动后把实际
+    端口回写到 ``config.port``，调用方据此打印 banner / 构造 base_url。
     返回 (runner, site), 调用方需要在退出时 await runner.cleanup().
     """
     config = config or ServerConfig()
     app = create_app(config)
     runner = web_runner.AppRunner(app)
     await runner.setup()
-    site = web_runner.TCPSite(runner, config.host, config.port)
-    await site.start()
-    logger.info("HTTP Shell server listening on http://%s:%d", config.host, config.port)
-    return runner, site
+
+    preferred = config.port
+    tries = max(1, max_port_tries)
+    last_exc: OSError | None = None
+    for offset in range(tries):
+        port = preferred + offset
+        if port > 65535:
+            break
+        if _port_in_use(config.host, port):
+            last_exc = OSError(f"端口 {port} 已被占用")
+            logger.warning("端口 %d 已被占用, 尝试 %d", port, port + 1)
+            continue
+        try:
+            site = web_runner.TCPSite(runner, config.host, port)
+            await site.start()
+        except OSError as exc:
+            if not _is_addr_in_use(exc):
+                await runner.cleanup()
+                raise
+            last_exc = exc
+            logger.warning("端口 %d 已被占用, 尝试 %d", port, port + 1)
+            continue
+        config.port = port
+        if port != preferred:
+            logger.info("端口 %d 被占用, 已自动切换为 %d", preferred, port)
+        logger.info("HTTP Shell server listening on http://%s:%d", config.host, port)
+        return runner, site
+
+    await runner.cleanup()
+    raise OSError(
+        f"端口 {preferred}-{preferred + tries - 1} 均被占用, 无法启动服务端"
+    ) from last_exc
+
+
+def _port_in_use(host: str, port: int, timeout: float = 0.25) -> bool:
+    """通过 TCP 连接探测端口是否已被占用.
+
+    Windows 下若占用方设置了 SO_REUSEADDR（Go 程序默认如此），bind 仍会
+    成功，导致两个进程同时监听同一端口，因此不能只依赖绑定失败判断。
+    """
+    probe_host = "127.0.0.1" if host in ("", "0.0.0.0", "::", "0:0:0:0:0:0:0:0") else host
+    try:
+        with socket.create_connection((probe_host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _is_addr_in_use(exc: OSError) -> bool:
+    """判断 OSError 是否由「端口已被占用」引起（Windows WinError 10048）。"""
+    if getattr(exc, "winerror", None) == 10048:
+        return True
+    if exc.errno in (errno.EADDRINUSE, 10048, 98):
+        return True
+    text = str(exc).lower()
+    return "address already in use" in text or "10048" in text
