@@ -1,0 +1,86 @@
+{
+  "order": [
+    4,
+    3,
+    2,
+    1
+  ],
+  "scale": 0.5,
+  "ramp": 80,
+  "images": [
+    {
+      "cam": 4,
+      "width": 5472,
+      "height": 3648
+    },
+    {
+      "cam": 3,
+      "width": 5472,
+      "height": 3648
+    },
+    {
+      "cam": 2,
+      "width": 5472,
+      "height": 3648
+    },
+    {
+      "cam": 1,
+      "width": 5472,
+      "height": 3648
+    }
+  ],
+  "pairs": [
+    {
+      "from_cam": 4,
+      "to_cam": 3,
+      "keypoints_a": 16864,
+      "keypoints_b": 8907,
+      "good": 154,
+      "inliers": 21,
+      "inlier_ratio": 0.136,
+      "ecc_cc": 0.6898,
+      "dx": -2010.46,
+      "dy": -30.78,
+      "rotation_deg": -1.48,
+      "scale": 1.0,
+      "overlap_px": 725.5,
+      "overlap_ratio": 0.265
+    },
+    {
+      "from_cam": 3,
+      "to_cam": 2,
+      "keypoints_a": 20000,
+      "keypoints_b": 20000,
+      "good": 531,
+      "inliers": 81,
+      "inlier_ratio": 0.153,
+      "ecc_cc": 0.689,
+      "dx": -2075.12,
+      "dy": 3.96,
+      "rotation_deg": 0.1331,
+      "scale": 1.0,
+      "overlap_px": 660.9,
+      "overlap_ratio": 0.242
+    },
+    {
+      "from_cam": 2,
+      "to_cam": 1,
+      "keypoints_a": 20000,
+      "keypoints_b": 20000,
+      "good": 637,
+      "inliers": 125,
+      "inlier_ratio": 0.196,
+      "ecc_cc": 0.4975,
+      "dx": -1943.54,
+      "dy": -62.93,
+      "rotation_deg": 0.4144,
+      "scale": 1.0,
+      "overlap_px": 792.5,
+      "overlap_ratio": 0.29
+    }
+  ],
+  "panorama": {
+    "width": 8762,
+    "height": 2091
+  }
+}

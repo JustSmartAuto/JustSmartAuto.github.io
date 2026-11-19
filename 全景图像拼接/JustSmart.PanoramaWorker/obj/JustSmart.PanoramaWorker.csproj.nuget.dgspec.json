@@ -1,0 +1,74 @@
+{
+  "format": 1,
+  "restore": {
+    "d:\\JustSmart\\261010优易达安全带\\CodeBase\\SeatBeltInspection_2611161017\\JustSmart.PanoramaWorker\\JustSmart.PanoramaWorker.csproj": {}
+  },
+  "projects": {
+    "d:\\JustSmart\\261010优易达安全带\\CodeBase\\SeatBeltInspection_2611161017\\JustSmart.PanoramaWorker\\JustSmart.PanoramaWorker.csproj": {
+      "version": "1.0.0",
+      "restore": {
+        "projectUniqueName": "d:\\JustSmart\\261010优易达安全带\\CodeBase\\SeatBeltInspection_2611161017\\JustSmart.PanoramaWorker\\JustSmart.PanoramaWorker.csproj",
+        "projectName": "JustSmart.PanoramaWorker",
+        "projectPath": "d:\\JustSmart\\261010优易达安全带\\CodeBase\\SeatBeltInspection_2611161017\\JustSmart.PanoramaWorker\\JustSmart.PanoramaWorker.csproj",
+        "packagesPath": "C:\\Users\\Lenovo\\.nuget\\packages\\",
+        "outputPath": "d:\\JustSmart\\261010优易达安全带\\CodeBase\\SeatBeltInspection_2611161017\\JustSmart.PanoramaWorker\\obj\\",
+        "projectStyle": "PackageReference",
+        "configFilePaths": [
+          "d:\\JustSmart\\261010优易达安全带\\CodeBase\\SeatBeltInspection_2611161017\\NuGet.Config",
+          "C:\\Users\\Lenovo\\AppData\\Roaming\\NuGet\\NuGet.Config",
+          "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.Offline.config"
+        ],
+        "originalTargetFrameworks": [
+          "net48"
+        ],
+        "sources": {
+          "C:\\Program Files (x86)\\Microsoft SDKs\\NuGetPackages\\": {},
+          "D:\\JustSmartAuto\\VIDI-Packages\\": {},
+          "https://api.nuget.org/v3/index.json": {}
+        },
+        "frameworks": {
+          "net48": {
+            "targetAlias": "net48",
+            "projectReferences": {}
+          }
+        },
+        "warningProperties": {
+          "warnAsError": [
+            "NU1605"
+          ]
+        },
+        "restoreAuditProperties": {
+          "enableAudit": "true",
+          "auditLevel": "low",
+          "auditMode": "direct"
+        },
+        "SdkAnalysisLevel": "9.0.300"
+      },
+      "frameworks": {
+        "net48": {
+          "targetAlias": "net48",
+          "dependencies": {
+            "Google.Protobuf": {
+              "target": "Package",
+              "version": "[3.17.1, )"
+            },
+            "OpenCvSharp4": {
+              "target": "Package",
+              "version": "[4.11.0.20250507, )"
+            },
+            "OpenCvSharp4.runtime.win": {
+              "target": "Package",
+              "version": "[4.11.0.20250507, )"
+            }
+          },
+          "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\9.0.316\\RuntimeIdentifierGraph.json"
+        }
+      },
+      "runtimes": {
+        "win-x64": {
+          "#import": []
+        }
+      }
+    }
+  }
+}
