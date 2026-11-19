@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+option csharp_namespace = "JustSmart.Panorama";
+
+// 主程序 -> 拼接工作进程的任务消息。
+// 帧格式：4 字节小端长度 + protobuf 载荷（见 PanoramaProtocol）。
+message PanoramaJobMessage {
+  int64 job_id = 1;              // 递增任务号，仅用于日志
+  string session_folder = 2;     // 本次检测存图目录
+  string output_folder = 3;      // 输出目录（<session_folder>\StitchedImage）
+  string image_format = 4;       // 原图格式：BMP / PNG / JPG / CDB
+  int32 jpeg_quality = 5;        // JPG 输出质量（1-100）
+  string stamp = 6;              // 文件名时间戳，与原始图一致
+  repeated PanoramaGroupMessage groups = 7;
+  int64 timestamp_ms = 8;
+}
+
+message PanoramaGroupMessage {
+  string group_name = 1;                   // TopCam / SideBCam
+  repeated PanoramaInputMessage inputs = 2; // 按物理从左到右排列
+}
+
+message PanoramaInputMessage {
+  string camera_name = 1;  // TopCam4 ...
+  string file_path = 2;    // 已入队保存的图片完整路径
+}

@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <RootNamespace>JustSmart.PanoramaWorker</RootNamespace>
+    <AssemblyName>JustSmart.PanoramaWorker</AssemblyName>
+    <Platforms>AnyCPU;x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <LangVersion>7.3</LangVersion>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <!-- 输出到主程序目录下的独立子目录，自带依赖，避免与主程序共享同名依赖版本冲突 -->
+    <OutputPath>..\JustSmart.App\bin\$(Platform)\$(Configuration)\PanoramaWorker\</OutputPath>
+    <Deterministic>true</Deterministic>
+    <!-- 绑定重定向统一写在 App.config 里（与主程序共享输出目录） -->
+    <AutoGenerateBindingRedirects>false</AutoGenerateBindingRedirects>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Google.Protobuf" Version="3.17.1" />
+    <PackageReference Include="OpenCvSharp4" Version="4.11.0.20250507" />
+    <PackageReference Include="OpenCvSharp4.runtime.win" Version="4.11.0.20250507" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="panorama_job.proto" />
+  </ItemGroup>
+
+</Project>
