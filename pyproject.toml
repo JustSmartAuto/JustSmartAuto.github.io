@@ -1,0 +1,24 @@
+[project]
+name = "ImageRotatePy"
+version = "1.0.0"
+description = "图片固定角度旋转工具"
+requires-python = ">=3.13"
+dependencies = [
+    "pillow>=11",
+    "tkinterdnd2>=0.7.0",
+]
+
+[dependency-groups]
+dev = [
+    "pyinstaller>=6",
+]
+
+[project.scripts]
+imagerotatepy = "imagerotatepy.app:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
