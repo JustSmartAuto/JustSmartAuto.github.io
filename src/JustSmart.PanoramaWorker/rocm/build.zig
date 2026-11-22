@@ -35,4 +35,20 @@ pub fn build(b: *std.Build) void {
     sift.root_module.link_libcpp = true;
 
     b.installArtifact(sift);
+
+    const baseline = b.addExecutable(.{
+        .name = "baseline_opencl",
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    baseline.root_module.addCSourceFile(.{
+        .file = b.path("baseline_opencl.cpp"),
+        .flags = &.{ "-std=c++17", "-O3" },
+    });
+    baseline.root_module.link_libcpp = true;
+
+    b.installArtifact(baseline);
 }
