@@ -47,6 +47,12 @@
       pre { overflow:auto; background:#050d0b; border:1px solid var(--line); border-radius:10px; padding:20px; color:#d6ebc7; font:14px/1.7 Consolas,monospace; }
       code { font-family:Consolas,monospace; }
       .note { border-left:3px solid var(--accent); padding:4px 0 4px 18px; color:var(--muted); }
+      .ladder { width:100%; border-collapse:collapse; font-size:13.5px; margin-top:6px; }
+      .ladder th, .ladder td { border:1px solid var(--line); padding:8px 10px; text-align:left; vertical-align:top; }
+      .ladder th { background:var(--accent-dark); color:var(--text); white-space:nowrap; }
+      .ladder td { color:var(--muted); }
+      .ladder tr:hover td { background:rgba(184,238,117,.06); }
+      .ladder .rec { color:var(--accent); font-weight:600; }
       footer { padding:28px 0 40px; border-top:1px solid var(--line); color:var(--muted); font-size:14px; display:flex; justify-content:space-between; gap:16px; }
       @media (max-width:760px) { .links { gap:14px; } .links a:nth-child(2) { display:none; } .hero { padding-top:56px; } .grid { grid-template-columns:1fr; } .metrics { grid-template-columns:1fr; } footer { flex-direction:column; } }
     </style>
@@ -55,7 +61,7 @@
     <header>
       <nav class="wrap" aria-label="页面导航">
         <a class="brand" href="#">PanoramaStitchingPy</a>
-        <div class="links"><a href="#implementations">实现</a><a href="#pipeline">算法</a><a href="#run">运行</a><a href="README.md">README</a></div>
+        <div class="links"><a href="#implementations">实现</a><a href="#pipeline">算法</a><a href="#run">运行</a><a href="#hardware">硬件</a><a href="README.md">README</a></div>
       </nav>
     </header>
     <main class="wrap">
@@ -104,6 +110,33 @@ uv run --no-project --with opencv-python --with numpy python stitch_topcam.py
 cd 全景图像拼接
 uv run --with opencv-python --with numpy python panorama_stitch.py --data &lt;数据目录&gt; --out &lt;输出.png&gt;</code></pre>
         <p>更完整的目录说明、参数与集成细节请阅读 <a href="README.md">README.md</a>。</p>
+      </section>
+
+      <section id="hardware">
+        <h2>OpenCL 加速与硬件选型</h2>
+        <p><strong>OpenCL</strong>（开放计算语言）是跨厂商、跨平台的异构计算标准：同一份 C 内核可在 AMD、Intel、NVIDIA 等任意 GPU 上重新编译运行，不像 CUDA 绑定单一厂商。本项目的 <code>rocm/baseline_opencl.cpp</code> 用它把整条 Baseline 流水线（SIFT 配准 → 距离羽化融合）搬到 GPU，且不依赖 OpenCV。</p>
+        <p class="note">实现零链接依赖：通过 <code>LoadLibrary("OpenCL.dll")</code> 动态加载，Windows 端只需 AMD 显卡驱动（Adrenalin / PRO）内置的 OpenCL 运行时即可运行，无需安装 ROCm 或 SDK。</p>
+
+        <h3 style="margin-top:22px">AMD 显卡性能天梯图（2026）</h3>
+        <p>本项目 4 图融合在当前测试卡 Radeon 630（gfx804，带宽约 22 GB/s）上约 <strong>2.2 秒</strong>。融合以显存带宽为主要瓶颈，下表据此外推各档位的预计耗时（估算，仅供选型）。</p>
+        <table class="ladder" aria-label="AMD 显卡性能天梯图">
+          <thead>
+            <tr><th>档位</th><th>代表型号</th><th>架构</th><th>显存带宽</th><th>TDP</th><th>预计 4 图融合</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>旗舰 / 工作站</td><td>W7900 · RX 7900 XTX · AI PRO R9700</td><td>RDNA 3 / 4</td><td>864 / 960 / 640 GB/s</td><td>295 / 355 / 200 W</td><td>~0.15 s（触底）</td></tr>
+            <tr><td>高端</td><td>W7800 · RX 7800 XT · RX 9070 XT</td><td>RDNA 3 / 4</td><td>576 / 624 / 640 GB/s</td><td>260 / 263 / 300 W</td><td>~0.15 s（触底）</td></tr>
+            <tr><td>主流</td><td>W7700 · RX 7700 XT · RX 9070 · RX 7600</td><td>RDNA 3 / 4</td><td>576 / 432 / 640 / 288 GB/s</td><td>190 / 245 / 250 / 165 W</td><td>~0.15–0.2 s</td></tr>
+            <tr><td>入门 / 低功耗</td><td>W7600 · W6600 · RX 6600 · RX 9050</td><td>RDNA 3 / 2 / 4</td><td>288 / 224 / 224 / 288 GB/s</td><td>130 W 左右</td><td>~0.2 s</td></tr>
+            <tr><td class="rec">工控嵌入式</td><td class="rec">Radeon PRO W6400（推荐）</td><td class="rec">RDNA 2</td><td class="rec">128 GB/s</td><td class="rec">50 W</td><td class="rec">~0.4 s</td></tr>
+            <tr><td>基准（当前测试卡）</td><td>Radeon 630（gfx804）</td><td>GCN</td><td>~22 GB/s</td><td>~10–50 W</td><td>~2.2 s（实测）</td></tr>
+          </tbody>
+        </table>
+
+        <h3 style="margin-top:22px">工控机如何把 4 图融合做到 1 秒内</h3>
+        <p>显存带宽超过 100 GB/s 即可把融合压到 1 秒以内。综合空间、功耗与 7×24 稳定性：</p>
+        <p class="note"><strong>首选 Radeon PRO W6400</strong>：50 W、半高单槽、128 GB/s，预计 4 图融合约 0.4 s，适配 1U / 2U 工控机与被动散热。需要更大余量时选 <strong>W6600</strong> 或 <strong>W7600</strong>（130 W，预计约 0.2 s）。消费级 RX 卡性价比更高，但工控长期稳定性与散热形态不如 PRO 系列。</p>
+        <p>完整规格表、OpenCL 用法与端到端耗时说明见 <a href="README.md">README</a>。</p>
       </section>
 
       <section>

@@ -13,6 +13,7 @@
 | `assets/型号A_20261118_185337_712/stitch/` | 型号A TopCam1～4 现场脚本、完整结果、匹配图、接缝检查图和统计报告 |
 | `src/PanoramaJobClient.cs` | 主程序侧非阻塞任务客户端，负责等待图片落盘、排队和状态展示 |
 | `src/JustSmart.PanoramaWorker/` | .NET Framework 4.8 / OpenCvSharp 独立拼接工作进程 |
+| `src/JustSmart.PanoramaWorker/rocm/baseline_opencl.cpp` | OpenCL 端到端 Baseline 拼接：GPU SIFT + RANSAC + 距离羽化融合，不依赖 OpenCV |
 | `src/output/` | Lab7 两组数据的全景结果（运行脚本后生成） |
 | `assets/multi-camera-image-stitching-main/` | 模块化参考实现：接缝优化、柱面投影、网格光照补偿 |
 | `assets/panorama-stitching-main/` | 第三方全景拼接参考工程及多组示例数据 |
@@ -92,7 +93,7 @@ C# 工作进程面向工业检测场景，主流程不等待拼接完成：
 
 ## 像素级融合加速：AVX2 与 AMD GPU
 
-`src/JustSmart.PanoramaWorker/avx2/` 与 `src/JustSmart.PanoramaWorker/rocm/` 是独立于 C# 主流程的融合内核实验，目标相同：Deghost 单对逐像素融合，包括增益应用、缝合带 smoothstep 过渡和色差一致性选择。基准中增益、缝合线与色差图均为预计算，配准与 DP 缝合线不计入耗时。
+`src/JustSmart.PanoramaWorker/avx2/` 与 `src/JustSmart.PanoramaWorker/rocm/` 是独立于 C# 主流程的融合内核实验，目标相同：Deghost 单对逐像素融合，包括增益应用、缝合带 smoothstep 过渡和色差一致性选择。基准中增益、缝合线与色差图均为预计算，配准与 DP 缝合线不计入耗时。其中 `rocm/baseline_opencl.cpp` 进一步把整条 Baseline 流水线（SIFT 配准到融合）搬到 OpenCL 上，不依赖 OpenCV，详见下文「OpenCL 加速」。
 
 ### 编译方式
 
@@ -124,6 +125,51 @@ python-zig build -Doptimize=ReleaseFast    # 产出 zig-out/bin/fusion_opencl.ex
 - AVX2 相对标量 **2.33×**；GPU 内核相对标量 **17.1×**，相对 AVX2 **7.3×**。
 - 输出核对：AVX2 与标量、GPU 与 AVX2 的最大差均为 1，属于浮点与舍入差异。
 - GPU 单对上传约 151–168 ms、回读约 84–86 ms，端到端约 250–260 ms，单次任务仍慢于 AVX2；GPU 仅在数据常驻显存或批量任务摊薄传输时占优。
+
+## OpenCL 加速
+
+### 什么是 OpenCL
+
+OpenCL（Open Computing Language，开放计算语言）是一个跨厂商、跨平台的异构计算开放标准，把 CPU、GPU、FPGA、DSP 等设备统一抽象为计算单元，用 C 语言编写的内核（kernel）在这些设备上并行执行。与 CUDA 只面向 NVIDIA 不同，OpenCL 可在 AMD、Intel、NVIDIA、ARM 等任意厂商的硬件上运行，同一份内核源码换一块卡即可重新编译运行。
+
+本项目选择 OpenCL 而不是 CUDA，原因有二：
+1. 工控机/笔记本常用 AMD 核显或独显，CUDA 不可用；
+2. 不希望被单一厂商锁定，便于在不同产线机型间复用同一套代码。
+
+### 本项目中的用法
+
+- **零链接依赖**：通过 `LoadLibraryA("OpenCL.dll")` + `GetProcAddress` 动态加载 OpenCL 函数指针（见 `rocm/opencl_common.h`），编译时不链接 `OpenCL.lib`，也不需要安装 SDK。
+- **运行时来源**：Windows 端 AMD 显卡驱动（Adrenalin / Radeon PRO 驱动）内置 OpenCL 运行时（`OpenCL.dll`），`rocm/` 程序直接使用它；Linux / 数据中心则走 ROCm。
+- **平台与设备选择**：枚举所有 OpenCL 平台，优先选名称含 `AMD` 的平台；本机测试卡为 Radeon 630（gfx804，GCN 架构），同时兼容 Intel 核显平台。
+- **内核源码即编译**：SIFT 内核（`sift_gpu.h`）与融合内核（`baseline_opencl.cpp` 内嵌）都是 OpenCL C 字符串，运行时用 `clCreateProgramWithSource` 即时编译，便于在不同架构上重新优化。
+- **端到端 Baseline（不依赖 OpenCV）**：`baseline_opencl` 完整复刻 C# `PanoramaStitcher.Blend` 流程——Area 缩放 → 灰度 → CLAHE(2.0, 8×8) → GPU SIFT 提取 → 多候选区域匹配 → 相似变换 RANSAC → 灰度相关精化 → 变换链 → 仿射 warp → JFA 距离变换羽化 → 裁黑边 → PNG。因不依赖 OpenCV，ECC 精化用灰度相关局部搜索替代、NCC 模板兜底用放宽内点回退替代。
+
+## AMD 显卡性能天梯图（2026）
+
+下表汇总 2026 年在售的 AMD 主流 / 专业显卡在本项目关心指标上的表现：显存带宽（融合阶段的主要瓶颈）、FP32 峰值算力（SIFT 描述子 / 匹配为计算密集）、整板功耗 TDP，以及基于当前测试卡实测外推的 4 图融合耗时。
+
+> 实测基准：在 Radeon 630（gfx804，显存带宽约 22 GB/s）上，型号A 四张 TopCam（0.5 尺度，画布约 8700×2090）的 **融合阶段耗时 ≈ 2.2 s**，端到端 ≈ 13.5 s（SIFT 1.3 s + 配准 10.6 s + 融合 1.6 s）。融合以显存带宽为主要瓶颈，预计 4 图融合耗时 ≈ max(0.15 s, 2.2 s × 22 / 显存带宽)，受内核启动与 CPU 侧开销限制不会线性下降，表中数值为**估算**，仅供选型参考。
+
+| 档位 | 代表型号 | 架构 | 显存 | 显存带宽 | FP32（约） | TDP | 预计 4 图融合 | 工控适配 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 旗舰 / 工作站 | Radeon PRO W7900 · RX 7900 XTX · Radeon AI PRO R9700 | RDNA 3 / 4 | 48 / 24 / 16 GB | 864 / 960 / 640 GB/s | 61 / 61 / — TFLOPS | 295 / 355 / 200 W | ~0.15 s（触底） | 服务器 / 工作站 |
+| 高端 | Radeon PRO W7800 · RX 7800 XT · RX 9070 XT | RDNA 3 / 4 | 32 / 16 / 16 GB | 576 / 624 / 640 GB/s | 45 / 42 / — TFLOPS | 260 / 263 / 300 W | ~0.15 s（触底） | 工作站 |
+| 主流 | Radeon PRO W7700 · RX 7700 XT · RX 9070 · RX 7600 | RDNA 3 / 4 | 16 / 12 / 16 / 8 GB | 576 / 432 / 640 / 288 GB/s | 30 / 36 / — / 21 TFLOPS | 190 / 245 / 250 / 165 W | ~0.15–0.2 s | 台式机 / 紧凑型工控 |
+| 入门 / 低功耗 | Radeon PRO W7600 · W6600 · RX 6600 · RX 9050 | RDNA 3 / 2 / 4 | 8 GB | 288 / 224 / 224 / 288 GB/s | 20 / 10 / 7 / — TFLOPS | 130 / 130 / 132 / 130 W | ~0.2 s | 紧凑型工控 |
+| 工控嵌入式 / 极低功耗 | Radeon PRO W6400 | RDNA 2 | 4 GB | 128 GB/s | ~5 TFLOPS | 50 W | ~0.4 s | 半高 / 单槽 / 被动散热 |
+| 基准（当前测试卡） | Radeon 630（gfx804） | GCN | — | ~22 GB/s | ~0.5 TFLOPS | ~10–50 W | ~2.2 s（实测） | — |
+
+注：FP32 为官方峰值单精度，RDNA 2 / 3 数值取自 AMD 规格表；RDNA 4（RX 9000 / AI PRO R9000）部分机型未单独公布 FP32，以显存带宽为准。所有型号均可通过 AMD 显卡驱动内置的 OpenCL 运行时加载本项目内核。
+
+### 工控机选型推荐：把 4 图融合压到 1 秒以内
+
+融合阶段在 Radeon 630 上约 2.2 s，显存带宽提升到 100 GB/s 以上即可把它压到 1 秒以内。结合工控机箱的空间、功耗与 7×24 稳定性要求：
+
+- **首选：Radeon PRO W6400**。50 W、半高单槽、128 GB/s，预计 4 图融合约 0.4 s，对 1U / 2U 工控机和被动散热最友好，且余量足以应对尺度 1.0 的更大画布。
+- **需要更大余量（同时压缩配准耗时）：Radeon PRO W6600 或 Radeon PRO W7600**。两者 130 W、224 / 288 GB/s，预计融合约 0.2 s；W7600 为 RDNA 3，SIFT 提取 / 匹配的算力更充裕。
+- 消费级 RX 7600 / RX 9050 性能更高、价格更低，但 7×24 长期稳定性、驱动认证与单槽散热形态不如 PRO 系列，工控场景建议优先 PRO 卡。
+
+> 说明：以上推荐针对**融合阶段**；端到端还包含 CPU 侧的 RANSAC 与灰度相关精化，若要端到端也进入 1 秒，需进一步把配准搜索移到 GPU 或降低匹配规模。
 
 ## 算法边界
 
