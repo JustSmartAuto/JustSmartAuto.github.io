@@ -26,6 +26,9 @@ JustSmart.PanoramaWorker/obj/
 .zig-cache/
 zig-out/
 
+# 博客园 HTML 原稿（仅保留转换后的 Markdown 与图片）
+docs/折腾笔记*.html
+
 # 编辑器与系统文件
 .idea/
 .vscode/
