@@ -2,21 +2,21 @@
 
 基于 **OpenCV、SIFT 特征配准与加权融合** 的多相机全景拼接项目。仓库既包含课程实验所需的柱面投影 Python 实现，也包含型号A 工装顶面四相机的实测拼接方案，以及可接入 JustSmart 主程序的 C# 异步工作进程。
 
-[项目主页](index.html) · [现场拼接报告](全景图像拼接/型号A_20261118_185337_712/stitch/拼接报告.md)
+[项目主页](index.html) · [现场拼接报告](assets/型号A_20261118_185337_712/stitch/拼接报告.md)
 
 ## 项目内容
 
 | 路径 | 说明 |
 | --- | --- |
-| `全景图像拼接/panorama_stitch.py` | Lab7 通用实现：柱面投影、SIFT + RANSAC、ECC 精化、接缝式或羽化融合 |
-| `全景图像拼接/hw7_pa.h` | 实验参考接口 |
-| `全景图像拼接/型号A_20261118_185337_712/stitch/` | 型号A TopCam1～4 现场脚本、完整结果、匹配图、接缝检查图和统计报告 |
-| `全景图像拼接/PanoramaJobClient.cs` | 主程序侧非阻塞任务客户端，负责等待图片落盘、排队和状态展示 |
-| `全景图像拼接/JustSmart.PanoramaWorker/` | .NET Framework 4.8 / OpenCvSharp 独立拼接工作进程 |
-| `全景图像拼接/output/` | Lab7 两组数据的已有全景结果及参考实现对比图 |
-| `全景图像拼接/multi-camera-image-stitching-main/` | 模块化参考实现：接缝优化、柱面投影、网格光照补偿 |
-| `全景图像拼接/panorama-stitching-main/` | 第三方全景拼接参考工程及多组示例数据 |
-| `全景图像拼接/参考资料/`、`压缩包/` | 算法资料、原始数据与参考源码压缩包 |
+| `src/panorama_stitch.py` | Lab7 通用实现：柱面投影、SIFT + RANSAC、ECC 精化、接缝式或羽化融合 |
+| `src/hw7_pa.h` | 实验参考接口 |
+| `assets/型号A_20261118_185337_712/stitch/` | 型号A TopCam1～4 现场脚本、完整结果、匹配图、接缝检查图和统计报告 |
+| `src/PanoramaJobClient.cs` | 主程序侧非阻塞任务客户端，负责等待图片落盘、排队和状态展示 |
+| `src/JustSmart.PanoramaWorker/` | .NET Framework 4.8 / OpenCvSharp 独立拼接工作进程 |
+| `src/output/` | Lab7 两组数据的全景结果（运行脚本后生成） |
+| `assets/multi-camera-image-stitching-main/` | 模块化参考实现：接缝优化、柱面投影、网格光照补偿 |
+| `assets/panorama-stitching-main/` | 第三方全景拼接参考工程及多组示例数据 |
+| `docs/`、`assets/压缩包/` | 算法资料、原始数据与参考源码压缩包 |
 
 ## 型号A 顶面相机结果
 
@@ -28,12 +28,12 @@ TopCam4 → TopCam3 → TopCam2 → TopCam1
 
 默认以 0.5 尺度处理，输出 **8762 × 2091** 的全景图；三组相邻画面的重叠率为 **24.2%～29.0%**。结果、匹配可视化和接缝检查图均已保存在现场脚本的 `output/` 目录。
 
-![型号A 顶面四相机拼接预览](全景图像拼接/型号A_20261118_185337_712/stitch/output/topcam_panorama_preview.jpg)
+![型号A 顶面四相机拼接预览](assets/型号A_20261118_185337_712/stitch/output/topcam_panorama_preview.jpg)
 
 复现命令：
 
 ```bash
-cd 全景图像拼接/型号A_20261118_185337_712/stitch
+cd assets/型号A_20261118_185337_712/stitch
 uv run --no-project --with opencv-python --with numpy python stitch_topcam.py
 
 # 使用原图分辨率处理
@@ -53,9 +53,9 @@ uv run --no-project --with opencv-python --with numpy python stitch_topcam.py --
 5. 根据像素到有效区域边界的距离加权融合，默认采用高次幂接缝式权重，最后裁去黑边。
 
 ```bash
-cd 全景图像拼接
+cd src
 
-# 将 panorama-data1.zip、panorama-data2.zip 解压到当前目录后，一次处理两组数据
+# 将 ../assets/压缩包/panorama-data1.zip、panorama-data2.zip 解压到当前目录后，一次处理两组数据
 uv run --with opencv-python --with numpy python panorama_stitch.py
 
 # 指定数据集与输出路径；目录内需包含图片和记录焦距的 K.txt
@@ -89,6 +89,41 @@ C# 工作进程面向工业检测场景，主流程不等待拼接完成：
 - 特征匹配不可靠时，工作进程使用灰度归一化互相关模板搜索兜底；SideBCam 第一对允许尺度搜索。
 - 工作进程无连接空闲 10 分钟后退出；日志位于系统临时目录的 `JustSmart_PanoramaWorker.log`，任务状态位于 `JustSmart_PanoramaStatus/`。
 - 构建目标为 **.NET Framework 4.8、x64**，依赖 OpenCvSharp 4.11 和 Google.Protobuf 3.17.1。项目输出路径指向解决方案中的 `JustSmart.App`，因此需在主程序解决方案环境中构建部署。
+
+## 像素级融合加速：AVX2 与 AMD GPU
+
+`src/JustSmart.PanoramaWorker/avx2/` 与 `src/JustSmart.PanoramaWorker/rocm/` 是独立于 C# 主流程的融合内核实验，目标相同：Deghost 单对逐像素融合，包括增益应用、缝合带 smoothstep 过渡和色差一致性选择。基准中增益、缝合线与色差图均为预计算，配准与 DP 缝合线不计入耗时。
+
+### 编译方式
+
+两个目录沿用 SUMMARY 的 Zig 构建方式（Zig 0.16，通过 `uv tool install ziglang` 安装）：
+
+```powershell
+cd src/JustSmart.PanoramaWorker/avx2
+python-zig build -Doptimize=ReleaseFast    # 产出 zig-out/bin/fusion_avx2.exe
+
+cd ../rocm
+python-zig build -Doptimize=ReleaseFast    # 产出 zig-out/bin/fusion_opencl.exe
+```
+
+- `build.zig` 使用 `addCSourceFile` + `link_libcpp`，C++17；AVX2 使用 `-mavx2 -O3`。
+- `rocm` 目录通过 `LoadLibrary("OpenCL.dll")` 动态获取函数指针，无需 OpenCL.lib。
+- 本机 Radeon 630 为 gfx804，ROCm 6.4 的 `hipInfo` 报告无可用设备，因此 GPU 后端实际使用 AMD 驱动自带的 OpenCL 2.0 运行时。
+- Zig 构建的控制台程序在输出被重定向时需要 `setvbuf(stdout, NULL, _IONBF, 0)`，否则缓冲区不会及时刷新。
+
+### 基准结果
+
+输入为型号A TopCam4→3、3→2、2→1 三对图像在 0.5 尺度下配准后的图层（画布 8763×2092），每组 15 次取中位数：
+
+| 实现 | 4→3 | 3→2 | 2→1 | 合计 |
+| --- | --- | --- | --- | --- |
+| 标量 C++ | 131.00 ms | 122.84 ms | 119.51 ms | 373.35 ms |
+| AVX2 | 52.55 ms | 55.30 ms | 52.52 ms | 160.37 ms |
+| AMD GPU（内核） | 7.31 ms | 7.26 ms | 7.31 ms | 21.88 ms |
+
+- AVX2 相对标量 **2.33×**；GPU 内核相对标量 **17.1×**，相对 AVX2 **7.3×**。
+- 输出核对：AVX2 与标量、GPU 与 AVX2 的最大差均为 1，属于浮点与舍入差异。
+- GPU 单对上传约 151–168 ms、回读约 84–86 ms，端到端约 250–260 ms，单次任务仍慢于 AVX2；GPU 仅在数据常驻显存或批量任务摊薄传输时占优。
 
 ## 算法边界
 
