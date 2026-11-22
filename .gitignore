@@ -22,6 +22,10 @@ JustSmart.PanoramaWorker/obj/
 *.user
 *.suo
 
+# Zig 构建产物（AVX2 / OpenCL 加速模块）
+.zig-cache/
+zig-out/
+
 # 编辑器与系统文件
 .idea/
 .vscode/
