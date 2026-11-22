@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using Google.Protobuf;
@@ -29,6 +29,7 @@ namespace JustSmart.Panorama
         public const int TagStamp = 6;
         public const int TagGroups = 7;
         public const int TagTimestamp = 8;
+        public const int TagAlgorithm = 9;
 
         // PanoramaGroupMessage
         public const int TagGroupName = 1;
@@ -86,6 +87,11 @@ namespace JustSmart.Panorama
                     output.WriteTag(TagTimestamp, WireFormat.WireType.Varint);
                     output.WriteInt64(job.TimestampMs);
                 }
+                if ((int)job.Algorithm != 0)
+                {
+                    output.WriteTag(TagAlgorithm, WireFormat.WireType.Varint);
+                    output.WriteInt32((int)job.Algorithm);
+                }
                 output.Flush();
                 return stream.ToArray();
             }
@@ -123,6 +129,9 @@ namespace JustSmart.Panorama
                         break;
                     case TagTimestamp:
                         job.TimestampMs = input.ReadInt64();
+                        break;
+                    case TagAlgorithm:
+                        job.Algorithm = (PanoramaAlgorithmId)input.ReadInt32();
                         break;
                     default:
                         input.SkipLastField();
@@ -292,6 +301,7 @@ namespace JustSmart.Panorama
             Groups = new List<PanoramaGroupMessage>();
             ImageFormat = "PNG";
             JpegQuality = 92;
+            Algorithm = PanoramaAlgorithmId.Baseline;
         }
 
         public long JobId { get; set; }
@@ -302,6 +312,7 @@ namespace JustSmart.Panorama
         public string Stamp { get; set; }
         public List<PanoramaGroupMessage> Groups { get; private set; }
         public long TimestampMs { get; set; }
+        public PanoramaAlgorithmId Algorithm { get; set; }
     }
 
     /// <summary>一组按物理从左到右排列的相机图像（TopCam / SideBCam）。</summary>
@@ -321,5 +332,14 @@ namespace JustSmart.Panorama
     {
         public string CameraName { get; set; }
         public string FilePath { get; set; }
+    }
+    /// <summary>
+    /// 拼接算法标识（IPC 线格式用；值与主程序 JustSmart.App.CameraWork.PanoramaAlgorithm 对齐）。
+    /// </summary>
+    public enum PanoramaAlgorithmId
+    {
+        Baseline = 0,
+        Deghost = 1,
+        Kornia = 2
     }
 }

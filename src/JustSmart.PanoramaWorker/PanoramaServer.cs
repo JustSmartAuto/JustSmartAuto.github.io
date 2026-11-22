@@ -267,7 +267,19 @@ namespace JustSmart.Panorama
                     group.GroupName,
                     StringComparison.OrdinalIgnoreCase
                 );
-                if (!PanoramaStitcher.TryStitch(images, names, out panorama, out pairs, 1.0, Ramp, Sharpness, allowScaleFallback))
+
+                // 算法选择：Kornia 占位未实现，降级为 Baseline 并记日志
+                PanoramaAlgorithmId algo = job.Algorithm;
+                if (algo == PanoramaAlgorithmId.Kornia)
+                {
+                    PanoramaProtocol.Trace(
+                        "任务 " + job.JobId + " 分组 " + group.GroupName
+                        + " 请求 Kornia 算法（占位），降级为 Baseline");
+                    algo = PanoramaAlgorithmId.Baseline;
+                }
+
+                if (!PanoramaStitcher.TryStitch(images, names, out panorama, out pairs,
+                    1.0, Ramp, Sharpness, allowScaleFallback, algo))
                 {
                     PanoramaProtocol.Trace("分组 " + group.GroupName + " 拼接失败");
                     return false;

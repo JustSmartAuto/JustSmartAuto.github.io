@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using OpenCvSharp;
 using OpenCvSharp.Features2D;
@@ -74,7 +74,8 @@ namespace JustSmart.Panorama
             double scale = 0.5,
             int ramp = 80,
             int sharpness = 4,
-            bool allowScaleFallback = false
+            bool allowScaleFallback = false,
+            PanoramaAlgorithmId algorithm = PanoramaAlgorithmId.Baseline
         )
         {
             panorama = null;
@@ -171,7 +172,9 @@ namespace JustSmart.Panorama
                     }
                 }
 
-                panorama = Blend(scaled, transforms, ramp, sharpness);
+                panorama = algorithm == PanoramaAlgorithmId.Deghost
+                    ? BlendDeghostSequential(scaled, transforms, ramp)
+                    : Blend(scaled, transforms, ramp, sharpness);
                 return panorama != null;
             }
             catch (Exception)
@@ -675,6 +678,461 @@ namespace JustSmart.Panorama
                 shift.Dispose();
             }
         }
+
+// ============================================================================
+// 去鬼影融合（论文：瞿中等 2015）
+//   增益匹配 → 最佳缝合线 DP → 限定区 smoothstep 融合 → 一致性选择
+// ============================================================================
+
+/// <summary>
+/// 顺序式去鬼影融合：逐对融合，每对执行增益匹配 + 最佳缝合线 DP + 限定区 smoothstep 融合。
+/// 配准（images/transforms 已由上层 SIFT+RANSAC+ECC 算好）；此方法专注融合。
+/// </summary>
+private static Mat BlendDeghostSequential(
+    List<Mat> images,
+    List<Mat> transforms,
+    int feather)
+{
+    if (images == null || images.Count == 0) return null;
+    feather = Math.Max(feather, 10);
+
+    // 1. 计算画布边界（与 Blend 同逻辑）
+    double minX = double.MaxValue, minY = double.MaxValue;
+    double maxX = double.MinValue, maxY = double.MinValue;
+    for (int i = 0; i < images.Count; i++)
+    {
+        Mat t = transforms[i];
+        int h = images[i].Rows, w = images[i].Cols;
+        Point2d[] corners = new[]
+        {
+            new Point2d(0, 0), new Point2d(w, 0), new Point2d(w, h), new Point2d(0, h)
+        };
+        foreach (Point2d p in corners)
+        {
+            double x = t.At<double>(0, 0) * p.X + t.At<double>(0, 1) * p.Y + t.At<double>(0, 2);
+            double y = t.At<double>(1, 0) * p.X + t.At<double>(1, 1) * p.Y + t.At<double>(1, 2);
+            if (x < minX) minX = x; if (y < minY) minY = y;
+            if (x > maxX) maxX = x; if (y > maxY) maxY = y;
+        }
+    }
+    int canvasW = (int)Math.Ceiling(maxX - Math.Floor(minX));
+    int canvasH = (int)Math.Ceiling(maxY - Math.Floor(minY));
+    if (canvasW <= 0 || canvasH <= 0 || (long)canvasW * canvasH > 400_000_000L)
+        return null;
+
+    Mat shift = Identity3();
+    shift.Set(0, 2, -Math.Floor(minX));
+    shift.Set(1, 2, -Math.Floor(minY));
+
+    try
+    {
+        // 2. 把所有图 warp 到画布坐标 + 生成有效 mask
+        var placedList = new List<Mat>();
+        var maskList = new List<Mat>();
+        try
+        {
+            for (int i = 0; i < images.Count; i++)
+            {
+                Mat placed = new Mat();
+                Mat mask = new Mat();
+                Mat full = Mul3(shift, transforms[i]);
+                try
+                {
+                    Mat m23;
+                    using (Mat roi = new Mat(full, new Rect(0, 0, 3, 2)))
+                    {
+                        m23 = roi.Clone();
+                    }
+                    try
+                    {
+                        using (m23)
+                        {
+                            Cv2.WarpAffine(images[i], placed, m23,
+                                new Size(canvasW, canvasH),
+                                InterpolationFlags.Linear, BorderTypes.Constant, Scalar.All(0));
+                        }
+                        // mask: 非零像素为 255
+                        Cv2.CvtColor(placed, mask, ColorConversionCodes.BGR2GRAY);
+                        Cv2.Threshold(mask, mask, 0, 255, ThresholdTypes.Binary);
+                    }
+                    finally { m23?.Dispose(); }
+                }
+                finally { full.Dispose(); }
+                placedList.Add(placed);
+                maskList.Add(mask);
+            }
+
+            // 3. 顺序融合：prev = placed[0]，依次跟 placed[i] 融合
+            Mat prev = placedList[0].Clone();
+            Mat prevMask = maskList[0].Clone();
+            try
+            {
+                for (int i = 1; i < placedList.Count; i++)
+                {
+                    Mat cur = placedList[i];
+                    Mat curMask = maskList[i];
+                    Mat fused = FusePairDeghost(prev, prevMask, cur, curMask, feather);
+                    if (fused == null)
+                    {
+                        // Deghost 失败（极端情况），退化为简单羽化
+                        PanoramaProtocol.Trace("Deghost 配对 " + i + " 失败，退化为 Baseline 融合");
+                        fused = FusePairFeather(prev, prevMask, cur, curMask, feather);
+                        if (fused == null) return null;
+                    }
+                    prev.Dispose();
+                    prev = fused;
+                    // 融合后的 mask = 两者的并集（简化：直接用 curMask 覆盖 prevMask 上无效区域）
+                    Mat newMask = new Mat();
+                    Cv2.BitwiseOr(prevMask, curMask, newMask);
+                    prevMask.Dispose();
+                    prevMask = newMask;
+                }
+                return CropBlack(prev);
+            }
+            finally
+            {
+                prev?.Dispose();
+                prevMask?.Dispose();
+            }
+        }
+        finally
+        {
+            foreach (Mat m in placedList) m.Dispose();
+            foreach (Mat m in maskList) m.Dispose();
+        }
+    }
+    catch (Exception ex)
+    {
+        PanoramaProtocol.Trace("BlendDeghostSequential 异常: " + ex.Message);
+        return null;
+    }
+    finally
+    {
+        shift.Dispose();
+    }
+}
+
+/// <summary>
+/// Deghost 配对融合：增益匹配 + 最佳缝合线 DP + smoothstep + 一致性选择。
+/// </summary>
+private static Mat FusePairDeghost(
+    Mat prev, Mat prevMask,
+    Mat cur, Mat curMask,
+    int feather)
+{
+    int H = prev.Rows, W = prev.Cols;
+    Mat overlapMask = new Mat();
+    Cv2.BitwiseAnd(prevMask, curMask, overlapMask);
+    if (Cv2.CountNonZero(overlapMask) < 100)
+    {
+        // 几乎无重叠，直接 cur 覆盖 prev（curMask 区域）
+        Mat result = prev.Clone();
+        cur.CopyTo(result, curMask);
+        overlapMask.Dispose();
+        return result;
+    }
+
+    try
+    {
+        // 1. 增益匹配（逐通道，重叠区内中值比）
+        double[] gain = EstimateGain(prev, cur, overlapMask);
+        Mat curGain = cur.Clone();
+        for (int c = 0; c < 3; c++)
+        {
+            double g = Math.Max(0.6, Math.Min(1.7, gain[c]));
+            if (Math.Abs(g - 1.0) > 1e-3)
+            {
+                Mat ch = new Mat();
+                Cv2.ExtractChannel(curGain, ch, c);
+                ch.ConvertTo(ch, MatType.CV_32FC1);
+                Cv2.Multiply(ch, g, ch);
+                ch.ConvertTo(ch, MatType.CV_8UC1);
+                Cv2.InsertChannel(ch, curGain, c);
+                ch.Dispose();
+            }
+        }
+
+        // 2. 代价图（颜色差 + 0.5 * Sobel 梯度差）
+        Mat prevGray = new Mat(); Mat curGray = new Mat();
+        Cv2.CvtColor(prev, prevGray, ColorConversionCodes.BGR2GRAY);
+        Cv2.CvtColor(curGain, curGray, ColorConversionCodes.BGR2GRAY);
+
+        Mat colorDiff = new Mat();
+        Cv2.Absdiff(prevGray, curGray, colorDiff);
+        colorDiff.ConvertTo(colorDiff, MatType.CV_32F);
+
+        Mat gx1 = new Mat(), gy1 = new Mat();
+        Mat gx2 = new Mat(), gy2 = new Mat();
+        Cv2.Sobel(prevGray, gx1, MatType.CV_32F, 1, 0, 3);
+        Cv2.Sobel(prevGray, gy1, MatType.CV_32F, 0, 1, 3);
+        Cv2.Sobel(curGray, gx2, MatType.CV_32F, 1, 0, 3);
+        Cv2.Sobel(curGray, gy2, MatType.CV_32F, 0, 1, 3);
+
+        Mat gxDiff = new Mat(); Mat gyDiff = new Mat();
+        Cv2.Absdiff(gx1, gx2, gxDiff);
+        Cv2.Absdiff(gy1, gy2, gyDiff);
+        Mat gradCost = new Mat();
+        Cv2.Add(gxDiff, gyDiff, gradCost);
+        Mat cost = new Mat();
+        Cv2.AddWeighted(colorDiff, 1.0, gradCost, 0.5, 0.0, cost); // CV_32F
+
+        // 非重叠区给高代价，强制缝合线留在重叠区内
+        Mat invMask = new Mat();
+        Cv2.BitwiseNot(overlapMask, invMask); // 非重叠区=255，重叠区=0
+        cost.SetTo(new Scalar(1e6), invMask);
+        invMask.Dispose();
+
+        // 3. 最佳缝合线 DP（每行 ±1 列，累计代价最小）
+        int[] seam = BestSeamDp(cost, W, H);
+
+        // 4. 融合：平滑权重 + 一致性选择
+        Mat result = prev.Clone();
+        // prevMask 外的区域，用 curGain 填充（直接 copy curGain where curMask>0 && prevMask==0）
+        // 同时对重叠区用加权融合
+        // 用逐像素处理：对每一行，seam_x 为缝合线位置
+        //   x < seam_x - feather → 全 prev
+        //   |x - seam_x| ≤ feather → smoothstep 权重
+        //   x > seam_x + feather → 全 curGain
+
+        var colorDiffArr = new byte[H * W];
+        colorDiff.ConvertTo(new Mat(H, W, MatType.CV_8U), MatType.CV_8U); // 不能直接用，重新算
+        // 简化：重新算一个 CV_8U 的颜色差供一致性选择
+        Mat colorDiffU8 = new Mat();
+        Cv2.Absdiff(prevGray, curGray, colorDiffU8);
+
+        unsafe
+        {
+            byte* pResult = (byte*)result.Data;
+            byte* pPrev = (byte*)prev.Data;
+            byte* pCur = (byte*)curGain.Data;
+            byte* pOverlap = (byte*)overlapMask.Data;
+            byte* pColDiff = (byte*)colorDiffU8.Data;
+
+            int diffThresh = 14; // 与 Python deghost_validate.py 一致
+            for (int y = 0; y < H; y++)
+            {
+                int sx = seam[y];
+                byte* rRow = pResult + y * W * 3;
+                byte* pRow = pPrev + y * W * 3;
+                byte* cRow = pCur + y * W * 3;
+                byte* oRow = pOverlap + y * W;
+                byte* dRow = pColDiff + y * W;
+                for (int x = 0; x < W; x++)
+                {
+                    bool inOverlap = oRow[x] > 0;
+                    bool curOnly = !inOverlap && curMask.At<byte>(y, x) > 0;
+                    bool prevOnly = !inOverlap && prevMask.At<byte>(y, x) > 0;
+
+                    if (prevOnly || (inOverlap && x < sx - feather))
+                    {
+                        // 全取 prev
+                        rRow[x * 3] = pRow[x * 3];
+                        rRow[x * 3 + 1] = pRow[x * 3 + 1];
+                        rRow[x * 3 + 2] = pRow[x * 3 + 2];
+                    }
+                    else if (curOnly || (inOverlap && x > sx + feather))
+                    {
+                        // 全取 curGain
+                        rRow[x * 3] = cRow[x * 3];
+                        rRow[x * 3 + 1] = cRow[x * 3 + 1];
+                        rRow[x * 3 + 2] = cRow[x * 3 + 2];
+                    }
+                    else if (inOverlap)
+                    {
+                        // 平滑过渡带 + 一致性选择
+                        int dist = Math.Abs(x - sx);
+                        double w = (feather <= 0) ? 0.0 :
+                            0.5 * (1.0 - Math.Cos(Math.PI * Math.Min(dist, feather) / feather));
+                        // smoothstep: w 从 0 (seam-feather) 到 1 (seam+feather)
+                        // 距离 seam 越远（更靠近 cur 侧），权重越高
+                        // 实际上 w = 0 在 seam-feather (prev 侧边界)，w = 1 在 seam+feather (cur 侧边界)
+                        // 所以：result = (1-w)*prev + w*curGain
+                        double wp = 1.0 - w; // prev 权重
+                        double wc = w;       // curGain 权重
+
+                        // 一致性选择：色差大时，取更靠近的一侧（不用平均）
+                        if (dRow[x] > diffThresh)
+                        {
+                            if (dist <= feather / 2.0) { wp = 1.0; wc = 0.0; }
+                            else { wp = 0.0; wc = 1.0; }
+                        }
+
+                        rRow[x * 3] = (byte)(wp * pRow[x * 3] + wc * cRow[x * 3]);
+                        rRow[x * 3 + 1] = (byte)(wp * pRow[x * 3 + 1] + wc * cRow[x * 3 + 1]);
+                        rRow[x * 3 + 2] = (byte)(wp * pRow[x * 3 + 2] + wc * cRow[x * 3 + 2]);
+                    }
+                    // 否则（两者都无效）保留原值
+                }
+            }
+        }
+
+        // 释放临时 Mat
+        curGain.Dispose(); prevGray.Dispose(); curGray.Dispose();
+        colorDiff.Dispose(); gx1.Dispose(); gy1.Dispose(); gx2.Dispose(); gy2.Dispose();
+        gxDiff.Dispose(); gyDiff.Dispose(); gradCost.Dispose(); cost.Dispose();
+        colorDiffU8.Dispose();
+        return result;
+    }
+    catch (Exception ex)
+    {
+        PanoramaProtocol.Trace("FusePairDeghost 异常: " + ex.Message);
+        return null;
+    }
+    finally { overlapMask.Dispose(); }
+}
+
+/// <summary>
+/// 增益匹配：重叠区逐通道计算中值比 prev/cur，clamp 到 [0.6, 1.7]。
+/// </summary>
+private static double[] EstimateGain(Mat prev, Mat cur, Mat overlapMask)
+{
+    var gains = new double[3];
+    Mat curCh = new Mat(); Mat prevCh = new Mat();
+    try
+    {
+        for (int c = 0; c < 3; c++)
+        {
+            Cv2.ExtractChannel(prev, prevCh, c);
+            Cv2.ExtractChannel(cur, curCh, c);
+
+            // 取重叠区像素
+            Mat prevRoi = new Mat(); Mat curRoi = new Mat();
+            prevCh.CopyTo(prevRoi, overlapMask);
+            curCh.CopyTo(curRoi, overlapMask);
+
+            if (prevRoi.Empty() || curRoi.Empty() || Cv2.CountNonZero(overlapMask) < 50)
+            {
+                gains[c] = 1.0;
+                prevRoi.Dispose(); curRoi.Dispose();
+                continue;
+            }
+
+            // 用平均值代替中值（更简单，效果近似）
+            Scalar pMean = Cv2.Mean(prevRoi);
+            Scalar cMean = Cv2.Mean(curRoi);
+            double pm = pMean.Val0;
+            double cm = cMean.Val0;
+            if (cm < 1e-3) gains[c] = 1.0;
+            else gains[c] = pm / cm;
+            gains[c] = Math.Max(0.6, Math.Min(1.7, gains[c]));
+
+            prevRoi.Dispose(); curRoi.Dispose();
+        }
+    }
+    finally { curCh.Dispose(); prevCh.Dispose(); }
+    return gains;
+}
+
+/// <summary>
+/// 最佳缝合线 DP：在 cost 图上找每行一条路径（允许 ±1 列跳变），累计代价最小。
+/// </summary>
+private static int[] BestSeamDp(Mat cost, int W, int H)
+{
+    int[] seam = new int[H];
+    unsafe
+    {
+        float* c = (float*)cost.Data;
+        // 动态规划：dp[y,x] = cost[y,x] + min(dp[y-1,x-1], dp[y-1,x], dp[y-1,x+1])
+        // 用两个 1D 数组滚动
+        float[] prevDp = new float[W];
+        float[] currDp = new float[W];
+        int[] parent = new int[W];
+
+        for (int x = 0; x < W; x++) prevDp[x] = c[x];
+
+        for (int y = 1; y < H; y++)
+        {
+            float* row = c + y * W;
+            for (int x = 0; x < W; x++)
+            {
+                float best = float.MaxValue;
+                int bestX = x;
+                for (int dx = -1; dx <= 1; dx++)
+                {
+                    int nx = x + dx;
+                    if (nx >= 0 && nx < W && prevDp[nx] < best)
+                    {
+                        best = prevDp[nx];
+                        bestX = nx;
+                    }
+                }
+                currDp[x] = row[x] + best;
+                parent[x] = bestX;
+            }
+            // swap
+            var tmp = prevDp; prevDp = currDp; currDp = tmp;
+        }
+
+        // 回朔：最后一行找最小值
+        int seamX = 0;
+        float minCost = float.MaxValue;
+        for (int x = 0; x < W; x++)
+        {
+            if (prevDp[x] < minCost) { minCost = prevDp[x]; seamX = x; }
+        }
+        seam[H - 1] = seamX;
+        for (int y = H - 2; y >= 0; y--)
+        {
+            seamX = parent[seamX];
+            seam[y] = seamX;
+        }
+    }
+    return seam;
+}
+
+/// <summary>
+/// 兜底：简单羽化融合（Deghost 失败时调用，与 Blend 逻辑同但只对两幅图）。
+/// </summary>
+private static Mat FusePairFeather(Mat prev, Mat prevMask, Mat cur, Mat curMask, int ramp)
+{
+    try
+    {
+        Mat distP = new Mat(); Mat wP = new Mat(); Mat wP3 = new Mat();
+        Mat distC = new Mat(); Mat wC = new Mat(); Mat wC3 = new Mat();
+
+        Cv2.DistanceTransform(prevMask, distP, DistanceTypes.L2, DistanceTransformMasks.Mask3);
+        distP.ConvertTo(wP, MatType.CV_32F, 1.0 / Math.Max(ramp, 1));
+        Cv2.Threshold(wP, wP, 1.0, 1.0, ThresholdTypes.Trunc);
+
+        Cv2.DistanceTransform(curMask, distC, DistanceTypes.L2, DistanceTransformMasks.Mask3);
+        distC.ConvertTo(wC, MatType.CV_32F, 1.0 / Math.Max(ramp, 1));
+        Cv2.Threshold(wC, wC, 1.0, 1.0, ThresholdTypes.Trunc);
+
+        Mat sumW = new Mat();
+        Cv2.Add(wP, wC, sumW);
+        Cv2.Add(sumW, Scalar.All(1e-6), sumW);
+        Cv2.Divide(wP, sumW, wP);
+        Cv2.Divide(wC, sumW, wC);
+
+        Cv2.Merge(new[] { wP, wP, wP }, wP3);
+        Cv2.Merge(new[] { wC, wC, wC }, wC3);
+
+        Mat prevF = new Mat(); Mat curF = new Mat();
+        Mat prodP = new Mat(); Mat prodC = new Mat();
+        prev.ConvertTo(prevF, MatType.CV_32FC3);
+        cur.ConvertTo(curF, MatType.CV_32FC3);
+        Cv2.Multiply(prevF, wP3, prodP);
+        Cv2.Multiply(curF, wC3, prodC);
+        Mat panoF = new Mat();
+        Cv2.Add(prodP, prodC, panoF);
+        Mat pano = new Mat();
+        panoF.ConvertTo(pano, MatType.CV_8UC3);
+
+        // 释放
+        distP.Dispose(); wP.Dispose(); wP3.Dispose();
+        distC.Dispose(); wC.Dispose(); wC3.Dispose();
+        sumW.Dispose(); prevF.Dispose(); curF.Dispose();
+        prodP.Dispose(); prodC.Dispose(); panoF.Dispose();
+
+        return pano;
+    }
+    catch (Exception ex)
+    {
+        PanoramaProtocol.Trace("FusePairFeather 异常: " + ex.Message);
+        return null;
+    }
+}
+// ============================================================================
 
         /// <summary>裁掉四周全黑区域。</summary>
         private static Mat CropBlack(Mat input)
