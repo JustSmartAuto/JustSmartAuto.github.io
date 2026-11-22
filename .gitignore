@@ -1,0 +1,30 @@
+# 第三方参考仓库（解压目录与源码压缩包，体积大且非本项目代码）
+assets/panorama-stitching-main/
+assets/multi-camera-image-stitching-main/
+assets/压缩包/panorama-stitching-main.zip
+assets/压缩包/multi-camera-image-stitching-main.zip
+
+# 课程数据集解压目录（保留 压缩包/ 中的原始 zip）
+panorama-data1/
+panorama-data2/
+
+# Python 缓存、虚拟环境与拼接输出
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+/output/
+
+# C# 构建产物
+JustSmart.PanoramaWorker/bin/
+JustSmart.PanoramaWorker/obj/
+.vs/
+*.user
+*.suo
+
+# 编辑器与系统文件
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
