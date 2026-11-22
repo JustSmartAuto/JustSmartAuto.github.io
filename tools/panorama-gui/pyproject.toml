@@ -1,0 +1,17 @@
+[project]
+name = "panorama-gui"
+version = "0.1.0"
+description = "Claude 风格的全景图融合桌面工具：拖入图片、排序、一键融合导出 JPEG"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "opencv-python>=4.10",
+    "numpy>=2.0",
+    "Pillow>=10.0",
+    "tkinterdnd2>=0.4.2",
+]
+
+[dependency-groups]
+dev = ["pyinstaller>=6.10"]
+
+[tool.uv]
+package = false

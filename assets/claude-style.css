@@ -1,0 +1,223 @@
+/* ============================================================
+   Claude 风格设计规范 — Warm Minimalist（温暖极简）
+   提取自 RemoteRipplePy 落地页，可独立引入使用：
+     <link rel="stylesheet" href="assets/claude-style.css" />
+   ============================================================ */
+
+/* ---------- 设计令牌 ---------- */
+:root {
+  /* 背景与表面：柔和米白 / 暖白 */
+  --cream: #faf9f5;          /* 页面主背景 */
+  --cream-deep: #f0eee6;     /* 次级背景（代码块、内联代码） */
+  --card: #ffffff;           /* 卡片表面 */
+  --line: #e8e5dc;           /* 细分隔线 */
+
+  /* 文本 */
+  --ink: #29261b;            /* 主文本：暖墨色 */
+  --ink-soft: #6b6455;       /* 次文本 / 辅助说明 */
+
+  /* 品牌高亮：日出橙红 / 暖橘 */
+  --coral: #d97757;
+  --coral-deep: #c15f3c;     /* 悬停 / 强调加深 */
+
+  /* 形状与字距 */
+  --radius: 16px;            /* 卡片圆角 */
+  --radius-pill: 999px;      /* 胶囊按钮 */
+  --tracking-wide: 0.18em;   /* kicker 字距 */
+  --tracking-head: 0.1em;    /* 小标题字距 */
+}
+
+/* ---------- 基础排版：优良留白、宽松行距、适合长文阅读 ---------- */
+body {
+  font-family: "Georgia", "Songti SC", "SimSun", "Microsoft YaHei", serif;
+  background: var(--cream);
+  color: var(--ink);
+  line-height: 1.9;
+  letter-spacing: 0.01em;
+}
+
+/* 版心：窄栏、两侧留白充足 */
+.wrap {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 0 24px;
+}
+
+/* ---------- 组件 ---------- */
+
+/* 品牌小标（全大写、宽字距、橙红点缀） */
+.kicker {
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  font-size: 13px;
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--coral);
+  margin-bottom: 20px;
+}
+
+/* 大标题：衬线、克制、不抢眼 */
+h1 {
+  font-size: clamp(34px, 6vw, 52px);
+  font-weight: 400;
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+  margin-bottom: 24px;
+}
+h1 em {
+  font-style: normal;
+  color: var(--coral);
+}
+
+/* 导语 / 长文正文 */
+.lede {
+  font-size: 19px;
+  color: var(--ink-soft);
+  max-width: 560px;
+}
+
+/* 分节：细分隔线 + 宽松间距 */
+section {
+  padding: 48px 0;
+  border-top: 1px solid var(--line);
+}
+
+/* 小节标题：无衬线小字、字距拉开 */
+h2 {
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: var(--tracking-head);
+  color: var(--ink-soft);
+  margin-bottom: 28px;
+}
+
+/* 卡片网格 */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 16px;
+}
+
+/* 卡片：白底、细边框、圆角 */
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 24px 26px;
+}
+.card h3 {
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+.card p {
+  font-size: 14.5px;
+  color: var(--ink-soft);
+}
+.card .dot {
+  color: var(--coral);
+  margin-right: 6px;
+}
+
+/* 步骤列表：数字编号点缀橙红 */
+ol {
+  list-style: none;
+  counter-reset: step;
+  max-width: 560px;
+}
+ol li {
+  counter-increment: step;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  gap: 16px;
+  align-items: baseline;
+}
+ol li::before {
+  content: counter(step, decimal-leading-zero);
+  font-family: "Segoe UI", monospace;
+  font-size: 13px;
+  color: var(--coral);
+  flex: 0 0 auto;
+}
+
+/* 代码 */
+code {
+  font-family: "Cascadia Code", "Consolas", monospace;
+  font-size: 14px;
+  background: var(--cream-deep);
+  border-radius: 6px;
+  padding: 2px 8px;
+}
+pre {
+  background: var(--cream-deep);
+  border-radius: var(--radius);
+  padding: 20px 24px;
+  overflow-x: auto;
+  font-family: "Cascadia Code", "Consolas", monospace;
+  font-size: 14px;
+  line-height: 1.8;
+}
+pre .c {
+  color: var(--ink-soft);
+}
+pre .p {
+  color: var(--coral-deep);
+}
+
+/* 按钮：胶囊形，主按钮橙红填充，次按钮描边 */
+.cta {
+  display: inline-block;
+  background: var(--coral);
+  color: #fff;
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  font-size: 15px;
+  font-weight: 600;
+  text-decoration: none;
+  padding: 13px 32px;
+  border-radius: var(--radius-pill);
+  transition: background 0.2s;
+}
+.cta:hover {
+  background: var(--coral-deep);
+}
+.cta.ghost {
+  background: transparent;
+  color: var(--ink);
+  border: 1px solid var(--ink);
+  margin-left: 12px;
+}
+.cta.ghost:hover {
+  border-color: var(--coral);
+  color: var(--coral);
+}
+.actions {
+  margin-top: 36px;
+}
+
+/* 页脚 */
+footer {
+  padding: 40px 0 72px;
+  border-top: 1px solid var(--line);
+  color: var(--ink-soft);
+  font-size: 13.5px;
+}
+footer a {
+  color: var(--coral-deep);
+  text-decoration: none;
+}
+footer a:hover {
+  text-decoration: underline;
+}
+
+/* ---------- 响应式 ---------- */
+@media (max-width: 560px) {
+  section {
+    padding: 36px 0;
+  }
+  .cta.ghost {
+    margin-left: 0;
+    margin-top: 12px;
+  }
+}

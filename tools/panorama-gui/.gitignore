@@ -1,0 +1,13 @@
+# uv / Python
+.venv/
+__pycache__/
+*.py[cod]
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# 运行时输出（可按需提交）
+output/*.jpeg
+output/*.jpg
