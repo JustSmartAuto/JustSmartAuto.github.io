@@ -11,12 +11,13 @@
 //   6) 裁黑边（gray > 6 的包围盒）并输出 PNG。
 //
 // 与 C# 版的差异（均因为不依赖 OpenCV）：
-//   - 用灰度相关系数代替 ECC 精化与 cc 评分，未做 NCC 模板兜底；
+//   - 用灰度相关系数的由粗到细搜索代替 ECC 精化，并用同一指标给候选模型评分；
+//     未实现 NCC 模板兜底（SIFT 完全无匹配时直接判失败）；
 //   - 距离变换用精确欧氏 JFA 代替 OpenCV 的 3x3 掩膜近似。
 //
 // 用法：baseline_opencl <out.png> <img1> <img2> [img3 ...]
 //        [--scale=0.5] [--ramp=80] [--sharpness=4] [--maxk=20000]
-//        [--mininliers=20]
+//        [--mininliers=20] [--siftthr=4.0]
 
 #include <algorithm>
 #include <array>
@@ -423,6 +424,59 @@ double CorrelationScore(const std::vector<uint8_t>& ga, int wa, int ha,
     return cov / std::sqrt(vA * vB);
 }
 
+// 绕图像中心旋转 deg 度后左乘到模型上（保持 p_b = M * p_a 语义）。
+Affine2 RotateAbout(const Affine2& m, double deg, double cx, double cy) {
+    const double t = deg * 3.14159265358979323846 / 180.0;
+    const double cs = std::cos(t);
+    const double sn = std::sin(t);
+    const Mat3 r = {{cs, -sn, cx - cs * cx + sn * cy,
+                     sn,  cs, cy - sn * cx - cs * cy,
+                     0,   0,  1}};
+    return ToAffine(Mul3(r, FromAffine(m)));
+}
+
+// 以灰度相关系数为目标做由粗到细的局部搜索（代替 C# 的 ECC 精化）。
+// RANSAC 只能给出像素级初值，重复纹理场景下会稳定停在偏几十像素的次优峰上；
+// 这里在 ±80px / ±2° 内搜索，再用 ±10px / ±0.5° 细化，把模型拉到相关度峰顶。
+Affine2 RefineByCorrelation(const std::vector<uint8_t>& ga, int wa, int ha,
+                            const std::vector<uint8_t>& gb, int wb, int hb,
+                            const Affine2& init, double* outCc) {
+    const double cx = wa * 0.5;
+    const double cy = ha * 0.5;
+    Affine2 best = init;
+    double bestCc = CorrelationScore(ga, wa, ha, gb, wb, hb, best, 4);
+
+    struct Level {
+        double range;
+        double step;
+        double rotRange;
+        double rotStep;
+        int stride;
+    };
+    const Level levels[2] = {{80.0, 20.0, 2.0, 1.0, 8}, {10.0, 2.5, 0.5, 0.25, 4}};
+    for (const Level& lv : levels) {
+        const Affine2 base = best;
+        for (double dy = -lv.range; dy <= lv.range + 1e-9; dy += lv.step) {
+            for (double dx = -lv.range; dx <= lv.range + 1e-9; dx += lv.step) {
+                for (double dr = -lv.rotRange; dr <= lv.rotRange + 1e-9;
+                     dr += lv.rotStep) {
+                    Affine2 cand = RotateAbout(base, dr, cx, cy);
+                    cand.c += dx;
+                    cand.f += dy;
+                    const double cc =
+                        CorrelationScore(ga, wa, ha, gb, wb, hb, cand, lv.stride);
+                    if (cc > bestCc) {
+                        bestCc = cc;
+                        best = cand;
+                    }
+                }
+            }
+        }
+    }
+    *outCc = bestCc;
+    return best;
+}
+
 // ============================================================================
 // OpenCL：Blend 阶段内核
 // ============================================================================
@@ -668,6 +722,7 @@ int main(int argc, char** argv) {
     int sharpness = 4;
     int maxKeys = 20000;
     int minInliers = 20;
+    double siftThr = 4.0;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -682,6 +737,7 @@ int main(int argc, char** argv) {
             else if (const char* v3 = value("sharpness")) sharpness = std::atoi(v3);
             else if (const char* v4 = value("maxk")) maxKeys = std::atoi(v4);
             else if (const char* v5 = value("mininliers")) minInliers = std::atoi(v5);
+            else if (const char* v6 = value("siftthr")) siftThr = std::atof(v6);
             continue;
         }
         if (outPath.empty()) {
@@ -695,7 +751,7 @@ int main(int argc, char** argv) {
         std::printf(
             "usage: baseline_opencl <out.png> <img1> <img2> [img3 ...]\n"
             "       [--scale=0.5] [--ramp=80] [--sharpness=4] [--maxk=20000]\n"
-            "       [--mininliers=20]\n");
+            "       [--mininliers=20] [--siftthr=4.0]\n");
         return 2;
     }
     if (scale <= 0.0) scale = 1.0;
@@ -786,7 +842,7 @@ int main(int argc, char** argv) {
     const auto tExtract0 = std::chrono::steady_clock::now();
     for (ImageData& img : images) {
         img.keyCount = gpu.Extract(img.graySift, img.w, img.h, maxKeys, &img.meta,
-                                   &img.desc);
+                                   &img.desc, static_cast<float>(siftThr));
         if (img.keyCount > 0) {
             img.keys.resize(static_cast<size_t>(img.keyCount));
             Check(cl, cl.EnqueueReadBuffer(queue, img.meta, CL_TRUE, 0,
@@ -961,6 +1017,12 @@ int main(int argc, char** argv) {
                          static_cast<int>(k), static_cast<int>(k) + 1, bestCc);
             return 7;
         }
+
+        // 对胜出模型做灰度相关度精化（C# 用 ECC，这里不依赖 OpenCV 自实现）。
+        double refinedCc = bestCc;
+        bestModel = RefineByCorrelation(a.grayPlain, a.w, a.h, b.grayPlain, b.w, b.h,
+                                        bestModel, &refinedCc);
+        bestCc = refinedCc;
 
         // p_b = M * p_a；变换链使用逆变换（b -> a）。
         const Affine2 inv = InvertAffine(bestModel);
