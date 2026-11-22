@@ -2,7 +2,9 @@
 
 特性：
 - tkinterdnd2 拖入多张图片（文件或文件夹）
-- 列表内拖拽 / 上下按钮手动排序，或一键自动排序（OpenCV Stitcher）
+- 列表内拖拽 / 上下按钮手动排序，或一键自动排序（按重叠强度串链）
+- 两种融合算法：BASELINE 距离羽化 / DEGHOST 去鬼影（对齐 PanoramaStitcher.cs）
+- 融合在后台线程执行，进度条 + 预估剩余时间，不阻塞界面
 - 导出 融合图_{timestamp}.jpeg，质量 95
 - 运行：uv run python app.py；打包：uv run python build.py
 """
@@ -19,15 +21,16 @@ if sys.stderr is None:
 import datetime
 import queue
 import threading
+import time
 import traceback
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk
 
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
 import stitch_engine
-from theme import (BODY, CARD, CORAL, CORAL_DEEP, CREAM, CREAM_DEEP, FONT_CN,
-                   FONT_SANS, H1, H2, INK, INK_SOFT, KICKER, LEDE, LINE,
+from theme import (BODY, CARD, CORAL, CORAL_DEEP, CREAM, CREAM_DEEP, FONT_SANS,
+                   H1, H2, INK, INK_SOFT, KICKER, LEDE, LINE,
                    PillButton, RoundedCard)
 
 
@@ -46,6 +49,7 @@ class App:
         self.root = root
         self.images = []                  # list[str] 绝对路径，顺序即手动顺序
         self.sort_mode = tk.StringVar(value="auto")
+        self.algorithm = tk.StringVar(value=stitch_engine.ALGO_BASELINE)
         self.output_dir = tk.StringVar(value=DEFAULT_OUTPUT)
         self._q = queue.Queue()
         self._running = False
@@ -67,11 +71,39 @@ class App:
         except Exception:
             pass
         r.configure(bg=CREAM)
-        r.geometry("900x820")
-        r.minsize(760, 680)
+        # 按屏幕高度自适应，避免窗口底部落到任务栏之下（内容超出时内部滚动）
+        scr_h = r.winfo_screenheight()
+        win_h = max(560, min(900, scr_h - 150))
+        win_w = max(720, min(920, r.winfo_screenwidth() - 120))
+        r.geometry(f"{win_w}x{win_h}")
+        r.minsize(720, 520)
 
-        wrap = tk.Frame(r, bg=CREAM)
-        wrap.pack(fill="both", expand=True, padx=36, pady=32)
+        # 可滚动内容区：小屏时整体滚动，避免底部按钮 / 页脚被裁切
+        canvas = tk.Canvas(r, bg=CREAM, highlightthickness=0, bd=0)
+        vsb = tk.Scrollbar(r, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        self._scroll_canvas = canvas
+
+        outer = tk.Frame(canvas, bg=CREAM)
+        self._scroll_win = canvas.create_window((0, 0), window=outer, anchor="nw")
+
+        def _sync_scroll(_e=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _sync_width(e):
+            canvas.itemconfigure(self._scroll_win, width=e.width)
+
+        def _wheel(e):
+            canvas.yview_scroll(int(-e.delta / 120), "units")
+
+        outer.bind("<Configure>", _sync_scroll)
+        canvas.bind("<Configure>", _sync_width)
+        r.bind("<MouseWheel>", _wheel)
+
+        wrap = tk.Frame(outer, bg=CREAM)
+        wrap.pack(fill="both", expand=True, padx=36, pady=28)
 
         # 顶部：kicker + 大标题（"融合" 用珊瑚色强调，对应 h1 em）+ 导语
         tk.Label(wrap, text="PANORAMA · 全景融合", font=KICKER, fg=CORAL,
@@ -87,7 +119,7 @@ class App:
         self._build_image_card(wrap)
         self._build_action_card(wrap)
 
-        tk.Label(wrap, text="OpenCV 全景拼接 · 手动 / 自动排序 · JPEG 质量 95",
+        tk.Label(wrap, text="PanoramaStitcher 算法 · BASELINE / DEGHOST · JPEG 质量 95",
                  font=(FONT_SANS, 9), fg=INK_SOFT, bg=CREAM).pack(anchor="w", pady=(20, 0))
 
     def _build_image_card(self, parent):
@@ -106,7 +138,7 @@ class App:
         lf = tk.Frame(inner, bg=CARD)
         lf.pack(fill="x", pady=(10, 12))
         self.lb = tk.Listbox(
-            lf, height=8, bg=CARD, fg=INK, selectbackground=CORAL,
+            lf, height=6, bg=CARD, fg=INK, selectbackground=CORAL,
             selectforeground="#ffffff", font=(FONT_SANS, 11), borderwidth=0,
             highlightthickness=1, highlightbackground=LINE,
             highlightcolor=CORAL, activestyle="none", selectmode="extended")
@@ -118,9 +150,12 @@ class App:
         # 第一行控件：增删
         row1 = tk.Frame(inner, bg=CARD)
         row1.pack(fill="x")
-        PillButton(row1, "＋ 添加图片", self._on_add, primary=False, w=120, h=36).pack(side="left")
-        PillButton(row1, "移除选中", self._on_remove, primary=False, w=104, h=36).pack(side="left", padx=8)
-        PillButton(row1, "清空", self._on_clear, primary=False, w=72, h=36).pack(side="left")
+        self.btn_add = PillButton(row1, "＋ 添加图片", self._on_add, primary=False, w=120, h=36)
+        self.btn_add.pack(side="left")
+        self.btn_remove = PillButton(row1, "移除选中", self._on_remove, primary=False, w=104, h=36)
+        self.btn_remove.pack(side="left", padx=8)
+        self.btn_clear = PillButton(row1, "清空", self._on_clear, primary=False, w=72, h=36)
+        self.btn_clear.pack(side="left")
 
         # 第二行：排序
         row2 = tk.Frame(inner, bg=CARD)
@@ -143,16 +178,36 @@ class App:
         self.lb.bind("<ButtonPress-1>", self._lb_press)
         self.lb.bind("<B1-Motion>", self._lb_drag)
         self.lb.bind("<ButtonRelease-1>", self._lb_release)
+        # 列表上滚动滚轮时只滚列表，不带动整页
+        self.lb.bind("<MouseWheel>",
+                     lambda e: (self.lb.yview_scroll(int(-e.delta / 120), "units"),
+                                "break")[1])
 
     def _build_action_card(self, parent):
         card = RoundedCard(parent)
         card.pack(fill="x", pady=(16, 0))
         inner = card.inner
 
-        tk.Label(inner, text="输出", font=H2, fg=INK_SOFT, bg=CARD).pack(anchor="w")
+        # ---- 融合算法 ----
+        tk.Label(inner, text="融合算法", font=H2, fg=INK_SOFT, bg=CARD).pack(anchor="w")
+        algo_row = tk.Frame(inner, bg=CARD)
+        algo_row.pack(fill="x", pady=(8, 0))
+        self.btn_baseline = PillButton(algo_row, "BASELINE · 距离羽化",
+                                       self._set_baseline, primary=True, w=200, h=38)
+        self.btn_baseline.pack(side="left")
+        self.btn_deghost = PillButton(algo_row, "DEGHOST · 去鬼影",
+                                      self._set_deghost, primary=False, w=180, h=38)
+        self.btn_deghost.pack(side="left", padx=(8, 0))
+        self.algo_desc = tk.Label(inner, text="", font=(FONT_SANS, 9),
+                                  fg=INK_SOFT, bg=CARD, anchor="w")
+        self.algo_desc.pack(anchor="w", pady=(8, 0))
+
+        # ---- 输出 ----
+        tk.Label(inner, text="输出", font=H2, fg=INK_SOFT, bg=CARD).pack(
+            anchor="w", pady=(16, 0))
 
         out_row = tk.Frame(inner, bg=CARD)
-        out_row.pack(fill="x", pady=(8, 12))
+        out_row.pack(fill="x", pady=(8, 10))
         tk.Label(out_row, text="保存到：", font=BODY, fg=INK, bg=CARD).pack(side="left")
         self.out_entry = tk.Entry(out_row, textvariable=self.output_dir, font=BODY,
                                   fg=INK, bg=CREAM_DEEP, readonlybackground=CREAM_DEEP,
@@ -164,14 +219,29 @@ class App:
         tk.Label(inner, text="格式：JPEG · 质量 95 · 命名：融合图_{时间戳}.jpeg",
                  font=(FONT_SANS, 10), fg=INK_SOFT, bg=CARD).pack(anchor="w")
 
+        # ---- 进度 ----
+        ttk.Style(self.root).configure(
+            "Pano.Horizontal.TProgressbar",
+            troughcolor=CREAM_DEEP, background=CORAL, bordercolor=CREAM_DEEP,
+            lightcolor=CORAL, darkcolor=CORAL, thickness=10)
+        self.progress = ttk.Progressbar(inner, style="Pano.Horizontal.TProgressbar",
+                                        mode="determinate", maximum=100, value=0)
+        self.progress.pack(fill="x", pady=(16, 6))
+        self.progress_lbl = tk.Label(inner, text="0%", font=(FONT_SANS, 9),
+                                     fg=INK_SOFT, bg=CARD, anchor="w")
+        self.progress_lbl.pack(anchor="w")
+
+        # ---- 操作 ----
         act = tk.Frame(inner, bg=CARD)
-        act.pack(fill="x", pady=(16, 0))
+        act.pack(fill="x", pady=(14, 0))
         self.btn_stitch = PillButton(act, "开始融合", self._on_stitch,
                                      primary=True, w=180, h=50)
         self.btn_stitch.pack(side="left")
         self.status_lbl = tk.Label(act, text="就绪", font=BODY, fg=INK_SOFT, bg=CARD,
                                    anchor="w")
         self.status_lbl.pack(side="left", padx=16, fill="x", expand=True)
+
+        self._sync_algorithm_ui()
 
     # ---------------- 拖放 ----------------
     def _register_drop(self):
@@ -296,13 +366,36 @@ class App:
         self.sort_mode.set("auto")
         self.btn_auto.set_primary(True)
         self.btn_manual.set_primary(False)
-        self._set_status("自动排序：OpenCV 将按内容匹配自动确定顺序")
+        self._set_status("自动排序：按相邻重叠强度自动串链，再用所选算法融合")
 
     def _set_manual(self):
         self.sort_mode.set("manual")
         self.btn_manual.set_primary(True)
         self.btn_auto.set_primary(False)
-        self._set_status("手动排序：按当前列表从左到右依次融合")
+        self._set_status("手动排序：按当前列表从左到右依次配准融合")
+
+    # ---------------- 算法选择 ----------------
+    def _set_baseline(self):
+        if self._running:
+            return
+        self.algorithm.set(stitch_engine.ALGO_BASELINE)
+        self._sync_algorithm_ui()
+
+    def _set_deghost(self):
+        if self._running:
+            return
+        self.algorithm.set(stitch_engine.ALGO_DEGHOST)
+        self._sync_algorithm_ui()
+
+    def _sync_algorithm_ui(self):
+        deghost = self.algorithm.get() == stitch_engine.ALGO_DEGHOST
+        self.btn_deghost.set_primary(deghost)
+        self.btn_baseline.set_primary(not deghost)
+        self.algo_desc.config(text=(
+            "DEGHOST：增益匹配 + 最佳缝合线 DP + smoothstep 过渡，"
+            "运动物体处自动选边，避免重影。"
+            if deghost else
+            "BASELINE：SIFT 配准后按到有效边界的距离羽化加权，速度更快、接缝自然。"))
 
     # ---------------- 输出目录 ----------------
     def _on_change_dir(self):
@@ -322,6 +415,29 @@ class App:
     def _set_status(self, text):
         self.status_lbl.config(text=text)
 
+    def _set_progress(self, frac, eta_sec=None):
+        pct = max(0.0, min(1.0, frac)) * 100
+        self.progress["value"] = pct
+        if eta_sec is None:
+            self.progress_lbl.config(text=f"{pct:.1f}%")
+        else:
+            self.progress_lbl.config(
+                text=f"{pct:.1f}%  ·  预计剩余 {_fmt_duration(eta_sec)}")
+
+    def _set_controls_enabled(self, enabled):
+        for btn in (self.btn_stitch, self.btn_add, self.btn_remove, self.btn_clear,
+                    self.btn_up, self.btn_down, self.btn_auto, self.btn_manual,
+                    self.btn_baseline, self.btn_deghost):
+            btn.set_enabled(enabled)
+
+    @staticmethod
+    def _eta_for(started, frac):
+        """按已用时间线性外推剩余时间；进度过小时不显示。"""
+        if frac <= 0.12:
+            return None
+        elapsed = time.time() - started
+        return max(0.0, elapsed * (1.0 - frac) / frac)
+
     def _on_stitch(self):
         if self._running:
             return
@@ -336,45 +452,53 @@ class App:
             return
 
         self._running = True
-        self.btn_stitch.set_enabled(False)
+        self._set_progress(0.0)
+        self._set_controls_enabled(False)
         self.btn_stitch._text = "融合中…"
         self.btn_stitch._draw()
+        self._set_status("准备开始…")
         paths = list(self.images)
         mode = self.sort_mode.get()
-        t = threading.Thread(target=self._worker, args=(paths, mode, out_dir),
-                             daemon=True)
-        t.start()
+        algo = self.algorithm.get()
+        threading.Thread(target=self._worker, args=(paths, mode, algo, out_dir),
+                         daemon=True).start()
 
-    def _worker(self, paths, mode, out_dir):
+    def _worker(self, paths, mode, algo, out_dir):
+        started = time.time()
         try:
-            self._q.put(("status", "正在加载图片…"))
+            total = len(paths)
             imgs = []
-            for p in paths:
+            for i, p in enumerate(paths):
                 im = stitch_engine.imread_unicode(p)
                 if im is not None:
                     imgs.append(im)
+                frac = 0.05 * (i + 1) / total
+                self._q.put(("progress", frac, "正在加载图片…",
+                             self._eta_for(started, frac)))
             if len(imgs) < 2:
                 self._q.put(("result", False, "有效图片不足 2 张"))
                 return
 
-            if mode == "auto":
-                self._q.put(("status", "自动排序中：特征匹配与融合…"))
-                status, pano = stitch_engine.stitch_auto(imgs)
-                if status != 0:
-                    self._q.put(("result", False, stitch_engine.status_msg(status)))
-                    return
-            else:
-                self._q.put(("status", "按列表顺序配准与融合…"))
-                pano = stitch_engine.stitch_manual(imgs)
+            def on_progress(frac, text):
+                overall = 0.05 + 0.92 * frac
+                self._q.put(("progress", overall, text,
+                             self._eta_for(started, overall)))
+
+            pano = stitch_engine.stitch(
+                imgs, algorithm=algo, auto_order=(mode == "auto"),
+                progress=on_progress)
 
             ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             name = f"融合图_{ts}.jpeg"
             out = os.path.join(out_dir, name)
-            self._q.put(("status", f"正在保存 {name}（质量 95）…"))
+            self._q.put(("progress", 0.97, f"正在保存 {name}（质量 95）…", None))
             if not stitch_engine.imwrite_unicode(out, pano, quality=95):
                 self._q.put(("result", False, "保存失败"))
                 return
+            self._q.put(("progress", 1.0, "融合完成", 0.0))
             self._q.put(("result", True, out))
+        except stitch_engine.StitchError as ex:
+            self._q.put(("result", False, str(ex)))
         except Exception as ex:
             self._q.put(("result", False, f"{type(ex).__name__}: {ex}"))
 
@@ -382,14 +506,17 @@ class App:
         try:
             while True:
                 ev = self._q.get_nowait()
-                if ev[0] == "status":
-                    self._set_status(ev[1])
+                if ev[0] == "progress":
+                    _, frac, text, eta = ev
+                    self._set_progress(frac, eta)
+                    if text:
+                        self._set_status(text)
                 elif ev[0] == "result":
                     self._finish(ev[1], ev[2])
         except queue.Empty:
             pass
         if not self._closing:
-            self._after_id = self.root.after(150, self._poll_queue)
+            self._after_id = self.root.after(100, self._poll_queue)
 
     def _on_close(self):
         self._closing = True
@@ -403,14 +530,25 @@ class App:
     def _finish(self, ok, info):
         self._running = False
         self.btn_stitch._text = "开始融合"
-        self.btn_stitch.set_enabled(True)
+        self._set_controls_enabled(True)
+        self.btn_stitch._draw()
         if ok:
+            self._set_progress(1.0, 0.0)
             self._set_status("完成：" + os.path.basename(info))
             if messagebox.askyesno("融合完成", f"已保存：\n{info}\n\n是否打开所在文件夹？"):
                 self._on_open_dir()
         else:
             self._set_status("失败：" + info)
             messagebox.showerror("融合失败", info)
+
+
+def _fmt_duration(seconds):
+    seconds = int(max(0, seconds))
+    minutes, sec = divmod(seconds, 60)
+    if minutes >= 60:
+        hours, minutes = divmod(minutes, 60)
+        return f"{hours:d}:{minutes:02d}:{sec:02d}"
+    return f"{minutes:02d}:{sec:02d}"
 
 
 def _diag(msg):

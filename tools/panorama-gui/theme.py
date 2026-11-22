@@ -95,6 +95,8 @@ class RoundedCard(tk.Canvas):
         round_rect(self, (0, 0, w - 1, h - 1), self._r,
                    fill=self._fill, outline=self._outline, tags="card")
         self.tag_lower("card")
+        # 卡片被 pack(fill=x) 拉伸后，让内部 Frame 也铺满（否则子控件只在自然宽度内）
+        self.itemconfigure(self._win, width=max(1, w - 2 * self._pad))
 
 
 class PillButton(tk.Canvas):
