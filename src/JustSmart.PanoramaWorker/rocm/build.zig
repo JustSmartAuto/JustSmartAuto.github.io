@@ -19,4 +19,20 @@ pub fn build(b: *std.Build) void {
     exe.root_module.link_libcpp = true;
 
     b.installArtifact(exe);
+
+    const sift = b.addExecutable(.{
+        .name = "sift_opencl",
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    sift.root_module.addCSourceFile(.{
+        .file = b.path("sift_opencl.cpp"),
+        .flags = &.{ "-std=c++17", "-O3" },
+    });
+    sift.root_module.link_libcpp = true;
+
+    b.installArtifact(sift);
 }
